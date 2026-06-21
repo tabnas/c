@@ -578,6 +578,10 @@ func makeGrammarRefs(opts COptions) map[tabnas.FuncRef]any {
 		pushTokenWithTrivia(ruleNode(r), r.C0)
 	})
 
+	// --- new-path structured dispatch (declarations, declarators,
+	// specifiers, struct/union/enum, initializers, statements) ---------
+	registerNewPathRefs(regFns{cond: cond, action: action, state: state}, extended)
+
 	return ref
 }
 

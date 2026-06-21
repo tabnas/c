@@ -153,10 +153,22 @@ var assignNames = map[string]bool{
 
 // evaluateCExpr converts an @tabnas/expr Op node + evaluated terms into the C
 // CST shape. Port of evaluateCExpr in expr-grammar.ts.
-func evaluateCExpr(_ *tabnas.Rule, _ *tabnas.Context, op *tabnasexpr.Op, terms []any) any {
+func evaluateCExpr(rule *tabnas.Rule, _ *tabnas.Context, op *tabnasexpr.Op, terms []any) any {
 	span := firstTermSpan(terms)
 
 	name := op.Name
+
+	// The Go @tabnas/expr plugin maps both the `call` (preval-active) and
+	// `paren` (preval-inactive) ops onto the same `(` tin, so only one wins
+	// parenOpenByTin and op.Name surfaces here as "paren-paren". Recover the
+	// call form from the preval flag the val rule sets when an atom
+	// immediately precedes `(` (see cParenPrevalAction / the c-call-preval
+	// alt): a preval `(` is a function call, a non-preval `(` is grouping.
+	if name == "paren-paren" && rule != nil && rule.U != nil {
+		if pv, _ := rule.U["paren_preval"].(bool); pv {
+			name = "call-paren"
+		}
+	}
 
 	if name == "comma-infix" || name == "comma" {
 		out := makeNode("comma_expression", span)
@@ -428,7 +440,10 @@ func installExpr(j *tabnas.Tabnas) error {
 		notInParen := tabnas.AltCond(func(r *tabnas.Rule, _ *tabnas.Context) bool {
 			return r.N["expr_paren"] == 0 && r.N["expr_ternary"] == 0
 		})
-		rs.AddClose(
+		// Prepend (TS uses rs.close([...]) which unshifts) so these
+		// pre-empt jsonic's implicit-list close behaviour, which would
+		// otherwise recurse into list/elem on an unmatched terminator.
+		rs.PrependClose(
 			&tabnas.AltSpec{S: single("PUNC_SEMI"), B: 1, G: "c-end-stmt"},
 			&tabnas.AltSpec{S: single("PUNC_COMMA"), C: notInParen, B: 1, G: "c-end-comma"},
 			&tabnas.AltSpec{S: single("PUNC_RPAREN"), B: 1, G: "c-end-paren"},
