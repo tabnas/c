@@ -2,41 +2,17 @@
 
 // Package tabnasc is the Go port of @tabnas/c — a Tabnas parser plugin
 // (layered on @tabnas/jsonic) that parses C source into a concrete syntax
-// tree, preserving macros and compiler extensions.
+// tree, preserving macros and compiler extensions. Port of ../ts/src/c.ts.
 //
-// STATUS: SCAFFOLD ONLY.
-//
-// The canonical implementation is the TypeScript package in ../ts (see
-// ../ts/src/c.ts and the embedded ../ts/c-grammar.jsonic). This Go package
-// currently provides only the module wiring, the embedded grammar, and the
-// plugin/helper signatures. The parsing logic — the ~10.6k lines of lex
-// matchers, symbol/macro tables, the @-named ref map, the structure
-// post-processor and the expression evaluation — has NOT been ported yet.
-//
-// The intended porting map (TS module -> Go file) is:
-//
-//	ts/src/tokens.ts             -> tokens.go              (token catalog)
-//	ts/src/symbols.ts            -> symbols.go             (SymbolTable / MacroTable)
-//	ts/src/matchers.ts           -> matchers.go            (lex matchers)
-//	ts/src/conditional-groups.ts -> conditional_groups.go  (#if folding post-pass)
-//	ts/src/expr.ts               -> expr.go                (C operator catalog)
-//	ts/src/expr-grammar.ts       -> expr_grammar.go        (Expr wiring + evaluateCExpr,
-//	                                                        incl. the val after-close
-//	                                                        restore — see AGENTS.md)
-//	ts/src/structure.ts          -> structure.go           (legacy-fallback post-processor)
-//	ts/src/c.ts                  -> c.go                   (plugin entry + ref map)
-//	ts/test/c.test.ts            -> c_test.go              (parse cases)
-//	ts/test/csmith*.ts           -> csmith_test.go         (CSmith corpus replay)
+// STATUS: in progress. The lexer (token catalog, custom matchers, symbol/
+// macro tables, lex-mode state) is ported; the grammar rule map and the
+// legacy structuring post-processor are still being translated. See
+// AGENTS.md for the milestone breakdown.
 package tabnasc
 
 import (
 	_ "embed"
-	"errors"
 
-	// Engine + grammar siblings. tabnas is the parsing engine; jsonic
-	// supplies the relaxed-JSON grammar the C grammar is layered on;
-	// tabnasexpr supplies the Pratt-style expression machinery.
-	tabnasexpr "github.com/tabnas/expr/go"
 	jsonic "github.com/tabnas/jsonic/go"
 	tabnas "github.com/tabnas/parser/go"
 )
@@ -44,24 +20,15 @@ import (
 // Version is the Go module version of this plugin. Mirrors ts/package.json.
 const Version = "0.2.0"
 
-// grammarText is the C grammar, single-sourced from c-grammar.jsonic.
-//
-// Unlike the smaller tabnas Go ports (e.g. zon) which inline the grammar as
-// a Go raw string, the C grammar contains backticks, so it is embedded from
-// the companion file at build time instead. embed-grammar.js (in ../ts)
-// copies ../ts/c-grammar.jsonic to ./c-grammar.jsonic so it stays in step
-// with the TypeScript build.
+// grammarText is the C grammar, single-sourced from c-grammar.jsonic (the TS
+// build copies it here). Embedded from file because the grammar contains
+// backticks, which rules out a Go raw-string literal.
 //
 //go:embed c-grammar.jsonic
 var grammarText string
 
 // Grammar returns the embedded C grammar text (jsonic-DSL source).
 func Grammar() string { return grammarText }
-
-// ErrNotImplemented is returned by the scaffold plugin until the Go port
-// is complete.
-var ErrNotImplemented = errors.New(
-	"tabnasc: Go port not yet implemented (scaffold only); use the @tabnas/c TypeScript package")
 
 // COptions are the plugin options. Mirrors the TypeScript COptions.
 type COptions struct {
@@ -71,54 +38,233 @@ type COptions struct {
 }
 
 // Defaults mirrors the TypeScript C.defaults.
-var Defaults = COptions{
-	Extended: false,
+var Defaults = COptions{Extended: false}
+
+func boolPtr(b bool) *bool { return &b }
+
+// resolveOptions merges the caller options map with defaults. Mirrors the TS
+// resolveOptions.
+func resolveOptions(opts map[string]any) COptions {
+	out := Defaults
+	if opts != nil {
+		if v, ok := opts["extended"].(bool); ok {
+			out.Extended = v
+		}
+	}
+	return out
 }
 
-// C is the Tabnas plugin entry point.
-//
-// SCAFFOLD: returns ErrNotImplemented. The full implementation will install
-// the token catalog, lex matchers, the embedded grammar (with its @-named
-// ref map), the conditional-group post-pass and the @tabnas/expr-driven
-// expression rules — see the porting map in the package doc.
+// specialTokenNames are the non-punctuator, non-keyword token names that need
+// stable tins (mirrors the registration list in c.ts).
+var specialTokenNames = []string{
+	"ID", "TYPEDEF_NAME", "MACRO_NAME",
+	"LIT_INT", "LIT_FLOAT", "LIT_CHAR", "LIT_STRING", "LIT_HEADER_NAME",
+	"PP_HASH", "PP_NEWLINE", "PP_RAW",
+	"TRIVIA_LINE_COMMENT", "TRIVIA_BLOCK_COMMENT", "TRIVIA_LINE_CONT",
+}
+
+// preserveTriviaNames are trivia tokens kept and attached to the next token.
+var preserveTriviaNames = map[string]bool{
+	"TRIVIA_LINE_COMMENT": true, "TRIVIA_BLOCK_COMMENT": true, "TRIVIA_LINE_CONT": true,
+}
+
+// dropTriviaNames are trivia tokens silently discarded.
+var dropTriviaNames = map[string]bool{
+	"#SP": true, "#LN": true, "#CM": true,
+}
+
+// anyCTokenNames returns the wildcard token-name set (ANY_C_TOKEN) used by the
+// external-declaration chomper.
+func anyCTokenNames() []string {
+	names := []string{
+		"ID", "TYPEDEF_NAME", "MACRO_NAME",
+		"LIT_INT", "LIT_FLOAT", "LIT_CHAR", "LIT_STRING", "LIT_HEADER_NAME",
+		"PP_HASH", "PP_NEWLINE", "PP_RAW",
+	}
+	for _, p := range Punctuators {
+		names = append(names, p.Name)
+	}
+	for _, kw := range C23Keywords {
+		names = append(names, KeywordTokenName(kw))
+	}
+	for _, kw := range ExtKeywords {
+		names = append(names, KeywordTokenName(kw))
+	}
+	return names
+}
+
+// kwTokenNames returns every keyword token name (the KW_TOKEN set).
+func kwTokenNames() []string {
+	out := make([]string, 0, len(C23Keywords)+len(ExtKeywords))
+	for _, kw := range C23Keywords {
+		out = append(out, KeywordTokenName(kw))
+	}
+	for _, kw := range ExtKeywords {
+		out = append(out, KeywordTokenName(kw))
+	}
+	return out
+}
+
+// C is the Tabnas plugin entry point. Port of the C plugin in c.ts.
 func C(j *tabnas.Tabnas, opts map[string]any) error {
-	_ = j
-	_ = opts
-	_ = grammarText
-	return ErrNotImplemented
+	resolveOptions(opts) // options consumed fully once the grammar lands (M3+)
+
+	// 1. Register punctuator + keyword token names with their fixed sources,
+	//    and the special token names, so every token has a stable tin. We
+	//    disable jsonic's built-in matchers and drive lexing with our own.
+	fixed := AllTokenNamesAndSources()
+	fixedTokenOpt := make(map[string]*string, len(fixed))
+	for name, src := range fixed {
+		s := src
+		fixedTokenOpt[name] = &s
+	}
+
+	j.SetOptions(tabnas.Options{
+		Fixed: &tabnas.FixedOptions{Lex: boolPtr(false), Token: fixedTokenOpt},
+		Space: &tabnas.SpaceOptions{Lex: boolPtr(false)},
+		Line:  &tabnas.LineOptions{Lex: boolPtr(false)},
+		Text:  &tabnas.TextOptions{Lex: boolPtr(false)},
+		Number: &tabnas.NumberOptions{Lex: boolPtr(false)},
+		String: &tabnas.StringOptions{Lex: boolPtr(false)},
+		Comment: &tabnas.CommentOptions{Lex: boolPtr(false)},
+		Value: &tabnas.ValueOptions{Lex: boolPtr(false)},
+		Match: &tabnas.MatchOptions{Lex: boolPtr(true)},
+		Rule:  &tabnas.RuleOptions{Start: "translation_unit", Finish: boolPtr(false)},
+	})
+
+	// Register special tokens (allocates stable tins).
+	for _, name := range specialTokenNames {
+		j.Token(name)
+	}
+
+	// Token sets referenced by the grammar. All names now resolve to tins.
+	j.SetOptions(tabnas.Options{
+		TokenSet: map[string][]string{
+			"IGNORE": {
+				"#SP", "#LN", "#CM",
+				"TRIVIA_LINE_COMMENT", "TRIVIA_BLOCK_COMMENT", "TRIVIA_LINE_CONT",
+			},
+			"ANY_C_TOKEN": anyCTokenNames(),
+			"SIMPLE_TYPE_HEAD": {
+				"KW_VOID", "KW_CHAR", "KW_SHORT", "KW_INT", "KW_LONG",
+				"KW_FLOAT", "KW_DOUBLE",
+				"KW_SIGNED", "KW_UNSIGNED",
+				"KW_BOOL", "KW__BOOL",
+				"KW___SIGNED__", "KW___SIGNED",
+				"KW___INT8", "KW___INT16", "KW___INT32", "KW___INT64",
+				"KW__COMPLEX", "KW__IMAGINARY",
+				"TYPEDEF_NAME",
+				"KW_CONST", "KW_VOLATILE", "KW_RESTRICT", "KW__ATOMIC",
+				"KW___CONST__", "KW___CONST",
+				"KW___VOLATILE__", "KW___VOLATILE",
+				"KW___RESTRICT__", "KW___RESTRICT",
+				"KW_STRUCT", "KW_UNION", "KW_ENUM",
+			},
+			"STORAGE_PREFIX": {
+				"KW_STATIC", "KW_EXTERN", "KW_TYPEDEF",
+				"KW_AUTO", "KW_REGISTER",
+				"KW__THREAD_LOCAL", "KW_THREAD_LOCAL", "KW_CONSTEXPR",
+				"KW___THREAD",
+				"KW_INLINE", "KW___INLINE__", "KW___INLINE",
+				"KW___EXTENSION__",
+			},
+			"C_ATOM": {
+				"LIT_INT", "LIT_FLOAT", "LIT_CHAR", "LIT_STRING",
+				"ID", "MACRO_NAME", "TYPEDEF_NAME",
+			},
+			"C_PAREN_OPEN": {"PUNC_LPAREN", "PUNC_LBRACKET"},
+			"KW_TOKEN":     kwTokenNames(),
+			"SIZEOF_KW": {
+				"KW_SIZEOF",
+				"KW__ALIGNOF", "KW_ALIGNOF",
+				"KW___ALIGNOF__", "KW___ALIGNOF",
+			},
+		},
+	})
+
+	// 2. Resolve every emittable token name to its tin and install the custom
+	//    lex matchers.
+	tinByName := make(map[string]tabnas.Tin)
+	for name := range fixed {
+		tinByName[name] = j.Token(name)
+	}
+	for _, name := range specialTokenNames {
+		tinByName[name] = j.Token(name)
+	}
+	for _, name := range []string{"#SP", "#LN", "#CM"} {
+		tinByName[name] = j.Token(name)
+	}
+
+	j.SetOptions(tabnas.Options{
+		Lex: &tabnas.LexOptions{Match: cMatchers(tinByName)},
+	})
+
+	// 3. Install the per-parse CMeta on ctx before parsing.
+	j.SetOptions(tabnas.Options{
+		Parse: &tabnas.ParseOptions{
+			Prepare: map[string]func(ctx *tabnas.Context){
+				"cmeta": func(ctx *tabnas.Context) {
+					if ctx.Meta == nil {
+						ctx.Meta = map[string]any{}
+					}
+					if _, ok := ctx.Meta["cmeta"]; !ok {
+						ctx.Meta["cmeta"] = MakeCMeta()
+					}
+				},
+			},
+		},
+	})
+
+	// 4. Sub-lex hook: buffer preserved trivia and attach it to the next
+	//    non-trivia token's Use["leading"], so comments survive in source
+	//    order even though the parser IGNOREs them.
+	j.Sub(func(tkn *tabnas.Token, _ *tabnas.Rule, ctx *tabnas.Context) {
+		if tkn == nil || ctx.Meta == nil {
+			return
+		}
+		m, ok := ctx.Meta["cmeta"].(*CMeta)
+		if !ok || m == nil {
+			return
+		}
+		if preserveTriviaNames[tkn.Name] {
+			m.PendingTrivia = append(m.PendingTrivia, tkn)
+			return
+		}
+		if dropTriviaNames[tkn.Name] {
+			return
+		}
+		if len(m.PendingTrivia) > 0 {
+			if tkn.Use == nil {
+				tkn.Use = map[string]any{}
+			}
+			tkn.Use["leading"] = m.PendingTrivia
+			m.PendingTrivia = nil
+		}
+	}, nil)
+
+	// TODO(M3+): parse and install the embedded grammar (with the @-ref map),
+	// strip extension rules when !extended, and install @tabnas/expr via the
+	// ported installExpr.
+
+	return nil
 }
 
-// MakeC builds a jsonic engine with the expression plugin and the C plugin
-// installed — the Go equivalent of `new Tabnas().use(jsonic).use(C)`.
-//
-// SCAFFOLD: the C plugin currently fails to install (ErrNotImplemented), so
-// the returned engine cannot yet parse C. The wiring shape is final.
+// MakeC builds a jsonic engine with the C plugin installed — the Go
+// equivalent of `new Tabnas().use(jsonic).use(C)`.
 func MakeC(opts ...map[string]any) (*jsonic.Jsonic, error) {
 	var pluginOpts map[string]any
 	if len(opts) > 0 {
 		pluginOpts = opts[0]
 	}
-
 	j := jsonic.Make()
-
-	// C drives expression parsing through @tabnas/expr; the operator table
-	// and evaluate callback will be supplied by the ported expr_grammar.go.
-	if err := j.Use(tabnasexpr.Expr); err != nil {
-		return j, err
-	}
-
 	if err := j.Use(C, pluginOpts); err != nil {
 		return j, err
 	}
-
 	return j, nil
 }
 
 // Parse is the one-call entry point: build a C-enabled engine and parse src.
-//
-// SCAFFOLD: returns ErrNotImplemented until the port lands.
 func Parse(src string, opts ...map[string]any) (any, error) {
-	_ = src
 	j, err := MakeC(opts...)
 	if err != nil {
 		return nil, err
