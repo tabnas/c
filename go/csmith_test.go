@@ -407,10 +407,11 @@ func TestCsmithCorpus(t *testing.T) {
 		}
 	}
 
-	// This is a PROGRESS TRACKER, not yet a gate: the Go port is mid-flight
-	// (structured top-level dispatch refs still being ported), so it logs the
-	// live N/100 parity rate without failing the build. It will become a hard
-	// gate (require N==total) once the port reaches parity. Only fail if the
-	// harness itself is broken (no corpus found), handled above.
-	t.Logf("csmith parity: %d/%d fixtures match (progress tracker; full parity is the goal)", pass, total)
+	// Hard gate: the Go port matches the TypeScript golden fixtures for the
+	// entire corpus. Every seed's serialized CST must equal its fixture.
+	t.Logf("csmith parity: %d/%d fixtures match", pass, total)
+	if pass != total {
+		t.Errorf("csmith parity regression: %d/%d fixtures match (want %d/%d)",
+			pass, total, total, total)
+	}
 }

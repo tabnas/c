@@ -4,15 +4,15 @@
 // (layered on @tabnas/jsonic) that parses C source into a concrete syntax
 // tree, preserving macros and compiler extensions. Port of ../ts/src/c.ts.
 //
-// STATUS: functional, parity in progress. The full architecture is ported —
-// lexer (matchers.go/tokens.go/symbols.go), CST helpers (cst.go), the
-// @tabnas/expr expression layer (expr_grammar.go), grammar install + ref map
+// STATUS: complete and at parity. The full architecture is ported — lexer
+// (matchers.go/tokens.go/symbols.go), CST helpers (cst.go), the @tabnas/expr
+// expression layer (expr_grammar.go), grammar install + ref map
 // (grammar_install.go/refs.go), conditional-group folding
-// (conditional_groups.go), the top-level chomp + preprocessor directives, and
-// the legacy recursive-descent structurer (structure.go + expr.go). Parse
-// produces structured CSTs. The remaining work is byte-for-byte parity with
-// the TypeScript CSmith golden fixtures (tracked by TestCsmithCorpus). See
-// AGENTS.md.
+// (conditional_groups.go), the top-level chomp + preprocessor directives, the
+// new-path structured dispatch (refs_newpath*.go), and the legacy
+// recursive-descent structurer (structure.go + expr.go). Parse produces
+// structured CSTs and TestCsmithCorpus matches the TypeScript golden fixtures
+// 100/100. See AGENTS.md.
 package tabnasc
 
 import (

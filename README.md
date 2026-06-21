@@ -344,24 +344,27 @@ regardless of which path produced it.
 
 ## Go port
 
-A Go port lives under [`go/`](go/) and is **functional but in progress**. The
-full architecture is ported and tested: the lexer, the `@tabnas/expr`-driven
-expression layer, the grammar install, the conditional-group post-pass, the
-top-level chomp + preprocessor directives, and the legacy recursive-descent
-structurer (`structure.go` + `expr.go`). `tabnasc.Parse(src)` /
-`tabnasc.MakeC()` parse C into structured concrete-syntax trees (declarations,
-function definitions, structs/enums, attributes, initializers, expressions),
-with typedef/macro tracking.
+A complete Go port lives under [`go/`](go/). The whole TypeScript parser is
+hand-translated: the lexer, the `@tabnas/expr`-driven expression layer, the
+grammar install, the conditional-group post-pass, the top-level chomp +
+preprocessor directives, the new-path structured dispatch (declarations,
+declarators, struct/union/enum, initializers, statements), and the legacy
+recursive-descent structurer. `tabnasc.Parse(src)` / `tabnasc.MakeC()` parse C
+into structured concrete-syntax trees with typedef/macro tracking.
 
-What's not yet done is full byte-for-byte **parity with the TypeScript
-CSmith golden fixtures** — `go test` includes a parity tracker
-(`TestCsmithCorpus`) reporting the live N/100 rate; the remaining gap is
-structural reconciliation of complex generated-C bodies. For production use,
-prefer the TypeScript package today.
+```go
+import tabnasc "github.com/tabnas/c/go"
 
-Two upstream `@tabnas/expr` (Go) fixes are required for deterministic
-expression parsing — see [`AGENTS.md`](AGENTS.md). Build/test the Go port with
-a `go.work` over the sibling `@tabnas` modules (see the CI workflow).
+cst, _ := tabnasc.Parse(`int f(int a){ return a + 1; }`, map[string]any{"extended": true})
+// cst["kind"] == "translation_unit"
+```
+
+**Parity:** `go test`'s `TestCsmithCorpus` is a hard gate and passes **100/100**
+against the TypeScript golden fixtures (the same `.json.gz` set the TS suite
+uses). Build/test the Go port with a `go.work` over the sibling `@tabnas`
+modules (see the CI note in [`AGENTS.md`](AGENTS.md)); one optional upstream
+`@tabnas/expr` sort fix makes the synthetic start=`val` precedence unit test
+deterministic (corpus parity is robust without it).
 
 ## License
 
