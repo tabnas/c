@@ -1,0 +1,83 @@
+# Path-dispatch shape catalog.
+#
+# Each row asserts that a given C source's first external_declaration
+# is produced by either the grammar path (`@finalize-new-path`) or
+# the legacy chomp path (`finalizeExternalDeclaration`). Both paths
+# emit identical CST shapes, so consumers don't care which fired —
+# but a silent reroute (e.g. someone widens @looks-simple-decl's
+# lookahead and a shape that used to flow through legacy now hits a
+# latent grammar bug) is exactly the regression these rows catch.
+#
+# Columns are tab-separated:
+#   src      C source. Single declaration unless declIdx is set.
+#   path     grammar | legacy | legacy-unknown
+#   declKind declaration | function_definition | unknown
+#   declIdx  optional 0-based index into translation_unit.children
+#            for sources that produce multiple external_declarations
+#   notes    free-form (ignored by the test)
+#
+# Lines starting with `#` and blank lines are skipped.
+#
+# Keep this file aligned with the dispatch logic in @looks-simple-decl
+# (src/c.ts). When you intentionally migrate a shape from legacy to
+# grammar (or vice versa), update its row here.
+
+# ---- grammar path: covered by simple_declaration + sub-rules ----
+int x;	grammar	declaration
+int *p;	grammar	declaration
+int **pp;	grammar	declaration
+int arr[10];	grammar	declaration
+int f(int);	grammar	declaration
+int a, b, c;	grammar	declaration
+int x = 1, y = 2;	grammar	declaration
+extern int x;	grammar	declaration
+volatile int x;	grammar	declaration
+typedef int Foo;	grammar	declaration
+int x = (int)0;	grammar	declaration
+
+# ---- grammar path: Phase P (function pointers) ----
+int (*fp)(int);	grammar	declaration	Phase P
+int (**fp)(int);	grammar	declaration	Phase P
+int (*fp)(void);	grammar	declaration	Phase P
+int (*fp)();	grammar	declaration	Phase P
+int (*fp)(char *s);	grammar	declaration	Phase P pointer param
+int (*fp)(int *);	grammar	declaration	Phase P abstract pointer param
+int (*fp)(int a, char *s, double d);	grammar	declaration	Phase P mixed params
+typedef int (*Fn)(int);	grammar	declaration	Phase P typedef fn-ptr
+
+# ---- grammar path: Phase O (top-level static_assert) ----
+static_assert(1 == 1, "msg");	grammar	declaration	Phase O
+_Static_assert(1 + 1 == 2);	grammar	declaration	Phase O cond-only
+static_assert(sizeof(int) == 4, "msg");	grammar	declaration	Phase O sizeof in cond
+
+# ---- grammar path: top-level preprocessor directives ----
+#define X 1	grammar	declaration
+#define ADD(a, b) ((a) + (b))	grammar	declaration	function-like macro
+
+# ---- function definitions: dispatched by isFunctionBodySupported ----
+# Bodies that block_item can structure flow through grammar; bodies
+# with control-flow keywords or asm/static_assert fall back to chomp.
+int f() { return 0; }	grammar	function_definition	empty body via grammar
+int f(int x) { return x; }	grammar	function_definition	param-with-id via grammar
+static int f(void) { return 0; }	grammar	function_definition	void params via grammar
+
+# ---- grammar path: tagged-type definitions with bodies ----
+struct S { int a; };	grammar	declaration	standalone struct definition
+union U { int a; };	grammar	declaration	standalone union definition
+enum E { A, B };	grammar	declaration	standalone enum definition
+struct { int a; } s;	grammar	declaration	anonymous struct variable
+
+# ---- legacy chomp path: typedef shapes with postfix ----
+typedef int Arr[10];	grammar	declaration	typedef of array
+
+# ---- grammar path: complex compound declarators ----
+int (*p)[10];	grammar	declaration	pointer to array
+int (*arr[3])(int);	grammar	declaration	array of fn-pointers
+
+# ---- legacy chomp path: brace initializers ----
+int a[3] = { 1, 2, 3 };	grammar	declaration	brace init
+int a[3] = { [0] = 1 };	grammar	declaration	designated init
+
+# ---- legacy chomp path: GCC extensions ----
+__extension__ int x;	grammar	declaration	__extension__ keyword
+int __attribute__((unused)) x;	grammar	declaration	attribute between specs

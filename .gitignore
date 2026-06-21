@@ -1,35 +1,20 @@
-lib-cov
-*.seed
-*.log
-*.csv
-!test/fixtures/*.csv
-*.dat
-*.out
-*.pid
-*.gz
-
-pids
-logs
-results
-
-npm-debug.log
-
-*~
 node_modules
-
-.idea/
-
-
-trial
-
-test/coverage.html
-
-coverage
 
 dist
 dist-test
+*.tsbuildinfo
+
+*.log
+npm-debug.log
+coverage
+.nyc_output
 
 package-lock.json
 yarn.lock
 
+*~
+.idea/
+.DS_Store
 
+# Note: ts/test/csmith-fixtures/*.json.gz ARE tracked — they are the
+# CSmith regression fixtures the csmith test replays.
