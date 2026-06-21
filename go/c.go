@@ -107,7 +107,7 @@ func kwTokenNames() []string {
 
 // C is the Tabnas plugin entry point. Port of the C plugin in c.ts.
 func C(j *tabnas.Tabnas, opts map[string]any) error {
-	resolveOptions(opts) // options consumed fully once the grammar lands (M3+)
+	copts := resolveOptions(opts)
 
 	// 1. Register punctuator + keyword token names with their fixed sources,
 	//    and the special token names, so every token has a stable tin. We
@@ -246,10 +246,15 @@ func C(j *tabnas.Tabnas, opts map[string]any) error {
 		}
 	}, nil)
 
-	// TODO(M3b+): parse and install the embedded grammar (with the @-ref
-	// map), stripping extension rules when !extended.
+	// 5. Parse and install the embedded grammar with the @-ref map (real
+	//    handlers + typed stubs for any not yet ported), stripping extension
+	//    rules in plain-C mode.
+	if err := installGrammar(j, copts); err != nil {
+		return err
+	}
 
-	// Install @tabnas/expr with the C operator catalog and the val-atom alts.
+	// 6. Install @tabnas/expr with the C operator catalog and the val-atom
+	//    alts (Phase A — must run after the grammar so val exists).
 	if err := installExpr(j); err != nil {
 		return err
 	}
