@@ -342,6 +342,14 @@ and complex compound declarators beyond simple function pointers.
 Both paths emit identical CST nodes, so consumers see one tree
 regardless of which path produced it.
 
+## Go port
+
+A Go port lives under [`go/`](go/) but is currently a **scaffold only** —
+the module wiring, the embedded grammar (`//go:embed c-grammar.jsonic`) and
+the plugin/helper signatures (`C`, `MakeC`, `Parse`) are in place, but the
+parsing logic is not yet translated (`C` returns `ErrNotImplemented`). Use
+the TypeScript package for now. See [`go/c.go`](go/c.go) for the porting map.
+
 ## License
 
 MIT. Copyright (c) 2026 Richard Rodger and contributors.

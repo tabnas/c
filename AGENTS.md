@@ -27,9 +27,10 @@ const cst = new Tabnas().use(jsonic).use(C).parse('typedef int T; T x = 1;')
 
 | Path | What it is |
 |---|---|
-| [`ts/`](ts/) | **Canonical** (and only) implementation — the `@tabnas/c` package. There is no Go port: the upstream `@jsonic/c` is TypeScript-only. |
+| [`ts/`](ts/) | **Canonical** implementation — the `@tabnas/c` package. |
+| [`go/`](go/) | **Go port — SCAFFOLD ONLY.** Module wiring (`go.mod`), the embedded grammar (`c-grammar.jsonic` via `//go:embed`) and the plugin/helper signatures (`c.go`: `C`, `MakeC`, `Parse`, `Grammar`, `COptions`, `Version`). The parsing logic is **not yet ported** — `C` returns `ErrNotImplemented`. The upstream `@jsonic/c` is TypeScript-only, so there is no Go source to convert from; the port is a from-scratch hand-translation (~10.6k lines). `go/c.go`'s package doc carries the TS-module → Go-file porting map. |
 | [`ts/c-grammar.jsonic`](ts/c-grammar.jsonic) | **Single source of truth** for the declarative grammar (rule shapes for the whole C surface), authored in jsonic-DSL syntax. |
-| [`ts/embed-grammar.js`](ts/embed-grammar.js) | Embeds `c-grammar.jsonic` into `src/c.ts` (between `BEGIN/END EMBEDDED` markers) as the `grammarText` string literal. Runs as the first half of `npm run build`. |
+| [`ts/embed-grammar.js`](ts/embed-grammar.js) | Embeds `c-grammar.jsonic` into `src/c.ts` (between `BEGIN/END EMBEDDED` markers) as the `grammarText` string literal, **and** copies it verbatim to `go/c-grammar.jsonic` for `//go:embed`. The grammar contains backticks, so the Go side embeds from the file rather than inlining a raw string (unlike the smaller ports). Runs as the first half of `npm run build`. |
 | [`ts/src/c.ts`](ts/src/c.ts) | Plugin entry: token catalog wiring, lex matchers, grammar install, and the `@`-named ref map (conditions/actions bound by name from the grammar). |
 | [`ts/src/matchers.ts`](ts/src/matchers.ts) | Focused lex matchers (whitespace, comments, directives, header names, identifiers, literals, punctuators). |
 | [`ts/src/tokens.ts`](ts/src/tokens.ts) | Named tokens for every keyword, extension keyword and punctuator. |
