@@ -1,0 +1,1899 @@
+# C parser grammar (declarative)
+#
+# Parsed by a vanilla Jsonic instance and passed to jsonic.grammar(). The
+# rule skeleton lives here; all conditions and actions are bound to
+# @-named refs supplied by ../src/c.ts so the structural intent of the
+# grammar is readable without TypeScript noise.
+#
+# Token sets, lex matchers, and option flags (lex pipeline disable,
+# IGNORE membership for trivia, etc.) are configured in c.ts before
+# this grammar is loaded — putting them here would make the grammar
+# self-modifying (it depends on the same dynamic ANY_C_TOKEN set it
+# would define).
+#
+# Conventions:
+#   '@<rulename>-bo'  state action: before-open  (auto-installed)
+#   '@<rulename>-ao'  state action: after-open
+#   '@<rulename>-bc'  state action: before-close
+#   '@<rulename>-ac'  state action: after-close
+#   '@<actionname>'   alt-level action / condition
+
+{
+  rule: {
+
+    # translation_unit
+    #   bo: create the root node
+    #   open: empty input → bail; else descend into extdecl_loop
+    #   bc: fold #if … #endif sequences into conditional_group nodes
+    #   close: end on EOF
+    translation_unit: {
+      open: [
+        { s: '#ZZ' b: 1 g: 'tu-empty' }
+        { p: 'extdecl_loop' g: 'tu-loop' }
+      ]
+      close: [
+        { s: '#ZZ' g: 'tu-end' }
+      ]
+    }
+
+    # extdecl_loop
+    #   r.node is inherited from translation_unit. bc pushes the
+    #   completed external_declaration child onto translation_unit
+    #   before deciding to recurse.
+    extdecl_loop: {
+      open: [
+        { p: 'external_declaration' g: 'loop-one' }
+      ]
+      close: [
+        { s: '#ZZ' b: 1 g: 'loop-end' }
+        { r: 'extdecl_loop' g: 'loop-more' }
+      ]
+    }
+
+    # external_declaration
+    #
+    # Phase B1 dispatch: if the head token is a recognised simple type
+    # specifier (currently only KW_INT, broadens later), descend into
+    # int_declaration which parses through proper grammar (with val
+    # for initializers via @jsonic/expr). Otherwise fall through to
+    # the legacy chomp path that absorbs tokens for post-process
+    # structuring.
+    external_declaration: {
+      open: [
+        { s: '#ZZ' b: 1 g: 'extdecl-eof' }
+        # [extension: preprocessor] PP_HASH dispatches to preprocessor_directive.
+        { s: 'PP_HASH PP_HASH' c: '@ext-and-first-iter' b: 2
+          p: 'preprocessor_directive' a: '@mark-new-path'
+          g: 'extdecl-pp-2' }
+        { s: 'PP_HASH #ANY_C_TOKEN' c: '@ext-and-first-iter' b: 2
+          p: 'preprocessor_directive' a: '@mark-new-path'
+          g: 'extdecl-pp' }
+        # Phase O: top-level static_assert dispatches into the
+        # static_assert_declaration grammar rule. The cond / msg
+        # vals are pushed with n.no_comma_op set so @jsonic/expr's
+        # expr.close bails at `,` rather than treating it as the
+        # comma operator.
+        { s: 'KW_STATIC_ASSERT' c: '@is-first-iter' b: 1
+          p: 'static_assert_declaration' a: '@mark-new-path'
+          g: 'extdecl-sa' }
+        { s: 'KW__STATIC_ASSERT' c: '@is-first-iter' b: 1
+          p: 'static_assert_declaration' a: '@mark-new-path'
+          g: 'extdecl-sa-1' }
+        # [extension: gcc-asm] top-level inline assembly block.
+        { s: 'KW_ASM' c: '@ext-and-first-iter' b: 1
+          p: 'asm_statement' a: '@mark-new-path'
+          g: 'extdecl-asm' }
+        { s: 'KW___ASM' c: '@ext-and-first-iter' b: 1
+          p: 'asm_statement' a: '@mark-new-path'
+          g: 'extdecl-asm-1' }
+        { s: 'KW___ASM__' c: '@ext-and-first-iter' b: 1
+          p: 'asm_statement' a: '@mark-new-path'
+          g: 'extdecl-asm-2' }
+        # Plain-mode direct dispatches. When the head token clearly
+        # starts a declaration, push simple_declaration without a
+        # lookahead validator — the rule's own alts and per-rule k
+        # state disambiguate the actual shape. These run only when
+        # `extended: false` so we don't bypass the wildcard alts'
+        # @looks-simple-decl + isFunctionBodySupported gate that
+        # routes asm-body / pp-line function definitions to the
+        # legacy structuring path (those constructs only matter in
+        # extended mode anyway).
+        { s: '#SIMPLE_TYPE_HEAD' c: '@plain-and-first-iter' b: 1
+          p: 'simple_declaration' a: '@mark-new-path'
+          g: 'extdecl-plain-type' }
+        { s: '#STORAGE_PREFIX' c: '@plain-and-first-iter' b: 1
+          p: 'simple_declaration' a: '@mark-new-path'
+          g: 'extdecl-plain-storage' }
+        { s: 'KW__BITINT' c: '@plain-and-first-iter' b: 1
+          p: 'simple_declaration' a: '@mark-new-path'
+          g: 'extdecl-plain-bitint' }
+        { s: 'PUNC_LBRACKET PUNC_LBRACKET' c: '@plain-as23-and-first'
+          b: 2 p: 'simple_declaration' a: '@mark-new-path'
+          g: 'extdecl-plain-c23-attr' }
+        # Phase B2.3 dispatch: cascading wildcard-token alts. Each one
+        # matches a fixed number of tokens to force lookahead, then the
+        # @looks-simple-decl cond validates the actual shape — optional
+        # storage prefix, 1+ simple type specifiers, an ID, and a `;` or
+        # `=` terminator. b: N back-steps all matched tokens so
+        # simple_declaration sees them as t0..t(N-1).
+        # Longest alts first so multi-keyword forms win over shorter
+        # shapes that would have stopped at the wrong ID.
+        # Gate: only on the first iteration of an external_declaration
+        # so the chomp's r:-recursion doesn't re-fire mid-declaration.
+        { s: '#ANY_C_TOKEN #ANY_C_TOKEN #ANY_C_TOKEN #ANY_C_TOKEN #ANY_C_TOKEN #ANY_C_TOKEN'
+          c: '@looks-simple-decl' b: 6
+          p: 'simple_declaration' a: '@mark-new-path' g: 'extdecl-new-decl-6' }
+        { s: '#ANY_C_TOKEN #ANY_C_TOKEN #ANY_C_TOKEN #ANY_C_TOKEN #ANY_C_TOKEN'
+          c: '@looks-simple-decl' b: 5
+          p: 'simple_declaration' a: '@mark-new-path' g: 'extdecl-new-decl-5' }
+        { s: '#ANY_C_TOKEN #ANY_C_TOKEN #ANY_C_TOKEN #ANY_C_TOKEN'
+          c: '@looks-simple-decl' b: 4
+          p: 'simple_declaration' a: '@mark-new-path' g: 'extdecl-new-decl-4' }
+        { s: '#ANY_C_TOKEN #ANY_C_TOKEN #ANY_C_TOKEN'
+          c: '@looks-simple-decl' b: 3
+          p: 'simple_declaration' a: '@mark-new-path' g: 'extdecl-new-decl-3' }
+        { s: '#ANY_C_TOKEN' a: '@absorb-token' g: 'extdecl-tok' }
+      ]
+      close: [
+        { c: '@new-path' a: '@finalize-new-path' g: 'extdecl-new-end' }
+        { s: '#ZZ' b: 1 a: '@finalize-extdecl' g: 'extdecl-finish-eof' }
+        { c: '@just-closed-and-decl-ahead' a: '@finalize-extdecl' g: 'extdecl-finish-block' }
+        { c: '@terminated' a: '@finalize-extdecl' g: 'extdecl-finish' }
+        { r: 'external_declaration' g: 'extdecl-more' }
+      ]
+    }
+
+    # simple_declaration  (phase B2: single-keyword type + ID + optional init)
+    #
+    # Recognises: <simple-type-head> ID (= val)? ;
+    # Initializer expressions descend into val (which @jsonic/expr's
+    # plugin install has wired up for full C precedence).
+    #
+    # Output: a CST node of kind 'declaration' with declaredName set,
+    # children laid out as
+    #   [declaration_specifiers, init_declarator_list, ';']
+    # simple_declaration  (phase B2: any-length specifier list +
+    # comma-separated init-declarator-list)
+    #
+    # Recognises:
+    #   <storage>? <type>+ <init_declarator> (, <init_declarator>)* ;
+    # where each init_declarator is `ID (= val)?`. Initializer
+    # expressions descend into val (which @jsonic/expr's plugin install
+    # has wired up for full C precedence).
+    simple_declaration: {
+      open: [
+        # Leading C23 attribute spec — plain C23.
+        { s: 'PUNC_LBRACKET PUNC_LBRACKET' c: '@as23-adjacent-open'
+          b: 2 p: 'spec_loop' g: 'simple-decl-attr-c23' }
+        # [extension: gcc-attr] leading GCC __attribute__((…)) spec.
+        { s: 'KW___ATTRIBUTE__' c: '@extended-on' b: 1 p: 'spec_loop'
+          g: 'simple-decl-attr-gcc' }
+        { s: 'KW___ATTRIBUTE' c: '@extended-on' b: 1 p: 'spec_loop'
+          g: 'simple-decl-attr-gcc-1' }
+        # [extension: msvc-attr] leading __declspec(…) spec.
+        { s: 'KW___DECLSPEC' c: '@extended-on' b: 1 p: 'spec_loop'
+          g: 'simple-decl-attr-msvc' }
+        { s: '#STORAGE_PREFIX' a: '@absorb-spec-storage' p: 'spec_loop'
+          g: 'simple-decl-storage' }
+        # Tagged-type heads dispatch into struct_specifier /
+        # enum_specifier (phase F.5). spec_loop's bc relays the
+        # returned node onto u.specs.
+        { s: 'KW_STRUCT' b: 1 p: 'struct_specifier'
+          g: 'simple-decl-struct' }
+        { s: 'KW_UNION' b: 1 p: 'struct_specifier'
+          g: 'simple-decl-union' }
+        { s: 'KW_ENUM' b: 1 p: 'enum_specifier'
+          g: 'simple-decl-enum' }
+        # C23 _BitInt(N) — leading. Absorb the keyword onto the
+        # parent's specs and descend into bit_int_paren which
+        # captures `( <width> )`. Then re-enter simple_declaration's
+        # open via spec_loop on return.
+        { s: 'KW__BITINT' b: 1 p: 'spec_loop'
+          g: 'simple-decl-bitint' }
+        { s: '#SIMPLE_TYPE_HEAD' a: '@absorb-spec-type' p: 'spec_loop'
+          g: 'simple-decl-type' }
+      ]
+      close: [
+        # Function-definition completion: compound_statement returned
+        # and rule.u.fnBody is set — finalise as function_definition.
+        { c: '@fn-body-done' a: '@simple-decl-finalize-fn'
+          g: 'simple-decl-fn-end' }
+        # Function-definition body: after init_declarator captures
+        # the function declarator, `{` opens the body. Push
+        # compound_statement to absorb it; on return @fn-body-done
+        # above fires.
+        { s: 'PUNC_LBRACE' b: 1 p: 'compound_statement'
+          a: '@simple-decl-start-fn-body'
+          g: 'simple-decl-fn-body' }
+        # First declarator (after specs). Backstep the head token so
+        # init_declarator's open sees it; descend into the sub-rule.
+        # ID head: plain declarator. STAR head: pointer prefix.
+        # LPAREN: function postfix on a (rare) parenthesised
+        # subdeclarator — let the chomp handle that complex case.
+        { s: 'ID' b: 1 p: 'init_declarator' g: 'simple-decl-first-decl' }
+        { s: 'PUNC_STAR' b: 1 p: 'init_declarator' g: 'simple-decl-first-decl-ptr' }
+        # Phase P: parenthesised sub-declarator (function pointer).
+        # Shape: `<type>+ ( * ID ) ( <params>? ) ;` (or = init).
+        # @looks-simple-decl's paren-walk has already validated the
+        # shape; here we backstep `(` so init_declarator's open sees
+        # it and dispatches into paren_inner_declarator.
+        { s: 'PUNC_LPAREN' b: 1 p: 'init_declarator'
+          g: 'simple-decl-first-decl-paren' }
+        # Subsequent declarators after a comma.
+        { s: 'PUNC_COMMA' a: '@simple-decl-take-comma' p: 'init_declarator'
+          g: 'simple-decl-comma' }
+        # End of declaration (variable form).
+        { s: 'PUNC_SEMI' a: '@simple-decl-finalize' g: 'simple-decl-end' }
+      ]
+    }
+
+    # spec_loop: absorbs zero or more specifier keywords (and tagged
+    # specifiers — struct / union / enum) and ends when the next token
+    # isn't another specifier. r.node is inherited from
+    # simple_declaration; @absorb-spec-* push refs into the
+    # declaration_specifiers scaffolding the parent rule set up in
+    # @simple_declaration-bo. Tagged specifiers are dispatched into
+    # their own sub-rules (struct_specifier / enum_specifier);
+    # @spec_loop-bc stitches the returned specifier node onto the
+    # owning declaration_specifiers list.
+    spec_loop: {
+      open: [
+        # Attribute specs interleave freely with simple specifiers and
+        # tagged-type heads. C23 [[…]] is plain; GCC __attribute__ /
+        # __attribute / MSVC __declspec are extensions.
+        { s: 'PUNC_LBRACKET PUNC_LBRACKET' c: '@as23-adjacent-open'
+          b: 2 p: 'attribute_spec_c23' g: 'spec-loop-attr-c23' }
+        # [extension: gcc-attr]
+        { s: 'KW___ATTRIBUTE__' c: '@extended-on' b: 1
+          p: 'attribute_spec_gcc' g: 'spec-loop-attr-gcc' }
+        { s: 'KW___ATTRIBUTE' c: '@extended-on' b: 1
+          p: 'attribute_spec_gcc' g: 'spec-loop-attr-gcc-1' }
+        # [extension: msvc-attr]
+        { s: 'KW___DECLSPEC' c: '@extended-on' b: 1
+          p: 'attribute_spec_msvc' g: 'spec-loop-attr-msvc' }
+        # Tagged-type heads dispatch into struct_specifier /
+        # enum_specifier. These must come BEFORE #SIMPLE_TYPE_HEAD
+        # because KW_STRUCT/KW_UNION/KW_ENUM are members of that set
+        # too — without ordering, the generic alt would absorb them
+        # as plain tokens instead of producing a struct_specifier
+        # subtree.
+        { s: 'KW_STRUCT' b: 1 p: 'struct_specifier' g: 'spec-loop-struct' }
+        { s: 'KW_UNION' b: 1 p: 'struct_specifier' g: 'spec-loop-union' }
+        { s: 'KW_ENUM' b: 1 p: 'enum_specifier' g: 'spec-loop-enum' }
+        # C23 _BitInt(N) — width-parameterised integer type. Absorb
+        # the keyword as a normal type spec, then descend into the
+        # bit_int_paren sub-rule which captures `( <width> )`.
+        { s: 'KW__BITINT' a: '@absorb-spec-type'
+          p: 'bit_int_paren' g: 'spec-loop-bitint' }
+        { s: '#SIMPLE_TYPE_HEAD' a: '@absorb-spec-type' g: 'spec-loop-type' }
+        # If the next token isn't a specifier, fall through without
+        # consuming so the parent can pick up the declarator.
+        { s: [] g: 'spec-loop-empty' }
+      ]
+      close: [
+        # See open above for the plain-vs-extension split.
+        { s: 'PUNC_LBRACKET PUNC_LBRACKET' c: '@as23-adjacent-open'
+          b: 2 p: 'attribute_spec_c23' g: 'spec-loop-more-attr-c23' }
+        # [extension: gcc-attr]
+        { s: 'KW___ATTRIBUTE__' c: '@extended-on' b: 1
+          p: 'attribute_spec_gcc' g: 'spec-loop-more-attr-gcc' }
+        { s: 'KW___ATTRIBUTE' c: '@extended-on' b: 1
+          p: 'attribute_spec_gcc' g: 'spec-loop-more-attr-gcc-1' }
+        # [extension: msvc-attr]
+        { s: 'KW___DECLSPEC' c: '@extended-on' b: 1
+          p: 'attribute_spec_msvc' g: 'spec-loop-more-attr-msvc' }
+        # Tagged-type heads must come before #SIMPLE_TYPE_HEAD here
+        # too (see open above for rationale).
+        { s: 'KW_STRUCT' b: 1 p: 'struct_specifier' g: 'spec-loop-more-struct' }
+        { s: 'KW_UNION' b: 1 p: 'struct_specifier' g: 'spec-loop-more-union' }
+        { s: 'KW_ENUM' b: 1 p: 'enum_specifier' g: 'spec-loop-more-enum' }
+        { s: 'KW__BITINT' a: '@absorb-spec-type'
+          p: 'bit_int_paren' g: 'spec-loop-more-bitint' }
+        { s: '#SIMPLE_TYPE_HEAD' b: 1 r: 'spec_loop' g: 'spec-loop-more' }
+        { s: [] g: 'spec-loop-end' }
+      ]
+    }
+
+    # bit_int_paren: the `(N)` width argument of `_BitInt(N)`.
+    # The keyword has already been absorbed by spec_loop's KW__BITINT
+    # alt; this rule just takes `(`, then a width expression, then `)`.
+    bit_int_paren: {
+      open: [
+        { s: 'PUNC_LPAREN' a: '@bip-take-lparen' g: 'bip-lparen' }
+      ]
+      close: [
+        { s: 'PUNC_RPAREN' a: '@bip-take-rparen' g: 'bip-rparen' }
+        { p: 'val' a: '@bip-mark-val' g: 'bip-val' }
+      ]
+    }
+
+    # init_declarator: pointer* ID (= val)?
+    # Each invocation builds its own init_declarator node. The
+    # parent simple_declaration's bc pushes it onto the
+    # init_declarator_list when the sub-rule completes.
+    #
+    # The rule re-enters itself once via r: after capturing the ID so
+    # the close state can run a second time to look for `=`. r.k.named
+    # latches across that recursion; the gate alt at the top of open
+    # accepts the re-entry without consuming any tokens.
+    init_declarator: {
+      open: [
+        # Re-entry after the ID was captured: skip open, fall through
+        # to close to handle `=` / array postfix / end.
+        { c: '@idecl-named' s: [] g: 'idecl-reentry' }
+        # Pointer prefix: back-step the `*`, descend into pointer_list
+        # which absorbs all the leading `*` tokens.
+        { s: 'PUNC_STAR' b: 1 p: 'pointer_list' g: 'idecl-ptrs' }
+        # Phase P: parenthesised sub-declarator. Capture the LPAREN
+        # onto the outer direct_declarator and descend into
+        # paren_inner_declarator, which builds an inner declarator
+        # node and attaches it to the outer direct_declarator before
+        # returning at `)`.
+        { s: 'PUNC_LPAREN' a: '@idecl-paren-open'
+          p: 'paren_inner_declarator' g: 'idecl-paren' }
+        # No pointer prefix, ID directly.
+        { s: 'ID' a: '@idecl-name' r: 'init_declarator' g: 'idecl-id' }
+      ]
+      close: [
+        # Returning from paren_inner_declarator: consume the matching
+        # `)` and finalise the outer declarator. Then r:-recurse so
+        # the rest of close() can take any trailing postfix
+        # (function postfix for fn-pointers, array postfix for
+        # arrays of fn-pointers).
+        { s: 'PUNC_RPAREN' c: '@idecl-paren-pending'
+          a: '@idecl-paren-close' r: 'init_declarator'
+          g: 'idecl-paren-rparen' }
+        # Returning from pointer_list, capture the ID, then re-enter
+        # to check for postfix / initializer.
+        { s: 'ID' a: '@idecl-name' r: 'init_declarator' g: 'idecl-id-after-ptrs' }
+        # Array postfix `[ … ]` (one or more dimensions). Each one
+        # re-enters init_declarator so additional postfixes can stack.
+        { s: 'PUNC_LBRACKET' b: 1 p: 'array_postfix'
+          r: 'init_declarator' g: 'idecl-arr' }
+        # Function postfix `( … )` for function declarators. Re-enters
+        # init_declarator so trailing `[…]` (function returning array)
+        # or further postfixes can stack — though for now phase B3.1
+        # only exercises `<type> ID ( … ) ;`.
+        { s: 'PUNC_LPAREN' b: 1 p: 'function_postfix'
+          r: 'init_declarator' g: 'idecl-fn' }
+        { s: 'PUNC_ASSIGN' p: 'initializer' a: '@idecl-take-eq' g: 'idecl-eq' }
+        { s: [] g: 'idecl-end' }
+      ]
+    }
+
+    # initializer (phase Q2.1): wrapper around the RHS of `=` in an
+    # init_declarator. Dispatches to initializer_list for brace-init
+    # forms (`= { 1, 2, 3 }`, `= { [0] = 1 }`) and to val for
+    # expression initializers (`= 5`, `= (int)x`, `= f()`). Mirrors
+    # the legacy parseInitializer wrapper in structure.ts.
+    initializer: {
+      open: [
+        { s: 'PUNC_LBRACE' b: 1 p: 'initializer_list' g: 'init-brace' }
+        { p: 'val' g: 'init-expr' }
+      ]
+      close: [
+        { s: [] g: 'init-end' }
+      ]
+    }
+
+    # paren_inner_declarator (phase P): builds an inner declarator
+    # node for a parenthesised sub-declarator (function-pointer
+    # form). Mirrors init_declarator's pointer + ID + postfix logic
+    # but without `=` initializer handling, and stops at (without
+    # consuming) the matching `)` so the outer init_declarator can
+    # take it. The inner declarator is attached to the outer's
+    # direct_declarator by @pid-name.
+    paren_inner_declarator: {
+      open: [
+        # Re-entry after the ID was captured: skip open.
+        { c: '@pid-named' s: [] g: 'pid-reentry' }
+        # Pointer prefix.
+        { s: 'PUNC_STAR' b: 1 p: 'pointer_list' g: 'pid-ptrs' }
+        # No pointer prefix, ID directly (rare but legal: `int (fp)(…)`).
+        { s: 'ID' a: '@pid-name' r: 'paren_inner_declarator' g: 'pid-id' }
+      ]
+      close: [
+        # After pointer_list returns, capture the ID then re-enter.
+        { s: 'ID' a: '@pid-name' r: 'paren_inner_declarator'
+          g: 'pid-id-after-ptrs' }
+        # Stop before `)` so the outer init_declarator's close can
+        # consume it.
+        { s: 'PUNC_RPAREN' b: 1 g: 'pid-end-rparen' }
+        { s: [] g: 'pid-end' }
+      ]
+    }
+
+    # array_postfix: `[ const-expr? ]`
+    # Inner expression is parsed via val (currently limited to forms
+    # @jsonic/expr handles; complex constant expressions involving
+    # casts will land cleanly once phase C lifts cast handling).
+    array_postfix: {
+      open: [
+        { s: 'PUNC_LBRACKET' a: '@arr-open' g: 'arr-open' }
+      ]
+      close: [
+        { s: 'PUNC_RBRACKET' a: '@arr-close' g: 'arr-end-empty' }
+        { p: 'val' g: 'arr-size' }
+      ]
+    }
+
+    # pointer_list: absorbs one or more `*` tokens. Pushes a
+    # pointer node per `*` onto the parent init_declarator's
+    # declarator children.
+    # pointer_list: `*` qualifiers* (then another `*` ...).
+    # Type qualifiers (`const`/`volatile`/`restrict`/`_Atomic`) after
+    # `*` qualify the pointer (e.g. `int * const p` is a const pointer
+    # to int). The qualifiers between successive `*`s are consumed by
+    # the pointer_qualifier_loop sub-rule, called from open after the
+    # `*` is absorbed.
+    pointer_list: {
+      open: [
+        { s: 'PUNC_STAR' a: '@absorb-pointer'
+          p: 'pointer_qualifier_loop' g: 'ptr' }
+      ]
+      close: [
+        { s: 'PUNC_STAR' b: 1 r: 'pointer_list' g: 'ptr-more' }
+        { s: [] g: 'ptr-end' }
+      ]
+    }
+
+    # pointer_qualifier_loop: zero or more type qualifiers that bind
+    # to the parent pointer_list's most recently-pushed pointer node.
+    # Each qualifier r:-recurses for the next; falls through cleanly
+    # when no qualifier is present.
+    pointer_qualifier_loop: {
+      open: [
+        { s: 'KW_CONST' a: '@absorb-pq-const'
+          r: 'pointer_qualifier_loop' g: 'pql-const' }
+        { s: 'KW_VOLATILE' a: '@absorb-pq-const'
+          r: 'pointer_qualifier_loop' g: 'pql-volatile' }
+        { s: 'KW_RESTRICT' a: '@absorb-pq-const'
+          r: 'pointer_qualifier_loop' g: 'pql-restrict' }
+        { s: 'KW__ATOMIC' a: '@absorb-pq-const'
+          r: 'pointer_qualifier_loop' g: 'pql-atomic' }
+        { s: [] g: 'pql-empty' }
+      ]
+      close: [
+        { s: [] g: 'pql-end' }
+      ]
+    }
+
+    # function_postfix: `( <param-list> )` after the declarator name.
+    # Covers empty `()`, explicit `(void)`, prototype parameters,
+    # variadic, K&R-style identifier lists.
+    function_postfix: {
+      open: [
+        { s: 'PUNC_LPAREN' a: '@fn-open' g: 'fn-open' }
+      ]
+      close: [
+        # Empty parameter list: `()`.
+        { s: 'PUNC_RPAREN' a: '@fn-close' g: 'fn-end-empty' }
+        # K&R-style prototype: `(ID , ID , ...)` or `(ID)` where the
+        # ID is NOT a registered typedef (else it would lex as
+        # TYPEDEF_NAME and route through parameter_type_list). The
+        # two-token lookahead disambiguates from a typed parameter.
+        { s: 'ID PUNC_COMMA' b: 2 p: 'identifier_list' g: 'fn-knr-comma' }
+        { s: 'ID PUNC_RPAREN' b: 2 p: 'identifier_list' g: 'fn-knr-end' }
+        # Otherwise descend into the parameter list, then re-enter
+        # close (where the matching `)` is consumed).
+        { p: 'parameter_type_list' g: 'fn-params' }
+      ]
+    }
+
+    # identifier_list (K&R-style function prototype parameter list).
+    # `int f(a, b);` — the parameters are bare identifiers without
+    # type specifiers; the actual types are declared between the
+    # parameter list and the function body in pre-ANSI C, or are
+    # left implicit. We consume the comma-separated IDs and attach
+    # the identifier_list node onto function_postfix.
+    identifier_list: {
+      open: [
+        { s: 'ID' a: '@idlist-take' g: 'idl-first' }
+      ]
+      close: [
+        { s: 'PUNC_COMMA' a: '@idlist-comma'
+          r: 'identifier_list' g: 'idl-comma' }
+        { s: 'ID' a: '@idlist-take'
+          r: 'identifier_list' g: 'idl-more' }
+        { s: 'PUNC_RPAREN' b: 1 a: '@idlist-attach'
+          g: 'idl-end' }
+      ]
+    }
+
+    # parameter_type_list: 1+ comma-separated parameter_declarations,
+    # optionally terminated by `, ...` for variadic functions.
+    parameter_type_list: {
+      open: [
+        { p: 'parameter_declaration' g: 'ptl-first' }
+      ]
+      close: [
+        # Variadic ellipsis: `, ...` ends the list.
+        { s: 'PUNC_COMMA PUNC_ELLIPSIS' a: '@ptl-take-ellipsis'
+          g: 'ptl-ellipsis' }
+        { s: 'PUNC_COMMA' a: '@ptl-comma' p: 'parameter_declaration'
+          g: 'ptl-more' }
+        { s: 'PUNC_RPAREN' b: 1 a: '@ptl-attach-and-end' g: 'ptl-end' }
+      ]
+    }
+
+    # parameter_declaration: <type>+ ID? — declaration_specifiers and
+    # an optional declarator name. `void` alone is the C convention
+    # for "no parameters" and is captured here as a single-spec
+    # parameter.
+    parameter_declaration: {
+      open: [
+        # Re-entry after a pointer prefix was absorbed: skip the
+        # type-spec dispatch and fall through to close to handle
+        # additional `*` or the ID.
+        { c: '@param-reentered' s: [] g: 'param-reentry' }
+        { s: '#SIMPLE_TYPE_HEAD' a: '@param-spec' p: 'param_spec_loop'
+          g: 'param-type' }
+      ]
+      close: [
+        # Pointer prefix on the parameter declarator. Each `*` becomes
+        # a pointer node on the declarator; we recurse to keep
+        # absorbing more `*` and finally the optional ID.
+        { s: 'PUNC_STAR' a: '@param-pointer'
+          r: 'parameter_declaration' g: 'param-ptr' }
+        # Returning from param_paren_inner: take the matching `)` of
+        # the outer paren-form. Must come BEFORE the PUNC_LPAREN
+        # alts so the closing token is consumed by the right alt.
+        { s: 'PUNC_RPAREN' c: '@param-paren-pending'
+          a: '@param-paren-close' r: 'parameter_declaration'
+          g: 'param-paren-rparen' }
+        # Function postfix following a parenthesised pointer, e.g.
+        # the `(int)` in `int (*)(int)`. Higher priority than the
+        # paren-form alt so it fires once we've already absorbed a
+        # paren-form declarator.
+        { s: 'PUNC_LPAREN' c: '@param-need-fn-postfix'
+          b: 1 p: 'function_postfix'
+          r: 'parameter_declaration' g: 'param-fn-postfix' }
+        # Parenthesised abstract / named declarator: `int (*)(int)`,
+        # `int (*fn)(int)`. Open paren feeds into a sub-rule that
+        # handles `(...)` containing pointer + optional ID; the
+        # outer `)` is consumed by the param-paren-rparen alt above.
+        # Cond gates against re-firing once a paren-form has already
+        # been absorbed.
+        { s: 'PUNC_LPAREN' c: '@param-can-paren-form'
+          a: '@param-paren-open' p: 'param_paren_inner'
+          g: 'param-paren' }
+        # Array postfix, e.g. `int arr[10]` or `int (*)[10]`.
+        { s: 'PUNC_LBRACKET' b: 1 p: 'array_postfix'
+          r: 'parameter_declaration' g: 'param-arr' }
+        { s: 'ID' a: '@param-name'
+          r: 'parameter_declaration' g: 'param-id' }
+        { s: [] g: 'param-end' }
+      ]
+    }
+
+    # param_paren_inner: the contents of `(` ... `)` inside a
+    # parameter declarator. Mirrors paren_inner_declarator's role
+    # for init_declarator. Accepts pointer prefix(es) + optional ID,
+    # then exits on `)` (which the outer parameter_declaration
+    # consumes).
+    param_paren_inner: {
+      open: [
+        # Re-entry after we absorbed the inner ID — fall through to
+        # close so the outer `)` is left for parameter_declaration.
+        { c: '@ppi-named' s: [] g: 'ppi-reentry' }
+        # Pointer prefix.
+        { s: 'PUNC_STAR' a: '@ppi-pointer'
+          r: 'param_paren_inner' g: 'ppi-ptr' }
+        # Bare ID with no pointer (rare, e.g. `int (fp)(…)`).
+        { s: 'ID' a: '@ppi-name' g: 'ppi-id' }
+        # Abstract: nothing inside `(*)` already-handled by re-entry
+        # via the pointer alt; fallthrough to close on bare `)`.
+        { s: [] g: 'ppi-empty' }
+      ]
+      close: [
+        # After absorbing `*`, an optional ID may follow.
+        { s: 'ID' a: '@ppi-name' g: 'ppi-id-after-ptr' }
+        # Stop before `)` so the outer parameter_declaration's close
+        # consumes it.
+        { s: 'PUNC_RPAREN' b: 1 g: 'ppi-end' }
+        { s: [] g: 'ppi-fall' }
+      ]
+    }
+
+    # param_spec_loop: zero or more additional type specifiers in a
+    # parameter's spec list.
+    param_spec_loop: {
+      open: [
+        { s: '#SIMPLE_TYPE_HEAD' a: '@param-spec' g: 'param-spec-more' }
+        { s: [] g: 'param-spec-empty' }
+      ]
+      close: [
+        { s: '#SIMPLE_TYPE_HEAD' b: 1 r: 'param_spec_loop' g: 'param-spec-loop' }
+        { s: [] g: 'param-spec-end' }
+      ]
+    }
+
+    # compound_statement: `{ … }`
+    # Phase B3.3+B4.2.1 wires this as a structured block: each item
+    # between the opening and closing braces is dispatched into the
+    # block_item sub-rule (declaration | statement). The `-bc` hook
+    # stitches each returned item onto compound_statement.children
+    # before re-entering the close loop.
+    compound_statement: {
+      open: [
+        { s: 'PUNC_LBRACE' a: '@cs-open' g: 'cs-open' }
+      ]
+      close: [
+        # Closing `}` — finalise.
+        { s: 'PUNC_RBRACE' a: '@cs-close' g: 'cs-end' }
+        # Any other token: dispatch to block_item. After block_item
+        # returns, close re-evaluates and we either match `}` or
+        # dispatch the next item.
+        { s: '#ANY_C_TOKEN' b: 1 p: 'block_item' g: 'cs-item' }
+      ]
+    }
+
+    # ---- statement-level rules (phase B4.2, unwired) ----------------
+    #
+    # block_item, statement, expression_statement, and jump_statement
+    # are defined here in the shapes the legacy `structure.ts` post-
+    # process produces today (see parseBlockItem / parseStatement /
+    # parseJumpStatement / parseExpressionStatement). They are NOT yet
+    # reachable from compound_statement — that rewiring lands together
+    # with phase B3.3 (function definitions) and a gate that picks
+    # function bodies the new grammar can fully cover.
+    #
+    # Defining the rule shapes now (without wiring) lets the next
+    # phase focus on the gate logic + the cutover, rather than also
+    # designing rule shapes under deadline pressure.
+
+    # block_item: declaration | statement.
+    # Dispatches on the head token: a recognised type-spec head
+    # (storage class, simple type keyword, typedef-name) goes through
+    # simple_declaration; anything else is a statement.
+    block_item: {
+      open: [
+        { s: '#STORAGE_PREFIX' b: 1 p: 'simple_declaration' g: 'bi-decl-storage' }
+        { s: '#SIMPLE_TYPE_HEAD' b: 1 p: 'simple_declaration' g: 'bi-decl-type' }
+        { p: 'statement' g: 'bi-stmt' }
+      ]
+      close: [
+        { s: [] g: 'bi-end' }
+      ]
+    }
+
+    # statement: dispatch on head token.
+    # Phase B4.2.1 covers expression_statement, jump_statement, the
+    # empty `;` statement, and nested compound_statement.
+    # Phase B4.2.2 adds if/while/do/switch (paren-condition statements).
+    # Phase B4.2.3 adds for_statement and labeled_statement (case /
+    #   default / ID-label).
+    # Phase B4.2.4+ extends with asm/preprocessor.
+    statement: {
+      open: [
+        # Nested block: `{ … }`
+        { s: 'PUNC_LBRACE' b: 1 p: 'compound_statement' g: 'stmt-cs' }
+        # Empty statement: `;`
+        { s: 'PUNC_SEMI' a: '@stmt-empty' g: 'stmt-empty' }
+        # Selection / iteration statements (paren-condition)
+        { s: 'KW_IF' b: 1 p: 'if_statement' g: 'stmt-if' }
+        { s: 'KW_WHILE' b: 1 p: 'while_statement' g: 'stmt-while' }
+        { s: 'KW_DO' b: 1 p: 'do_statement' g: 'stmt-do' }
+        { s: 'KW_SWITCH' b: 1 p: 'switch_statement' g: 'stmt-switch' }
+        { s: 'KW_FOR' b: 1 p: 'for_statement' g: 'stmt-for' }
+        # Labeled statements
+        { s: 'KW_CASE' b: 1 p: 'labeled_statement' g: 'stmt-case' }
+        { s: 'KW_DEFAULT' b: 1 p: 'labeled_statement' g: 'stmt-default' }
+        { s: 'ID PUNC_COLON' b: 2 p: 'labeled_statement' g: 'stmt-label' }
+        # Jump statements
+        { s: 'KW_RETURN' b: 1 p: 'jump_statement' g: 'stmt-return' }
+        { s: 'KW_BREAK' b: 1 p: 'jump_statement' g: 'stmt-break' }
+        { s: 'KW_CONTINUE' b: 1 p: 'jump_statement' g: 'stmt-continue' }
+        { s: 'KW_GOTO' b: 1 p: 'jump_statement' g: 'stmt-goto' }
+        # [extension: gcc-asm] inline assembly inside a body
+        { s: 'KW_ASM' c: '@extended-on' b: 1 p: 'asm_statement'
+          g: 'stmt-asm' }
+        { s: 'KW___ASM' c: '@extended-on' b: 1 p: 'asm_statement'
+          g: 'stmt-asm-1' }
+        { s: 'KW___ASM__' c: '@extended-on' b: 1 p: 'asm_statement'
+          g: 'stmt-asm-2' }
+        # [extension: preprocessor] preprocessor line inside a body
+        # (rare but legal).
+        { s: 'PP_HASH' c: '@extended-on' b: 1 p: 'preprocessor_line'
+          g: 'stmt-pp' }
+        # Expression statement (default fallthrough)
+        { p: 'expression_statement' g: 'stmt-expr' }
+      ]
+      close: [
+        { s: [] g: 'stmt-end' }
+      ]
+    }
+
+    # expression_statement: <expr> `;`
+    # Descends into val (the @jsonic/expr-driven expression rule) and
+    # then takes the trailing `;`. Empty `;` is handled by statement's
+    # PUNC_SEMI alt before this rule is entered.
+    expression_statement: {
+      open: [
+        { p: 'val' a: '@es-take-expr' g: 'es-expr' }
+      ]
+      close: [
+        { s: 'PUNC_SEMI' a: '@es-finalize' g: 'es-end' }
+      ]
+    }
+
+    # jump_statement:
+    #   return <expr>? ;
+    #   break ;
+    #   continue ;
+    #   goto ID ;
+    # The keyword sets jumpKind on the node; close-state alts decide
+    # whether to take a label (goto), an expression (return), or just
+    # the trailing `;`. r: re-enters so the post-label / post-expr
+    # close pass can match `;`.
+    jump_statement: {
+      open: [
+        { c: '@js-reentry' s: [] g: 'js-reentry' }
+        { s: 'KW_RETURN' a: '@js-take-keyword' g: 'js-return' }
+        { s: 'KW_BREAK' a: '@js-take-keyword' g: 'js-break' }
+        { s: 'KW_CONTINUE' a: '@js-take-keyword' g: 'js-continue' }
+        { s: 'KW_GOTO' a: '@js-take-keyword' g: 'js-goto' }
+      ]
+      close: [
+        { s: 'PUNC_SEMI' a: '@js-finalize' g: 'js-end' }
+        { c: '@js-needs-label' s: 'ID' a: '@js-take-label'
+          r: 'jump_statement' g: 'js-take-label' }
+        { c: '@js-needs-expr' p: 'val' a: '@js-take-expr' g: 'js-take-expr' }
+      ]
+    }
+
+    # paren_condition: `( <expr> )`
+    # Used inside if/while/do/switch as the controlling expression
+    # wrapper. The legacy CST exposes the parens as concrete tokens
+    # alongside the expression child; this rule preserves that.
+    paren_condition: {
+      open: [
+        { s: 'PUNC_LPAREN' a: '@pc-open' g: 'pc-open' }
+      ]
+      close: [
+        { s: 'PUNC_RPAREN' a: '@pc-close' g: 'pc-end' }
+        { p: 'val' a: '@pc-take-expr' g: 'pc-expr' }
+      ]
+    }
+
+    # if_statement: `if ( cond ) then-stmt (else else-stmt)?`
+    # Multi-stage close: first take paren_condition, then the then-
+    # branch (any statement), then optionally `else` + else-branch.
+    if_statement: {
+      open: [
+        { s: 'KW_IF' a: '@if-take-keyword' g: 'if-kw' }
+      ]
+      close: [
+        { c: '@if-needs-cond' s: 'PUNC_LPAREN' b: 1
+          p: 'paren_condition' g: 'if-cond' }
+        { c: '@if-needs-then' p: 'statement' g: 'if-then' }
+        { c: '@if-needs-else-kw' s: 'KW_ELSE' a: '@if-take-else-kw'
+          g: 'if-else-kw' }
+        { c: '@if-needs-else-body' p: 'statement' g: 'if-else-body' }
+        { s: [] g: 'if-end' }
+      ]
+    }
+
+    # while_statement: `while ( cond ) body`
+    while_statement: {
+      open: [
+        { s: 'KW_WHILE' a: '@while-take-keyword' g: 'while-kw' }
+      ]
+      close: [
+        { c: '@while-needs-cond' s: 'PUNC_LPAREN' b: 1
+          p: 'paren_condition' g: 'while-cond' }
+        { c: '@while-needs-body' p: 'statement' g: 'while-body' }
+        { s: [] g: 'while-end' }
+      ]
+    }
+
+    # do_statement: `do body while ( cond ) ;`
+    do_statement: {
+      open: [
+        { s: 'KW_DO' a: '@do-take-keyword' g: 'do-kw' }
+      ]
+      close: [
+        { c: '@do-needs-body' p: 'statement' g: 'do-body' }
+        { c: '@do-needs-while' s: 'KW_WHILE' a: '@do-take-while'
+          g: 'do-while-kw' }
+        { c: '@do-needs-cond' s: 'PUNC_LPAREN' b: 1
+          p: 'paren_condition' g: 'do-cond' }
+        { c: '@do-needs-semi' s: 'PUNC_SEMI' a: '@do-take-semi'
+          g: 'do-end' }
+        { s: [] g: 'do-fallthrough' }
+      ]
+    }
+
+    # switch_statement: `switch ( ctrl ) body`
+    switch_statement: {
+      open: [
+        { s: 'KW_SWITCH' a: '@switch-take-keyword' g: 'switch-kw' }
+      ]
+      close: [
+        { c: '@switch-needs-cond' s: 'PUNC_LPAREN' b: 1
+          p: 'paren_condition' g: 'switch-cond' }
+        { c: '@switch-needs-body' p: 'statement' g: 'switch-body' }
+        { s: [] g: 'switch-end' }
+      ]
+    }
+
+    # ---- for_statement family (phase B4.2.3) ------------------------
+    #
+    # for_statement      `for ( init ; cond ; iter ) body`
+    # for_controls         the `( … )` wrapper, with three slots
+    # for_init             { value: declaration | <expr> | empty }
+    # for_cond             { value: <expr> | empty }
+    # for_iter             { value: <expr> | empty }
+    #
+    # The init slot can be a full declaration (which terminates with
+    # its own `;`) or an expression (in which case for_init takes the
+    # trailing `;` itself). The cond and iter slots are pure
+    # expressions; cond ends with `;`, iter ends at the closing `)`
+    # which for_controls then consumes.
+
+    for_statement: {
+      open: [
+        { s: 'KW_FOR' a: '@for-take-keyword' g: 'for-kw' }
+      ]
+      close: [
+        { c: '@for-needs-controls' s: 'PUNC_LPAREN' b: 1
+          p: 'for_controls' g: 'for-controls' }
+        { c: '@for-needs-body' p: 'statement' g: 'for-body' }
+        { s: [] g: 'for-end' }
+      ]
+    }
+
+    for_controls: {
+      open: [
+        { s: 'PUNC_LPAREN' a: '@fc-open' p: 'for_init' g: 'fc-open' }
+      ]
+      close: [
+        { c: '@fc-needs-cond' p: 'for_cond' g: 'fc-cond' }
+        { c: '@fc-needs-iter' p: 'for_iter' g: 'fc-iter' }
+        { s: 'PUNC_RPAREN' a: '@fc-close' g: 'fc-end' }
+      ]
+    }
+
+    for_init: {
+      open: [
+        # Empty init: bare `;`
+        { s: 'PUNC_SEMI' a: '@fi-empty-take-semi' g: 'fi-empty' }
+        # Declaration init (declaration eats its own trailing `;`)
+        { s: '#STORAGE_PREFIX' b: 1 p: 'simple_declaration'
+          a: '@fi-mark-decl' g: 'fi-decl-storage' }
+        { s: '#SIMPLE_TYPE_HEAD' b: 1 p: 'simple_declaration'
+          a: '@fi-mark-decl' g: 'fi-decl-type' }
+        # Expression init: take expression then `;`
+        { p: 'val' a: '@fi-mark-expr' g: 'fi-expr' }
+      ]
+      close: [
+        { c: '@fi-needs-semi' s: 'PUNC_SEMI' a: '@fi-take-semi' g: 'fi-semi' }
+        { s: [] g: 'fi-end' }
+      ]
+    }
+
+    for_cond: {
+      open: [
+        # Empty cond: bare `;`
+        { s: 'PUNC_SEMI' a: '@fcond-empty-take-semi' g: 'fcond-empty' }
+        # Expression cond: take expression then `;`
+        { p: 'val' a: '@fcond-mark-expr' g: 'fcond-expr' }
+      ]
+      close: [
+        { c: '@fcond-needs-semi' s: 'PUNC_SEMI'
+          a: '@fcond-take-semi' g: 'fcond-semi' }
+        { s: [] g: 'fcond-end' }
+      ]
+    }
+
+    for_iter: {
+      open: [
+        # Empty iter: backstep the `)` so for_controls can take it.
+        { s: 'PUNC_RPAREN' b: 1 a: '@fiter-empty' g: 'fiter-empty' }
+        # Expression iter: take expression up to `)`.
+        { p: 'val' a: '@fiter-mark-expr' g: 'fiter-expr' }
+      ]
+      close: [
+        { s: [] g: 'fiter-end' }
+      ]
+    }
+
+    # ---- asm_statement (phase B4.2.4, opaque-token form) ------------
+    #
+    # GCC inline asm: `__asm__ volatile? goto? ( template : … ) ;`.
+    # Phase B4.2.4 captures the whole statement as a flat token-list
+    # under an asm_statement node — qualifiers / template / operand
+    # sections are NOT yet broken out (that's a follow-up). The shape
+    # is enough to unblock the body-supportedness gate.
+    # asm_statement (phase C.8 — structured form):
+    #   <kw> <qualifier>* ( <template>
+    #     (: <operand-list>)?    -- outputs
+    #     (: <operand-list>)?    -- inputs
+    #     (: <clobber-list>)?    -- clobbers
+    #     (: <label-list>)?      -- labels
+    #   ) ;?
+    #
+    # State machine across r:-recursion via rule.k.phase.
+    asm_statement: {
+      open: [
+        { c: '@asm-reentry' s: [] g: 'asm-reentry' }
+        { s: 'KW_ASM' a: '@asm-take-keyword' g: 'asm-asm' }
+        { s: 'KW___ASM' a: '@asm-take-keyword' g: 'asm-asm-1' }
+        { s: 'KW___ASM__' a: '@asm-take-keyword' g: 'asm-asm-2' }
+      ]
+      close: [
+        # Qualifier loop (volatile/inline/goto + GCC variants).
+        { c: '@asm-need-qualifier' s: 'KW_VOLATILE'
+          a: '@asm-take-qualifier' r: 'asm_statement' g: 'asm-q-v' }
+        { c: '@asm-need-qualifier' s: 'KW___VOLATILE__'
+          a: '@asm-take-qualifier' r: 'asm_statement' g: 'asm-q-vv' }
+        { c: '@asm-need-qualifier' s: 'KW___VOLATILE'
+          a: '@asm-take-qualifier' r: 'asm_statement' g: 'asm-q-v3' }
+        { c: '@asm-need-qualifier' s: 'KW_INLINE'
+          a: '@asm-take-qualifier' r: 'asm_statement' g: 'asm-q-i' }
+        { c: '@asm-need-qualifier' s: 'KW___INLINE__'
+          a: '@asm-take-qualifier' r: 'asm_statement' g: 'asm-q-ii' }
+        { c: '@asm-need-qualifier' s: 'KW___INLINE'
+          a: '@asm-take-qualifier' r: 'asm_statement' g: 'asm-q-i3' }
+        { c: '@asm-need-qualifier' s: 'KW_GOTO'
+          a: '@asm-take-qualifier' r: 'asm_statement' g: 'asm-q-g' }
+        # Take `(` to open the operand list.
+        { c: '@asm-need-lparen' s: 'PUNC_LPAREN'
+          a: '@asm-take-lparen' r: 'asm_statement' g: 'asm-lparen' }
+        # Take template (one string-literal val).
+        { c: '@asm-need-template' p: 'asm_template' g: 'asm-tpl' }
+        # Section-introducing `:`.
+        { c: '@asm-need-section-colon' s: 'PUNC_COLON'
+          a: '@asm-take-section-colon' r: 'asm_statement'
+          g: 'asm-section-colon' }
+        # Section content.
+        { c: '@asm-need-section' p: 'asm_section' g: 'asm-section' }
+        # Take `)`.
+        { c: '@asm-need-rparen' s: 'PUNC_RPAREN'
+          a: '@asm-take-rparen' r: 'asm_statement' g: 'asm-rparen' }
+        # Take `;`.
+        { c: '@asm-need-semi' s: 'PUNC_SEMI'
+          a: '@asm-take-semi' g: 'asm-end' }
+        { s: [] g: 'asm-fallthrough' }
+      ]
+    }
+
+    # asm_template: a string-literal expression (val will produce a
+    # literal_expression node; possibly via string_atom for adjacent
+    # strings).
+    asm_template: {
+      open: [
+        { p: 'val' g: 'tpl-val' }
+      ]
+      close: [
+        { s: [] g: 'tpl-end' }
+      ]
+    }
+
+    # asm_section: one operand-list / clobber-list / label-list.
+    # The kind is determined by the parent's k.sectionIdx (0/1 →
+    # operand, 2 → clobber, 3 → label). Each iteration takes one
+    # item; the close-state `,` alt r:-recurses if more items follow.
+    asm_section: {
+      open: [
+        # Take the first / post-comma item if t0 starts an item of
+        # the appropriate kind (the cond peeks t0). On empty
+        # section or end (t0 = `:` or `)`), all needs-* fail and
+        # the s:[] fallback exits cleanly.
+        { c: '@asec-needs-operand' p: 'asm_operand' g: 'asec-op' }
+        { c: '@asec-needs-clobber' p: 'asm_clobber' g: 'asec-cl' }
+        { c: '@asec-needs-label' p: 'asm_label_ref' g: 'asec-lbl' }
+        # Empty section / past last item.
+        { s: [] g: 'asec-empty-or-end' }
+      ]
+      close: [
+        # Inter-item comma: take and r:-recurse for the next item.
+        { s: 'PUNC_COMMA' a: '@asec-take-comma'
+          r: 'asm_section' g: 'asec-comma' }
+        # Next is `:` (next section) or `)` (end) — leave for parent.
+        { s: [] g: 'asec-end' }
+      ]
+    }
+
+    # asm_operand: opaque-token absorber. Phase C.8.b will sub-
+    # structure it ([asm-name]? <constraint-string> ( <expr> )) once
+    # the rest of the asm grammar is verified.
+    asm_operand: {
+      open: [
+        { c: '@aop-reentered' s: [] g: 'aop-reentry' }
+        { s: '#ANY_C_TOKEN' a: '@aop-take' g: 'aop-first' }
+      ]
+      close: [
+        { c: '@aop-stop' s: 'PUNC_COMMA' b: 1 g: 'aop-end-comma' }
+        { c: '@aop-stop' s: 'PUNC_COLON' b: 1 g: 'aop-end-colon' }
+        { c: '@aop-stop' s: 'PUNC_RPAREN' b: 1 g: 'aop-end-rparen' }
+        { s: '#ANY_C_TOKEN' a: '@aop-take'
+          r: 'asm_operand' g: 'aop-more' }
+      ]
+    }
+
+    # asm_clobber: a single LIT_STRING.
+    asm_clobber: {
+      open: [
+        { s: 'LIT_STRING' a: '@acl-take' g: 'acl-take' }
+      ]
+      close: [
+        { s: [] g: 'acl-end' }
+      ]
+    }
+
+    # asm_label_ref: a single ID.
+    asm_label_ref: {
+      open: [
+        { s: 'ID' a: '@alr-take' g: 'alr-take' }
+      ]
+      close: [
+        { s: [] g: 'alr-end' }
+      ]
+    }
+
+    # ---- preprocessor_line (phase B4.2.4, opaque to PP_NEWLINE) -----
+    #
+    # A `#-line` inside a function body. Captured as a flat token-list
+    # under a preprocessor_line node up to and including the trailing
+    # PP_NEWLINE. Structured directive shapes (#define, #include, etc)
+    # remain on the legacy chomp+structure path until phase C+.
+    preprocessor_line: {
+      open: [
+        { c: '@pp-reentry' s: [] g: 'pp-reentry' }
+        { s: 'PP_HASH' a: '@pp-take-hash' g: 'pp-hash' }
+      ]
+      close: [
+        { s: 'PP_NEWLINE' a: '@pp-take-newline' g: 'pp-end' }
+        { s: '#ZZ' b: 1 g: 'pp-eof' }
+        { s: '#ANY_C_TOKEN' a: '@pp-absorb' r: 'preprocessor_line' g: 'pp-tok' }
+      ]
+    }
+
+    # ---- labeled_statement (phase B4.2.3) ---------------------------
+    #
+    # case <expr> :  body   → labelKind: 'case'
+    # default     :  body   → labelKind: 'default'
+    # ID          :  body   → labelKind: 'label', labelName: ID
+    labeled_statement: {
+      open: [
+        { s: 'KW_CASE' a: '@lbl-take-case' g: 'lbl-case' }
+        { s: 'KW_DEFAULT' a: '@lbl-take-default' g: 'lbl-default' }
+        { s: 'ID' a: '@lbl-take-name' g: 'lbl-name' }
+      ]
+      close: [
+        { c: '@lbl-needs-expr' p: 'val' a: '@lbl-mark-expr' g: 'lbl-expr' }
+        { c: '@lbl-needs-colon' s: 'PUNC_COLON'
+          a: '@lbl-take-colon' g: 'lbl-colon' }
+        { c: '@lbl-needs-body' p: 'statement' g: 'lbl-body' }
+        { s: [] g: 'lbl-end' }
+      ]
+    }
+
+    # ---- type_name (phase C.2) --------------------------------------
+    #
+    # Absorbs the contents of a type-name (the body between `(` and
+    # `)` in a cast, sizeof type-form, or compound literal). The
+    # caller is expected to have already taken the opening `(`; this
+    # rule consumes tokens up to (but NOT including) the matching
+    # `)`. Inner parens / brackets are tracked so a function-pointer
+    # type-name like `int (*)(int)` doesn't terminate prematurely.
+    #
+    # Phase C.2's shape captures the body as a flat token list under
+    # a type_name node. Sub-structuring (declaration_specifiers,
+    # abstract_declarator) is deferred to phase B5.
+    type_name: {
+      open: [
+        # Re-entry on r:-recursion: skip without taking; close runs.
+        { c: '@tn-reentered' s: [] g: 'tn-reentry' }
+        # First entry: take the leading content token.
+        { s: '#ANY_C_TOKEN' a: '@tn-take' g: 'tn-first' }
+      ]
+      close: [
+        # `)` at depth 0: leave it for the parent rule.
+        { c: '@tn-balanced' s: 'PUNC_RPAREN' b: 1 g: 'tn-end' }
+        # Otherwise absorb the next token and recurse.
+        { s: '#ANY_C_TOKEN' a: '@tn-take' r: 'type_name' g: 'tn-more' }
+      ]
+    }
+
+    # ---- sizeof_type_form (phase C.2) -------------------------------
+    #
+    # `sizeof ( type_name )` and `_Alignof ( type_name )` (and GCC
+    # __alignof__ / __alignof variants). Produces a unary_expression
+    # with op set to the keyword and operand set to the type_name
+    # node. The expression-form (`sizeof <unary>`) is handled by
+    # @jsonic/expr's prefix-op machinery via C_OP_TABLE — a val.open
+    # alt picks this rule only when the lookahead matches
+    # `<keyword> ( <type-head>`.
+    sizeof_type_form: {
+      open: [
+        { s: 'KW_SIZEOF' a: '@stf-take-kw' g: 'stf-sizeof' }
+        { s: 'KW__ALIGNOF' a: '@stf-take-kw' g: 'stf-alignof' }
+        { s: 'KW_ALIGNOF' a: '@stf-take-kw' g: 'stf-alignof-2' }
+        { s: 'KW___ALIGNOF__' a: '@stf-take-kw' g: 'stf-alignof-3' }
+        { s: 'KW___ALIGNOF' a: '@stf-take-kw' g: 'stf-alignof-4' }
+      ]
+      close: [
+        { c: '@stf-needs-lparen' s: 'PUNC_LPAREN'
+          a: '@stf-take-lparen' p: 'type_name' g: 'stf-lparen' }
+        { c: '@stf-needs-rparen' s: 'PUNC_RPAREN'
+          a: '@stf-take-rparen' g: 'stf-rparen' }
+        { s: [] g: 'stf-end' }
+      ]
+    }
+
+    # ---- cast_or_compound_literal (phase C.3) -----------------------
+    #
+    # `( type_name ) <unary>`           → cast_expression
+    # `( type_name ) { initializer }`   → compound_literal (pending C.4
+    #                                      initializer_list rule)
+    #
+    # The val.open alt that dispatches here matches `( <type-head>`
+    # so we know the parens contain a type-name. After taking `)` we
+    # peek the next token: `{` selects the compound-literal arm, any
+    # other token is the cast-expression arm.
+    cast_or_compound_literal: {
+      open: [
+        # Re-entry on r: (after taking `)`): preserve state, fall
+        # through to close.
+        { c: '@cocl-reentered' s: [] g: 'cocl-reentry' }
+        { s: 'PUNC_LPAREN' a: '@cocl-take-lparen'
+          p: 'type_name' g: 'cocl-open' }
+      ]
+      close: [
+        # Take the closing `)` then r: back through open so the
+        # next close pass can decide cast vs compound literal.
+        { c: '@cocl-needs-rparen' s: 'PUNC_RPAREN'
+          a: '@cocl-take-rparen' r: 'cast_or_compound_literal'
+          g: 'cocl-rparen' }
+        # Compound literal: `(type){…}` — body is an initializer_list.
+        { c: '@cocl-needs-decision' s: 'PUNC_LBRACE'
+          a: '@cocl-mark-cl' b: 1 p: 'initializer_list'
+          g: 'cocl-cl' }
+        # Cast: parse the operand as an expression. (Pratt-driven
+        # val absorbs the full operand; precedence inside cast is
+        # documented as a phase-C.x follow-up if a test case fails.)
+        { c: '@cocl-needs-decision' a: '@cocl-mark-cast'
+          p: 'val' g: 'cocl-cast' }
+        { s: [] a: '@cocl-finalize' g: 'cocl-end' }
+      ]
+    }
+
+    # ---- initializer_list family (phase C.4) ------------------------
+    #
+    # `{ <item>, <item>, … }` — used as the RHS of `=` in declarators
+    # and as the body of compound literals. Each item is either:
+    #   <expr>                    (plain value)
+    #   { <list-body> }           (nested initializer list)
+    #   <designation> = <value>   (designated initialiser)
+    # where designation is one or more `.<id>` / `[<expr>]` segments.
+
+    initializer_list: {
+      open: [
+        # Re-entry from r:-recursion preserves the in-progress node.
+        { c: '@il-reentered' s: [] g: 'il-reentry' }
+        { s: 'PUNC_LBRACE' a: '@il-take-lbrace' g: 'il-open' }
+      ]
+      close: [
+        # Closing `}` (or empty list).
+        { s: 'PUNC_RBRACE' a: '@il-take-rbrace' g: 'il-end' }
+        # Inter-item comma. r:-recurse so we keep iterating.
+        { s: 'PUNC_COMMA' a: '@il-take-comma'
+          r: 'initializer_list' g: 'il-comma' }
+        # Take next item.
+        { p: 'initializer_item' g: 'il-item' }
+      ]
+    }
+
+    initializer_item: {
+      open: [
+        # Re-entry after r: from the eq alt below.
+        { c: '@ii-reentered' s: [] g: 'ii-reentry' }
+        # Designation forms: leading `.` or `[` belong to a designation.
+        { s: 'PUNC_DOT' b: 1 p: 'designation'
+          a: '@ii-mark-has-desig' g: 'ii-desig' }
+        { s: 'PUNC_LBRACKET' b: 1 p: 'designation'
+          a: '@ii-mark-has-desig' g: 'ii-idx-desig' }
+        # Plain nested initializer-list (no designation).
+        { s: 'PUNC_LBRACE' b: 1 p: 'initializer_list'
+          a: '@ii-mark-nested' g: 'ii-nested' }
+        # Plain expression value (no designation).
+        { p: 'val' g: 'ii-expr' }
+      ]
+      close: [
+        # After designation, take `=` and r:-recurse so the next pass
+        # picks up the value.
+        { c: '@ii-needs-eq' s: 'PUNC_ASSIGN'
+          a: '@ii-take-eq' r: 'initializer_item' g: 'ii-eq' }
+        # After `=`, take a nested initializer list as the value.
+        { c: '@ii-needs-value' s: 'PUNC_LBRACE'
+          b: 1 p: 'initializer_list'
+          a: '@ii-mark-nested' g: 'ii-val-list' }
+        # After `=`, take an expression as the value.
+        { c: '@ii-needs-value' p: 'val' g: 'ii-val' }
+        { s: [] g: 'ii-end' }
+      ]
+    }
+
+    # designation: 1+ chained designators (e.g. `.x.y[0]`).
+    designation: {
+      open: [
+        { p: 'designator' g: 'desig-first' }
+      ]
+      close: [
+        { s: 'PUNC_DOT' b: 1 p: 'designator' g: 'desig-more-dot' }
+        { s: 'PUNC_LBRACKET' b: 1 p: 'designator'
+          g: 'desig-more-lbracket' }
+        { s: [] g: 'desig-end' }
+      ]
+    }
+
+    # designator: `.ID`  → member_designator
+    #             `[ <expr> ]`  → index_designator
+    designator: {
+      open: [
+        { s: 'PUNC_DOT' a: '@dr-take-dot' g: 'dr-dot' }
+        { s: 'PUNC_LBRACKET' a: '@dr-take-lbracket'
+          p: 'val' g: 'dr-lbracket' }
+      ]
+      close: [
+        { c: '@dr-needs-id' s: 'ID' a: '@dr-take-id' g: 'dr-id' }
+        { c: '@dr-needs-rbracket' s: 'PUNC_RBRACKET'
+          a: '@dr-take-rbracket' g: 'dr-rbracket' }
+        { s: [] g: 'dr-end' }
+      ]
+    }
+
+    # ---- generic_selection (phase C.5) ------------------------------
+    #
+    # `_Generic ( ctrl-expr , association ( , association )* )`
+    # association :=  type-name `:` <expr>
+    #              |  `default`  `:` <expr>
+    #
+    # The rule walks a small state machine via rule.k to take, in
+    # order: `_Generic`, `(`, controlling expression, `,`,
+    # association, then alternating `,` / association up to `)`.
+    generic_selection: {
+      open: [
+        # Re-entry: any matched-open path is signalled via k.kwTaken.
+        { c: '@gs-reentered' s: [] g: 'gs-reentry' }
+        { s: 'KW__GENERIC' a: '@gs-take-kw' g: 'gs-kw' }
+      ]
+      close: [
+        { c: '@gs-need-lparen' s: 'PUNC_LPAREN'
+          a: '@gs-take-lparen' r: 'generic_selection' g: 'gs-lparen' }
+        { c: '@gs-need-ctrl'
+          p: 'generic_controlling_expression' g: 'gs-ctrl' }
+        { c: '@gs-need-comma' s: 'PUNC_COMMA'
+          a: '@gs-take-comma' r: 'generic_selection' g: 'gs-comma' }
+        { c: '@gs-need-association'
+          p: 'generic_association' g: 'gs-assoc' }
+        { c: '@gs-after-association' s: 'PUNC_COMMA'
+          a: '@gs-take-comma' r: 'generic_selection' g: 'gs-more-comma' }
+        { c: '@gs-need-rparen' s: 'PUNC_RPAREN'
+          a: '@gs-take-rparen' g: 'gs-rparen' }
+        { s: [] g: 'gs-end' }
+      ]
+    }
+
+    # generic_controlling_expression: wraps the controlling expression
+    # in its own node so the legacy CST shape (with `.expression`
+    # field) is preserved.
+    generic_controlling_expression: {
+      open: [
+        { p: 'val' g: 'gce-val' }
+      ]
+      close: [
+        { s: [] g: 'gce-end' }
+      ]
+    }
+
+    # generic_association: a single `<type-name>:<value>` or
+    # `default:<value>` pair.
+    generic_association: {
+      open: [
+        # Re-entry for r:-recursion after `:` has been taken.
+        { c: '@ga-reentered' s: [] g: 'ga-reentry' }
+        { s: 'KW_DEFAULT' a: '@ga-take-default' g: 'ga-default' }
+        { p: 'type_name_assoc' a: '@ga-mark-type' g: 'ga-type' }
+      ]
+      close: [
+        { c: '@ga-need-colon' s: 'PUNC_COLON'
+          a: '@ga-take-colon' r: 'generic_association' g: 'ga-colon' }
+        { c: '@ga-need-value' p: 'val' g: 'ga-value' }
+        { s: [] g: 'ga-end' }
+      ]
+    }
+
+    # type_name_assoc: like type_name but stops at `:` or `,` or `)`
+    # at depth 0 (rather than `)` only). Used inside generic_association.
+    type_name_assoc: {
+      open: [
+        { c: '@tna-reentered' s: [] g: 'tna-reentry' }
+        { s: '#ANY_C_TOKEN' a: '@tna-take' g: 'tna-first' }
+      ]
+      close: [
+        { c: '@tna-stop' s: 'PUNC_COLON' b: 1 g: 'tna-end-colon' }
+        { c: '@tna-stop' s: 'PUNC_COMMA' b: 1 g: 'tna-end-comma' }
+        { c: '@tna-stop' s: 'PUNC_RPAREN' b: 1 g: 'tna-end-rparen' }
+        { s: '#ANY_C_TOKEN' a: '@tna-take'
+          r: 'type_name_assoc' g: 'tna-more' }
+      ]
+    }
+
+    # ---- statement_expression (phase C.6) ---------------------------
+    #
+    # GCC extension: `( { … } )` evaluates the compound statement and
+    # yields the value of its last expression-statement. Captured here
+    # as a structured node with the inner compound_statement as a
+    # child.
+    statement_expression: {
+      open: [
+        { s: 'PUNC_LPAREN' a: '@se-take-lparen'
+          p: 'compound_statement' g: 'se-open' }
+      ]
+      close: [
+        { s: 'PUNC_RPAREN' a: '@se-take-rparen' g: 'se-end' }
+        { s: [] g: 'se-fallthrough' }
+      ]
+    }
+
+    # ---- string_atom (phase C.7) -----------------------------------
+    #
+    # Adjacent string literals concatenate into a single
+    # literal_expression node (`"foo" "bar"` → one literal). The
+    # rule takes the first LIT_STRING in open, then loops via r: to
+    # absorb any further LIT_STRINGs that follow.
+    string_atom: {
+      open: [
+        { c: '@sa-reentered' s: [] g: 'sa-reentry' }
+        { s: 'LIT_STRING' a: '@sa-take' g: 'sa-first' }
+      ]
+      close: [
+        { s: 'LIT_STRING' a: '@sa-take' r: 'string_atom' g: 'sa-more' }
+        { s: [] g: 'sa-end' }
+      ]
+    }
+
+    # ---- compound_literal_body (phase C.3 placeholder) --------------
+    #
+    # Phase C.4 superseded this placeholder with initializer_list.
+    # Kept as an alias rule so any leftover dispatch sites still resolve.
+    compound_literal_body: {
+      open: [
+        { s: 'PUNC_LBRACE' b: 1 p: 'initializer_list' g: 'clb-delegate' }
+      ]
+      close: [
+        { s: [] g: 'clb-end' }
+      ]
+    }
+
+    # ---- struct / union specifier (phase F.1) -----------------------
+    #
+    # `struct` | `union`  <tag>?  ( `{` member-list `}` )?
+    #
+    # The tag and body are independently optional (a forward
+    # declaration is just `struct S;`; an anonymous struct
+    # definition is `struct { … } x;`). State machine across
+    # r:-recursion via rule.k.
+    struct_specifier: {
+      open: [
+        { c: '@ss-reentered' s: [] g: 'ss-reentry' }
+        { s: 'KW_STRUCT' a: '@ss-take-kw' g: 'ss-struct' }
+        { s: 'KW_UNION' a: '@ss-take-kw' g: 'ss-union' }
+      ]
+      close: [
+        # Optional tag name (ID or TYPEDEF_NAME).
+        { c: '@ss-need-tag' s: 'ID' a: '@ss-take-tag'
+          r: 'struct_specifier' g: 'ss-tag' }
+        { c: '@ss-need-tag' s: 'TYPEDEF_NAME' a: '@ss-take-tag'
+          r: 'struct_specifier' g: 'ss-tag-td' }
+        # Optional body.
+        { c: '@ss-need-body' s: 'PUNC_LBRACE' b: 1
+          p: 'member_decl_list' g: 'ss-body' }
+        { s: [] g: 'ss-end' }
+      ]
+    }
+
+    # ---- member_decl_list (phase F.2) -------------------------------
+    member_decl_list: {
+      open: [
+        { c: '@mdl-reentered' s: [] g: 'mdl-reentry' }
+        { s: 'PUNC_LBRACE' a: '@mdl-take-lbrace' g: 'mdl-open' }
+      ]
+      close: [
+        { s: 'PUNC_RBRACE' a: '@mdl-take-rbrace' g: 'mdl-end' }
+        # GCC: a stray `;` is allowed as an empty member.
+        { s: 'PUNC_SEMI' a: '@mdl-take-empty-semi'
+          r: 'member_decl_list' g: 'mdl-empty' }
+        { p: 'struct_declaration' r: 'member_decl_list' g: 'mdl-member' }
+      ]
+    }
+
+    # struct_declaration: specifier_qualifier_list struct_declarator_list? `;`.
+    # Re-uses simple_declaration's spec absorption via spec_loop, but
+    # the spec node is renamed to `specifier_qualifier_list` to match
+    # the legacy CST.
+    struct_declaration: {
+      open: [
+        { c: '@sd-reentered' s: [] g: 'sd-reentry' }
+        { s: '#STORAGE_PREFIX' a: '@sd-absorb-spec-storage'
+          p: 'spec_loop' g: 'sd-storage' }
+        { s: '#SIMPLE_TYPE_HEAD' a: '@sd-absorb-spec-type'
+          p: 'spec_loop' g: 'sd-type' }
+      ]
+      close: [
+        # First struct_declarator (after specs).
+        { c: '@sd-need-decl-first' s: 'ID' b: 1
+          p: 'struct_declarator' g: 'sd-decl' }
+        { c: '@sd-need-decl-first' s: 'PUNC_STAR' b: 1
+          p: 'struct_declarator' g: 'sd-decl-ptr' }
+        { c: '@sd-need-decl-first' s: 'PUNC_COLON' b: 1
+          p: 'struct_declarator' g: 'sd-decl-bf' }
+        # Subsequent declarators after `,`.
+        { s: 'PUNC_COMMA' a: '@sd-take-comma' p: 'struct_declarator'
+          g: 'sd-decl-comma' }
+        # Trailing `;`.
+        { s: 'PUNC_SEMI' a: '@sd-take-semi' g: 'sd-end' }
+      ]
+    }
+
+    # struct_declarator: declarator (`:` const-expr)?
+    #                  | `:` const-expr           (anonymous bitfield)
+    struct_declarator: {
+      open: [
+        { c: '@sdr-reentered' s: [] g: 'sdr-reentry' }
+        # Anonymous bitfield: starts with `:`.
+        { s: 'PUNC_COLON' b: 1 p: 'bitfield_width'
+          a: '@sdr-mark-anon-bf' g: 'sdr-bf-only' }
+        # Named declarator (with optional bitfield in close).
+        { s: 'ID' b: 1 p: 'init_declarator' g: 'sdr-decl' }
+        { s: 'PUNC_STAR' b: 1 p: 'init_declarator' g: 'sdr-decl-ptr' }
+      ]
+      close: [
+        # Optional bitfield after the declarator name.
+        { c: '@sdr-need-bf' s: 'PUNC_COLON' b: 1
+          p: 'bitfield_width' g: 'sdr-bf' }
+        { s: [] g: 'sdr-end' }
+      ]
+    }
+
+    # bitfield_width: `:` <const-expr>. The const-expr is a val
+    # bounded by the surrounding `,` or `;` or attribute-spec head.
+    bitfield_width: {
+      open: [
+        { s: 'PUNC_COLON' a: '@bfw-take-colon' p: 'val' g: 'bfw-colon' }
+      ]
+      close: [
+        { s: [] g: 'bfw-end' }
+      ]
+    }
+
+    # ---- enum_specifier (phase F.3) ---------------------------------
+    #
+    # `enum` <tag>? (`:` <type-spec>)? ( `{` enumerator-list `}` )?
+    enum_specifier: {
+      open: [
+        { c: '@es-tag-reentered' s: [] g: 'es-reentry' }
+        { s: 'KW_ENUM' a: '@es-take-kw' g: 'es-enum' }
+      ]
+      close: [
+        { c: '@es-need-tag' s: 'ID' a: '@es-take-tag'
+          r: 'enum_specifier' g: 'es-tag' }
+        { c: '@es-need-tag' s: 'TYPEDEF_NAME' a: '@es-take-tag'
+          r: 'enum_specifier' g: 'es-tag-td' }
+        # C23 fixed-underlying-type: `enum E : int { … }`.
+        { c: '@es-need-utype' s: 'PUNC_COLON'
+          a: '@es-take-utype-colon' p: 'enum_utype_specs'
+          r: 'enum_specifier' g: 'es-utype' }
+        { c: '@es-need-body' s: 'PUNC_LBRACE' b: 1
+          p: 'enumerator_list' g: 'es-body' }
+        { s: [] g: 'es-end' }
+      ]
+    }
+
+    # enum_utype_specs: a small specifier list for the enum
+    # underlying type. Reuses spec_loop to absorb keywords.
+    enum_utype_specs: {
+      open: [
+        { s: '#SIMPLE_TYPE_HEAD' a: '@eus-absorb-spec'
+          p: 'spec_loop' g: 'eus-type' }
+      ]
+      close: [
+        { s: [] g: 'eus-end' }
+      ]
+    }
+
+    # ---- enumerator_list / enumerator (phase F.4) -------------------
+    enumerator_list: {
+      open: [
+        { c: '@el-reentered' s: [] g: 'el-reentry' }
+        { s: 'PUNC_LBRACE' a: '@el-take-lbrace' g: 'el-open' }
+      ]
+      close: [
+        { s: 'PUNC_RBRACE' a: '@el-take-rbrace' g: 'el-end' }
+        { s: 'PUNC_COMMA' a: '@el-take-comma'
+          r: 'enumerator_list' g: 'el-comma' }
+        # Push enumerator for the next item; on return, re-fire close
+        # (the parser stays in close state). No `r:` — that would
+        # fight with `p:` and is effectively dead code.
+        { p: 'enumerator' g: 'el-enum' }
+      ]
+    }
+
+    enumerator: {
+      open: [
+        { c: '@enr-reentered' s: [] g: 'enr-reentry' }
+        { s: 'ID' a: '@enr-take-name' g: 'enr-id' }
+        { s: 'TYPEDEF_NAME' a: '@enr-take-name' g: 'enr-td' }
+      ]
+      close: [
+        # C23 attribute spec on the enumerator: `A [[deprecated]] = 1`.
+        { s: 'PUNC_LBRACKET PUNC_LBRACKET' c: '@as23-adjacent-open'
+          b: 2 p: 'attribute_spec_c23'
+          r: 'enumerator' g: 'enr-attr' }
+        { c: '@enr-need-eq' s: 'PUNC_ASSIGN'
+          a: '@enr-take-eq' p: 'val' g: 'enr-eq' }
+        { s: [] g: 'enr-end' }
+      ]
+    }
+
+    # ---- attribute_spec_gcc (phase G.2) -----------------------------
+    #
+    # `__attribute__ (( <items> ))` — the inner double-paren is part
+    # of the syntax (legacy GCC convention). __attribute is also
+    # accepted by some toolchains.
+    attribute_spec_gcc: {
+      open: [
+        { c: '@asg-reentered' s: [] g: 'asg-reentry' }
+        { s: 'KW___ATTRIBUTE__' a: '@asg-take-kw' g: 'asg-attr' }
+        { s: 'KW___ATTRIBUTE' a: '@asg-take-kw' g: 'asg-attr-1' }
+      ]
+      close: [
+        { c: '@asg-need-outer-lparen' s: 'PUNC_LPAREN'
+          a: '@asg-take-outer-lparen' r: 'attribute_spec_gcc'
+          g: 'asg-outer-lp' }
+        { c: '@asg-need-inner-lparen' s: 'PUNC_LPAREN'
+          a: '@asg-take-inner-lparen' r: 'attribute_spec_gcc'
+          g: 'asg-inner-lp' }
+        { c: '@asg-need-comma' s: 'PUNC_COMMA'
+          a: '@asg-take-comma' r: 'attribute_spec_gcc' g: 'asg-comma' }
+        { c: '@asg-need-item' p: 'attribute_item' g: 'asg-item' }
+        { c: '@asg-need-inner-rparen' s: 'PUNC_RPAREN'
+          a: '@asg-take-inner-rparen' r: 'attribute_spec_gcc'
+          g: 'asg-inner-rp' }
+        { c: '@asg-need-outer-rparen' s: 'PUNC_RPAREN'
+          a: '@asg-take-outer-rparen' g: 'asg-outer-rp' }
+        { s: [] g: 'asg-end' }
+      ]
+    }
+
+    # ---- attribute_spec_msvc (phase G.3) ----------------------------
+    #
+    # `__declspec ( <items> )` — single-paren form.
+    attribute_spec_msvc: {
+      open: [
+        { c: '@asm2-reentered' s: [] g: 'asm2-reentry' }
+        { s: 'KW___DECLSPEC' a: '@asm2-take-kw' g: 'asm2-decl' }
+      ]
+      close: [
+        { c: '@asm2-need-lparen' s: 'PUNC_LPAREN'
+          a: '@asm2-take-lparen' r: 'attribute_spec_msvc'
+          g: 'asm2-lp' }
+        { c: '@asm2-need-comma' s: 'PUNC_COMMA'
+          a: '@asm2-take-comma' r: 'attribute_spec_msvc' g: 'asm2-comma' }
+        { c: '@asm2-need-item' p: 'attribute_item' g: 'asm2-item' }
+        { c: '@asm2-need-rparen' s: 'PUNC_RPAREN'
+          a: '@asm2-take-rparen' g: 'asm2-rp' }
+        { s: [] g: 'asm2-end' }
+      ]
+    }
+
+    # ---- attribute_spec_c23 (phase G.1) -----------------------------
+    #
+    # `[[ <items> ]]` — two adjacent `[` and two adjacent `]` (no
+    # whitespace between). The adjacency cond protects against
+    # mis-matching `[ [ x ]]` (legal as nested array subscript).
+    attribute_spec_c23: {
+      open: [
+        { c: '@as23-reentered' s: [] g: 'as23-reentry' }
+        { s: 'PUNC_LBRACKET PUNC_LBRACKET' c: '@as23-adjacent-open'
+          a: '@as23-take-open' g: 'as23-open' }
+      ]
+      close: [
+        { c: '@as23-need-comma' s: 'PUNC_COMMA'
+          a: '@as23-take-comma' r: 'attribute_spec_c23'
+          g: 'as23-comma' }
+        { c: '@as23-need-item' p: 'attribute_item' g: 'as23-item' }
+        { c: '@as23-need-close' s: 'PUNC_RBRACKET PUNC_RBRACKET'
+          c: '@as23-adjacent-close' a: '@as23-take-close'
+          g: 'as23-close' }
+        { s: [] g: 'as23-end' }
+      ]
+    }
+
+    # ---- attribute_item (phase G.4) ---------------------------------
+    #
+    # name (optional `::` namespace) plus optional argument list.
+    attribute_item: {
+      open: [
+        { c: '@ai-reentered' s: [] g: 'ai-reentry' }
+        { s: 'ID' a: '@ai-take-name' g: 'ai-id' }
+        { s: 'TYPEDEF_NAME' a: '@ai-take-name' g: 'ai-td' }
+        { s: 'MACRO_NAME' a: '@ai-take-name' g: 'ai-macro' }
+        # GCC attribute names can be keywords: `__attribute__((const))`,
+        # `__attribute__((noreturn))` etc. Mirror legacy parseAttributeItem
+        # which accepts any KW_* token in the name slot.
+        { s: '#KW_TOKEN' a: '@ai-take-name' g: 'ai-kw' }
+      ]
+      close: [
+        # C23 namespaced form: `<prefix> :: <name>`. Use a 2-token
+        # `s:` so parse_alts force-fetches both `:` tokens (without
+        # this, only the first colon is in ctx.t and the cond's
+        # ctx.t[1] check sees NOTOKEN and rejects).
+        { c: '@ai-need-colon-1' s: 'PUNC_COLON PUNC_COLON' b: 1
+          a: '@ai-take-colon-1' r: 'attribute_item' g: 'ai-c1' }
+        { c: '@ai-need-colon-2' s: 'PUNC_COLON'
+          a: '@ai-take-colon-2' r: 'attribute_item' g: 'ai-c2' }
+        { c: '@ai-need-prefixed-name' s: 'ID'
+          a: '@ai-take-prefixed-name' r: 'attribute_item'
+          g: 'ai-pname-id' }
+        { c: '@ai-need-prefixed-name' s: '#KW_TOKEN'
+          a: '@ai-take-prefixed-name' r: 'attribute_item'
+          g: 'ai-pname-kw' }
+        # Optional argument list.
+        { c: '@ai-need-args' s: 'PUNC_LPAREN' b: 1
+          p: 'attribute_argument_list' g: 'ai-args' }
+        { s: [] g: 'ai-end' }
+      ]
+    }
+
+    # ---- attribute_argument_list (phase G.4) ------------------------
+    attribute_argument_list: {
+      open: [
+        { c: '@aal-reentered' s: [] g: 'aal-reentry' }
+        { s: 'PUNC_LPAREN' a: '@aal-take-lparen' g: 'aal-open' }
+      ]
+      close: [
+        { s: 'PUNC_RPAREN' a: '@aal-take-rparen' g: 'aal-end' }
+        { s: 'PUNC_COMMA' a: '@aal-take-comma'
+          r: 'attribute_argument_list' g: 'aal-comma' }
+        { p: 'val' r: 'attribute_argument_list' g: 'aal-arg' }
+      ]
+    }
+
+    # ---- preprocessor_directive dispatcher (phase H.1) --------------
+    #
+    # Routes a `#…` line to the appropriate typed directive rule by
+    # peeking the directive name (the second token after `#`). On an
+    # unrecognised name, falls through to a flat-token fallback.
+    preprocessor_directive: {
+      open: [
+        # Use a 2-token `s:` so parse_alts force-fetches both `#`
+        # and the directive-name token (an ID lexed from the body
+        # of the directive). The cond inspects rule.o1.src to
+        # distinguish #define / #undef / #include / #if family /
+        # #pragma|error|warning|line. b: 2 backsteps both so the
+        # sub-rule's open re-takes them in its own parse.
+        { c: '@ppd-is-define' s: 'PP_HASH #ANY_C_TOKEN' b: 2
+          p: 'define_directive' g: 'ppd-define' }
+        { c: '@ppd-is-undef' s: 'PP_HASH #ANY_C_TOKEN' b: 2
+          p: 'undef_directive' g: 'ppd-undef' }
+        { c: '@ppd-is-include' s: 'PP_HASH #ANY_C_TOKEN' b: 2
+          p: 'include_directive' g: 'ppd-include' }
+        { c: '@ppd-is-conditional' s: 'PP_HASH #ANY_C_TOKEN' b: 2
+          p: 'conditional_directive' g: 'ppd-cond' }
+        { c: '@ppd-is-simple' s: 'PP_HASH #ANY_C_TOKEN' b: 2
+          p: 'simple_directive' g: 'ppd-simple' }
+        # Fallback: unknown directive name.
+        { s: 'PP_HASH' b: 1 p: 'simple_directive' g: 'ppd-unknown' }
+      ]
+      close: [{ s: [] g: 'ppd-end' }]
+    }
+
+    # ---- define_directive (phase H.2) -------------------------------
+    #
+    # `# define <name> ( <params> )? <body> NEWLINE`
+    # Function-like form requires the `(` to be immediately adjacent
+    # to the macro name (no whitespace) — the @def-paren-adjacent
+    # cond enforces that.
+    define_directive: {
+      open: [
+        { c: '@def-reentered' s: [] g: 'def-reentry' }
+        { s: 'PP_HASH' a: '@def-take-hash' g: 'def-hash' }
+      ]
+      close: [
+        { c: '@def-need-keyword' s: 'ID'
+          a: '@def-take-keyword' r: 'define_directive' g: 'def-kw' }
+        { c: '@def-need-name' s: 'ID'
+          a: '@def-take-name' r: 'define_directive' g: 'def-name-id' }
+        { c: '@def-need-name' s: 'MACRO_NAME'
+          a: '@def-take-name' r: 'define_directive' g: 'def-name-mn' }
+        { c: '@def-need-name' s: 'TYPEDEF_NAME'
+          a: '@def-take-name' r: 'define_directive' g: 'def-name-td' }
+        { c: '@def-paren-adjacent' s: 'PUNC_LPAREN' b: 1
+          p: 'macro_parameter_list' g: 'def-params' }
+        { c: '@def-need-body' p: 'macro_body' g: 'def-body' }
+        { c: '@def-need-newline' s: 'PP_NEWLINE'
+          a: '@def-take-newline' g: 'def-end' }
+        { s: [] g: 'def-fall' }
+      ]
+    }
+
+    # macro_parameter_list: ( <ID-or-...> (, <ID-or-...>)* )
+    macro_parameter_list: {
+      open: [
+        { c: '@mpl-reentered' s: [] g: 'mpl-reentry' }
+        { s: 'PUNC_LPAREN' a: '@mpl-take-lparen' g: 'mpl-open' }
+      ]
+      close: [
+        { s: 'PUNC_RPAREN' a: '@mpl-take-rparen' g: 'mpl-end' }
+        { s: 'PUNC_COMMA' a: '@mpl-take-comma'
+          r: 'macro_parameter_list' g: 'mpl-comma' }
+        { s: 'PUNC_ELLIPSIS' a: '@mpl-take-ellipsis'
+          r: 'macro_parameter_list' g: 'mpl-ellipsis' }
+        { s: 'ID' a: '@mpl-take-param'
+          r: 'macro_parameter_list' g: 'mpl-id' }
+        { s: 'TYPEDEF_NAME' a: '@mpl-take-param'
+          r: 'macro_parameter_list' g: 'mpl-td' }
+        { s: 'MACRO_NAME' a: '@mpl-take-param'
+          r: 'macro_parameter_list' g: 'mpl-mn' }
+        { s: '#ANY_C_TOKEN' a: '@mpl-absorb-other'
+          r: 'macro_parameter_list' g: 'mpl-other' }
+        { s: [] g: 'mpl-fall' }
+      ]
+    }
+
+    # macro_body: every remaining token until PP_NEWLINE (NOT inclusive).
+    macro_body: {
+      open: [
+        { c: '@mb-reentered' s: [] g: 'mb-reentry' }
+        # Empty body — the very first thing after the name (or
+        # after the param list) is PP_NEWLINE. Open with no take
+        # so close immediately ends.
+        { s: 'PP_NEWLINE' b: 1 g: 'mb-empty' }
+        { s: '#ANY_C_TOKEN' a: '@mb-take' g: 'mb-first' }
+      ]
+      close: [
+        { s: 'PP_NEWLINE' b: 1 g: 'mb-end' }
+        { s: '#ANY_C_TOKEN' a: '@mb-take'
+          r: 'macro_body' g: 'mb-tok' }
+        { s: [] g: 'mb-fall' }
+      ]
+    }
+
+    # ---- undef_directive (phase H.6) --------------------------------
+    undef_directive: {
+      open: [
+        { c: '@undef-reentered' s: [] g: 'undef-reentry' }
+        { s: 'PP_HASH' a: '@undef-take-hash' g: 'undef-hash' }
+      ]
+      close: [
+        { c: '@undef-need-keyword' s: 'ID'
+          a: '@undef-take-keyword' r: 'undef_directive' g: 'undef-kw' }
+        { c: '@undef-need-name' s: 'ID'
+          a: '@undef-take-name' r: 'undef_directive' g: 'undef-name-id' }
+        { c: '@undef-need-name' s: 'MACRO_NAME'
+          a: '@undef-take-name' r: 'undef_directive' g: 'undef-name-mn' }
+        { c: '@undef-need-name' s: 'TYPEDEF_NAME'
+          a: '@undef-take-name' r: 'undef_directive' g: 'undef-name-td' }
+        { s: 'PP_NEWLINE' a: '@undef-take-newline' g: 'undef-end' }
+        { s: '#ANY_C_TOKEN' a: '@undef-absorb-trailing'
+          r: 'undef_directive' g: 'undef-tail' }
+        { s: [] g: 'undef-fall' }
+      ]
+    }
+
+    # ---- include_directive (phase H.3) ------------------------------
+    #
+    # `# include <header> | "header" | <macro-expr>`. The lexer's
+    # mode tracking (cmeta.mode.expectHeaderName) emits a
+    # LIT_HEADER_NAME token in the angled / quoted case before the
+    # parser ever sees these tokens.
+    include_directive: {
+      open: [
+        { c: '@inc-reentered' s: [] g: 'inc-reentry' }
+        { s: 'PP_HASH' a: '@inc-take-hash' g: 'inc-hash' }
+      ]
+      close: [
+        { c: '@inc-need-keyword' s: 'ID'
+          a: '@inc-take-keyword' r: 'include_directive' g: 'inc-kw' }
+        { c: '@inc-need-header' s: 'LIT_HEADER_NAME'
+          a: '@inc-take-header' r: 'include_directive' g: 'inc-h' }
+        { c: '@inc-need-form' p: 'header_form' g: 'inc-form' }
+        { s: 'PP_NEWLINE' a: '@inc-take-newline' g: 'inc-end' }
+        { s: [] g: 'inc-fall' }
+      ]
+    }
+
+    # header_form: macro-form `#include` body — opaque tokens to PP_NEWLINE.
+    header_form: {
+      open: [
+        { c: '@hf-reentered' s: [] g: 'hf-reentry' }
+        { s: 'PP_NEWLINE' b: 1 g: 'hf-empty' }
+        { s: '#ANY_C_TOKEN' a: '@hf-take' g: 'hf-first' }
+      ]
+      close: [
+        { s: 'PP_NEWLINE' b: 1 g: 'hf-end' }
+        { s: '#ANY_C_TOKEN' a: '@hf-take'
+          r: 'header_form' g: 'hf-tok' }
+        { s: [] g: 'hf-fall' }
+      ]
+    }
+
+    # ---- conditional_directive (phase H.4) --------------------------
+    #
+    # `#if`, `#ifdef`, `#ifndef`, `#elif`, `#elifdef`, `#elifndef`,
+    # `#else`, `#endif`. Body (where present) absorbed as opaque
+    # tokens; structureConditionalGroups (the existing post-pass)
+    # later folds the whole sequence into a conditional_group.
+    conditional_directive: {
+      open: [
+        { c: '@cond-reentered' s: [] g: 'cond-reentry' }
+        { s: 'PP_HASH' a: '@cond-take-hash' g: 'cond-hash' }
+      ]
+      close: [
+        # Directive name token — can be ID (`ifdef`, `endif`, …) or
+        # a keyword (`if`, `else`). Use #ANY_C_TOKEN; the dispatcher
+        # already verified this is a `#if` family directive.
+        { c: '@cond-need-keyword' s: '#ANY_C_TOKEN'
+          a: '@cond-take-keyword' r: 'conditional_directive'
+          g: 'cond-kw' }
+        { s: 'PP_NEWLINE' a: '@cond-take-newline' g: 'cond-end' }
+        { s: '#ANY_C_TOKEN' a: '@cond-absorb'
+          r: 'conditional_directive' g: 'cond-tok' }
+        { s: [] g: 'cond-fall' }
+      ]
+    }
+
+    # ---- simple_directive (phase H.5) -------------------------------
+    #
+    # `#pragma`, `#error`, `#warning`, `#line` (and unknown directives).
+    # The kind is set in @sd2-take-keyword based on the keyword src.
+    simple_directive: {
+      open: [
+        { c: '@sd2-reentered' s: [] g: 'sd2-reentry' }
+        { s: 'PP_HASH' a: '@sd2-take-hash' g: 'sd2-hash' }
+      ]
+      close: [
+        { c: '@sd2-need-keyword' s: 'ID'
+          a: '@sd2-take-keyword' r: 'simple_directive' g: 'sd2-kw' }
+        { s: 'PP_NEWLINE' a: '@sd2-take-newline' g: 'sd2-end' }
+        { s: '#ANY_C_TOKEN' a: '@sd2-absorb'
+          r: 'simple_directive' g: 'sd2-tok' }
+        { s: [] g: 'sd2-fall' }
+      ]
+    }
+
+    # ---- static_assert_declaration (phase I.1) ----------------------
+    #
+    # `static_assert ( <cond> (, <message>)? ) ;` (and the
+    # `_Static_assert` synonym). State machine across r:-recursion.
+    static_assert_declaration: {
+      open: [
+        { c: '@said-reentered' s: [] g: 'said-reentry' }
+        { s: 'KW_STATIC_ASSERT' a: '@said-take-kw' g: 'sa-kw' }
+        { s: 'KW__STATIC_ASSERT' a: '@said-take-kw' g: 'sa-kw-1' }
+      ]
+      close: [
+        { c: '@said-need-lparen' s: 'PUNC_LPAREN'
+          a: '@said-take-lparen' r: 'static_assert_declaration'
+          g: 'sa-lp' }
+        { c: '@said-need-cond' p: 'val' a: '@said-mark-cond'
+          g: 'sa-cond' }
+        { c: '@said-need-comma' s: 'PUNC_COMMA'
+          a: '@said-take-comma' r: 'static_assert_declaration'
+          g: 'sa-comma' }
+        { c: '@said-need-msg' p: 'val' a: '@said-mark-msg'
+          g: 'sa-msg' }
+        { c: '@said-need-rparen' s: 'PUNC_RPAREN'
+          a: '@said-take-rparen' r: 'static_assert_declaration'
+          g: 'sa-rp' }
+        { c: '@said-need-semi' s: 'PUNC_SEMI'
+          a: '@said-take-semi' g: 'sa-end' }
+        { s: [] g: 'sa-fall' }
+      ]
+    }
+  }
+}

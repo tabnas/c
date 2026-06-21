@@ -1,6 +1,10 @@
 # Syntax highlighting for .jsonic files
 *.jsonic linguist-language=CUE
 
-# Preserve line endings in test fixtures - some tests depend on specific line endings
-test/fixtures/*.csv binary
-test/fixtures/*.json binary
+# The embedded grammar and line-sensitive sources must keep LF endings.
+*.jsonic text eol=lf
+*.ts text eol=lf
+
+# csmith regression corpus and gzipped fixtures are data, not language.
+ts/test/csmith-corpus/** linguist-vendored
+ts/test/csmith-fixtures/*.gz binary
