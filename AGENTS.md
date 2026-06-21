@@ -28,7 +28,7 @@ const cst = new Tabnas().use(jsonic).use(C).parse('typedef int T; T x = 1;')
 | Path | What it is |
 |---|---|
 | [`ts/`](ts/) | **Canonical** implementation — the `@tabnas/c` package. |
-| [`go/`](go/) | **Go port — SCAFFOLD ONLY.** Module wiring (`go.mod`), the embedded grammar (`c-grammar.jsonic` via `//go:embed`) and the plugin/helper signatures (`c.go`: `C`, `MakeC`, `Parse`, `Grammar`, `COptions`, `Version`). The parsing logic is **not yet ported** — `C` returns `ErrNotImplemented`. The upstream `@jsonic/c` is TypeScript-only, so there is no Go source to convert from; the port is a from-scratch hand-translation (~10.6k lines). `go/c.go`'s package doc carries the TS-module → Go-file porting map. |
+| [`go/`](go/) | **Go port — IN PROGRESS.** Done: the lexer (`tokens.go`, `symbols.go`, `matchers.go`), the CST helpers (`cst.go`), and the `@tabnas/expr` wiring + C-atom expression rules (`expr_grammar.go`). Still to come: the grammar install + the ~471-entry `@`-ref map (`c.go`), the legacy structuring post-processor (`structure.go` + `expr.go`), and the `#if`-folding post-pass (`conditional_groups.go`). The upstream `@jsonic/c` is TypeScript-only, so there is no Go source to convert from; the port is a from-scratch hand-translation. |
 | [`ts/c-grammar.jsonic`](ts/c-grammar.jsonic) | **Single source of truth** for the declarative grammar (rule shapes for the whole C surface), authored in jsonic-DSL syntax. |
 | [`ts/embed-grammar.js`](ts/embed-grammar.js) | Embeds `c-grammar.jsonic` into `src/c.ts` (between `BEGIN/END EMBEDDED` markers) as the `grammarText` string literal, **and** copies it verbatim to `go/c-grammar.jsonic` for `//go:embed`. The grammar contains backticks, so the Go side embeds from the file rather than inlining a raw string (unlike the smaller ports). Runs as the first half of `npm run build`. |
 | [`ts/src/c.ts`](ts/src/c.ts) | Plugin entry: token catalog wiring, lex matchers, grammar install, and the `@`-named ref map (conditions/actions bound by name from the grammar). |
@@ -49,6 +49,18 @@ engine). Peer dependencies (`ts/package.json`, all `^0.2.0`):
 `parser`, `jsonic` and `expr` (plus jsonic's own deps `json`, `debug`,
 `abnf`, `railroad`) as siblings of this repo and build their `ts/` halves
 first; CI (`.github/workflows/build.yml`) does exactly this.
+
+## Go port: upstream @tabnas/expr requirement
+
+The Go `@tabnas/expr` operator binding reuses tins from the **global**
+`tabnas.FixedTokens` table (the TypeScript expr consults the *instance's*
+fixed tokens). `expr_grammar.go`'s `withInstanceFixedTokens` shim bridges this
+by briefly exposing the C instance's tins through that global table across the
+`Use(Expr)` call. Additionally, `@tabnas/expr`'s Go `makeAllOps` iterates the
+operator table as a Go map, so operator precedence is **non-deterministic**
+unless the op names are sorted — a one-line fix in `expr/go/expr.go`
+(`sort.Strings(opNames)` before building the ops). The C Go port needs that
+fix released in `@tabnas/expr` to parse expressions deterministically.
 
 ## Conversion notes (from @jsonic/c)
 

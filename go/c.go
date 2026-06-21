@@ -111,31 +111,35 @@ func C(j *tabnas.Tabnas, opts map[string]any) error {
 
 	// 1. Register punctuator + keyword token names with their fixed sources,
 	//    and the special token names, so every token has a stable tin. We
-	//    disable jsonic's built-in matchers and drive lexing with our own.
-	fixed := AllTokenNamesAndSources()
-	fixedTokenOpt := make(map[string]*string, len(fixed))
-	for name, src := range fixed {
-		s := src
-		fixedTokenOpt[name] = &s
+	//    register in deterministic slice order (NOT via a map) so the tins
+	//    are identical across runs — @tabnas/expr's operator binding and the
+	//    grammar resolution both depend on stable tins. We disable jsonic's
+	//    built-in matchers and drive lexing with our own.
+	for _, p := range Punctuators {
+		j.Token(p.Name, p.Src)
 	}
-
-	j.SetOptions(tabnas.Options{
-		Fixed: &tabnas.FixedOptions{Lex: boolPtr(false), Token: fixedTokenOpt},
-		Space: &tabnas.SpaceOptions{Lex: boolPtr(false)},
-		Line:  &tabnas.LineOptions{Lex: boolPtr(false)},
-		Text:  &tabnas.TextOptions{Lex: boolPtr(false)},
-		Number: &tabnas.NumberOptions{Lex: boolPtr(false)},
-		String: &tabnas.StringOptions{Lex: boolPtr(false)},
-		Comment: &tabnas.CommentOptions{Lex: boolPtr(false)},
-		Value: &tabnas.ValueOptions{Lex: boolPtr(false)},
-		Match: &tabnas.MatchOptions{Lex: boolPtr(true)},
-		Rule:  &tabnas.RuleOptions{Start: "translation_unit", Finish: boolPtr(false)},
-	})
-
-	// Register special tokens (allocates stable tins).
+	for _, kw := range C23Keywords {
+		j.Token(KeywordTokenName(kw), kw)
+	}
+	for _, kw := range ExtKeywords {
+		j.Token(KeywordTokenName(kw), kw)
+	}
 	for _, name := range specialTokenNames {
 		j.Token(name)
 	}
+
+	j.SetOptions(tabnas.Options{
+		Fixed:   &tabnas.FixedOptions{Lex: boolPtr(false)},
+		Space:   &tabnas.SpaceOptions{Lex: boolPtr(false)},
+		Line:    &tabnas.LineOptions{Lex: boolPtr(false)},
+		Text:    &tabnas.TextOptions{Lex: boolPtr(false)},
+		Number:  &tabnas.NumberOptions{Lex: boolPtr(false)},
+		String:  &tabnas.StringOptions{Lex: boolPtr(false)},
+		Comment: &tabnas.CommentOptions{Lex: boolPtr(false)},
+		Value:   &tabnas.ValueOptions{Lex: boolPtr(false)},
+		Match:   &tabnas.MatchOptions{Lex: boolPtr(true)},
+		Rule:    &tabnas.RuleOptions{Start: "translation_unit", Finish: boolPtr(false)},
+	})
 
 	// Token sets referenced by the grammar. All names now resolve to tins.
 	j.SetOptions(tabnas.Options{
@@ -185,7 +189,7 @@ func C(j *tabnas.Tabnas, opts map[string]any) error {
 	// 2. Resolve every emittable token name to its tin and install the custom
 	//    lex matchers.
 	tinByName := make(map[string]tabnas.Tin)
-	for name := range fixed {
+	for name := range AllTokenNamesAndSources() {
 		tinByName[name] = j.Token(name)
 	}
 	for _, name := range specialTokenNames {
@@ -242,9 +246,13 @@ func C(j *tabnas.Tabnas, opts map[string]any) error {
 		}
 	}, nil)
 
-	// TODO(M3+): parse and install the embedded grammar (with the @-ref map),
-	// strip extension rules when !extended, and install @tabnas/expr via the
-	// ported installExpr.
+	// TODO(M3b+): parse and install the embedded grammar (with the @-ref
+	// map), stripping extension rules when !extended.
+
+	// Install @tabnas/expr with the C operator catalog and the val-atom alts.
+	if err := installExpr(j); err != nil {
+		return err
+	}
 
 	return nil
 }
