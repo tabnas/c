@@ -344,11 +344,24 @@ regardless of which path produced it.
 
 ## Go port
 
-A Go port lives under [`go/`](go/) but is currently a **scaffold only** —
-the module wiring, the embedded grammar (`//go:embed c-grammar.jsonic`) and
-the plugin/helper signatures (`C`, `MakeC`, `Parse`) are in place, but the
-parsing logic is not yet translated (`C` returns `ErrNotImplemented`). Use
-the TypeScript package for now. See [`go/c.go`](go/c.go) for the porting map.
+A Go port lives under [`go/`](go/) and is **functional but in progress**. The
+full architecture is ported and tested: the lexer, the `@tabnas/expr`-driven
+expression layer, the grammar install, the conditional-group post-pass, the
+top-level chomp + preprocessor directives, and the legacy recursive-descent
+structurer (`structure.go` + `expr.go`). `tabnasc.Parse(src)` /
+`tabnasc.MakeC()` parse C into structured concrete-syntax trees (declarations,
+function definitions, structs/enums, attributes, initializers, expressions),
+with typedef/macro tracking.
+
+What's not yet done is full byte-for-byte **parity with the TypeScript
+CSmith golden fixtures** — `go test` includes a parity tracker
+(`TestCsmithCorpus`) reporting the live N/100 rate; the remaining gap is
+structural reconciliation of complex generated-C bodies. For production use,
+prefer the TypeScript package today.
+
+Two upstream `@tabnas/expr` (Go) fixes are required for deterministic
+expression parsing — see [`AGENTS.md`](AGENTS.md). Build/test the Go port with
+a `go.work` over the sibling `@tabnas` modules (see the CI workflow).
 
 ## License
 
