@@ -80,20 +80,27 @@ func registerInitializerRefs(
 		return kBool(r, "hasDesig") && kBool(r, "tookEq") && !kBool(r, "gotValue")
 	})
 	state("@initializer_item-bc", func(r *tabnas.Rule, _ *tabnas.Context) {
-		cn := childNode(r)
-		if cn == nil {
+		// Capture the raw child node (may not be a C-CST map). The val
+		// case below accepts a non-CNode raw @tabnas/expr op-array too —
+		// see the comment there.
+		var rawChild any
+		if r.Child != nil && r.Child != tabnas.NoRule {
+			rawChild = r.Child.Node
+		}
+		if rawChild == nil {
 			return
 		}
+		cn := childNode(r)
 		switch childName(r) {
 		case "designation":
-			if !kBool(r, "desigAttached") {
+			if cn != nil && !kBool(r, "desigAttached") {
 				node := ruleNode(r)
 				pushKids(node, cn)
 				node["designation"] = cn
 				r.K["desigAttached"] = true
 			}
 		case "initializer_list":
-			if !kBool(r, "gotValue") {
+			if cn != nil && !kBool(r, "gotValue") {
 				init := makeNode("initializer", nil)
 				pushKids(init, cn)
 				node := ruleNode(r)
@@ -102,11 +109,36 @@ func registerInitializerRefs(
 				r.K["gotValue"] = true
 			}
 		case "val":
-			if !kBool(r, "gotValue") && !sameNode(cn, ruleNode(r)) {
-				node := ruleNode(r)
-				pushKids(node, cn)
-				node["value"] = cn
-				r.K["gotValue"] = true
+			// Mirror the TS @initializer_item-bc which pushes
+			// rule.child.node directly regardless of its shape
+			// (ts/src/c.ts). When an item value is a prefix/operator
+			// expression in a brace initializer (e.g. the `-7` of
+			// `{5,-7,20}`), @tabnas/expr's evaluate callback never fires
+			// for it — the surrounding C grammar's comma close pre-empts
+			// the expr rule's evaluating after-close — so the val child's
+			// node is the raw, unevaluated op-array (a *tabnas.ListRef in
+			// the Go port). childNode() returns nil for that because it
+			// only type-asserts a C-CST map, so it would otherwise be
+			// silently dropped and the item would render with zero
+			// children. The reference fixtures keep the raw value, which
+			// toFixture serialises as an empty `{}` child, so push the
+			// raw node here too. Use cn (the asserted map) when it is a
+			// real CST node, else fall back to the raw op-array.
+			if !kBool(r, "gotValue") {
+				if cn != nil {
+					if sameNode(cn, ruleNode(r)) {
+						return
+					}
+					node := ruleNode(r)
+					pushKids(node, cn)
+					node["value"] = cn
+					r.K["gotValue"] = true
+				} else {
+					node := ruleNode(r)
+					pushKids(node, rawChild)
+					node["value"] = rawChild
+					r.K["gotValue"] = true
+				}
 			}
 		}
 	})

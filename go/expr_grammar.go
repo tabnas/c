@@ -158,16 +158,27 @@ func evaluateCExpr(rule *tabnas.Rule, _ *tabnas.Context, op *tabnasexpr.Op, term
 
 	name := op.Name
 
-	// The Go @tabnas/expr plugin maps both the `call` (preval-active) and
-	// `paren` (preval-inactive) ops onto the same `(` tin, so only one wins
-	// parenOpenByTin and op.Name surfaces here as "paren-paren". Recover the
-	// call form from the preval flag the val rule sets when an atom
-	// immediately precedes `(` (see cParenPrevalAction / the c-call-preval
-	// alt): a preval `(` is a function call, a non-preval `(` is grouping.
-	if name == "paren-paren" && rule != nil && rule.U != nil {
-		if pv, _ := rule.U["paren_preval"].(bool); pv {
-			name = "call-paren"
-		}
+	// The Go @tabnas/expr plugin maps both the `call` and `paren` ops onto
+	// the same `(` tin. Only one survives parenOpenByTin/parenCloseByTin
+	// (the last one written while iterating allOps). The Go plugin iterates
+	// op names in SORTED order, so `paren` overwrites `call` and op.Name
+	// surfaces here as "paren-paren" for EVERY `(...)` form. The TypeScript
+	// reference iterates ops in object-insertion order (`paren` before
+	// `call`), so `call` wins there and op.name is ALWAYS "call-paren" —
+	// which is why the oracle fixtures render every @tabnas/expr paren-form
+	// (grouping `(a+b)`, chained call `f(x)(y)`, complex-callee call
+	// `(*p)(z)`, and even a bare `(-5L)`) as a `call_expression`: the inner
+	// value is the callee and the argument_list is empty when no args were
+	// supplied. Genuine C grouping `paren_expression` nodes (with the `(`
+	// `)` tokens as children) are emitted by the surrounding C grammar
+	// productions, never by this evaluate path.
+	//
+	// Mirror the TS behaviour by always treating an @tabnas/expr `(` paren-
+	// form as the call form. The `paren_preval` flag the val rule sets only
+	// determines whether a preceding produced value becomes the callee
+	// term; it does not change the op shape.
+	if name == "paren-paren" {
+		name = "call-paren"
 	}
 
 	if name == "comma-infix" || name == "comma" {

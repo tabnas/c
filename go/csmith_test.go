@@ -31,7 +31,24 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	tabnas "github.com/tabnas/parser/go"
 )
+
+// isExprOpArray reports whether v is a raw, unevaluated @tabnas/expr
+// op-array (a *tabnas.ListRef, or a bare []any) — the value that survives
+// on an initializer item whose operator expression the evaluate callback
+// never converted to a C-CST node. TS represents this as a plain JS array;
+// toFixture treats it as an object with no kind (serialised `{}`).
+func isExprOpArray(v any) bool {
+	switch v.(type) {
+	case *tabnas.ListRef:
+		return true
+	case []any:
+		return true
+	}
+	return false
+}
 
 // STDINT_TYPEDEFS — names provided by csmith.h. The parser doesn't
 // expand #include, so we pre-register these as typedef-names before each
@@ -120,6 +137,16 @@ func parseCsmithSource(src string) (map[string]any, error) {
 func toFixture(node any) any {
 	m, ok := node.(map[string]any)
 	if !ok || m == nil {
+		// Mirror the TS toFixture: `typeof node !== 'object'` returns
+		// null only for primitives. A non-map *object* (in TS, a raw
+		// @tabnas/expr op-array; in the Go port a *tabnas.ListRef left
+		// on an initializer item whose expression was never evaluated —
+		// see @initializer_item-bc) is treated as an object with no
+		// `kind` and no `children`, which TS serialises as `{k:undefined}`
+		// → `{}`. Reproduce that empty-object child here.
+		if isExprOpArray(node) {
+			return map[string]any{}
+		}
 		return nil
 	}
 	if kind, _ := m["kind"].(string); kind == "token" {
@@ -129,7 +156,12 @@ func toFixture(node any) any {
 		}
 		return map[string]any{"k": "tok", "t": m["tname"], "s": m["src"]}
 	}
-	out := map[string]any{"k": m["kind"]}
+	out := map[string]any{}
+	// TS sets `out = { k: node.kind }`; an undefined kind is dropped by
+	// JSON.stringify, so only emit `k` when the node actually has one.
+	if m["kind"] != nil {
+		out["k"] = m["kind"]
+	}
 	for _, key := range csmithScalarKeys {
 		v, present := m[key]
 		if !present || v == nil {
@@ -137,6 +169,13 @@ func toFixture(node any) any {
 		}
 		// Skip non-array objects (map[string]any).
 		if _, isMap := v.(map[string]any); isMap {
+			continue
+		}
+		// Skip a raw @tabnas/expr op-array left on a scalar key (e.g. an
+		// initializer item's `value`). TS skips arrays containing objects
+		// (`v.some(x => typeof x === 'object')`); a *tabnas.ListRef is the
+		// Go analogue of such an array.
+		if _, isLR := v.(*tabnas.ListRef); isLR {
 			continue
 		}
 		// Skip arrays that contain any object.
