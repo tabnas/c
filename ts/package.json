@@ -48,9 +48,9 @@
     "typescript": "6.0.3"
   },
   "peerDependencies": {
-    "@tabnas/expr": "^0.2.0",
-    "@tabnas/jsonic": "^0.2.0",
-    "@tabnas/parser": "^0.2.0"
+    "@tabnas/expr": ">=0",
+    "@tabnas/jsonic": ">=0",
+    "@tabnas/parser": ">=0"
   },
   "engines": {
     "node": ">=24"
