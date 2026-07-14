@@ -1,6 +1,6 @@
 {
   "name": "@tabnas/c",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "This plugin allows the [Tabnas](https://github.com/tabnas/parser) parser to parse C source into a concrete syntax tree, preserving macros and compiler extensions.",
   "main": "dist/c.js",
   "type": "commonjs",
