@@ -420,42 +420,19 @@ func isFunctionBodySupported(ctx *tabnas.Context, lbraceI int) bool {
 	return false
 }
 
-// hasAttributeAt reports whether ctx.T[i] begins an attribute spec
-// (GCC __attribute__/__attribute, MSVC __declspec, or C23 [[).
-func hasAttributeAt(ctx *tabnas.Context, i int) bool {
-	t := ctxTokAt(ctx, i)
-	if t == nil {
-		return false
-	}
-	switch t.Name {
-	case "KW___ATTRIBUTE__", "KW___ATTRIBUTE", "KW___DECLSPEC":
-		return true
-	case "PUNC_LBRACKET":
-		t2 := ctxTokAt(ctx, i+1)
-		return t2 != nil && t2.Name == "PUNC_LBRACKET" && t.SI+len(t.Src) == t2.SI
-	}
-	return false
-}
-
 // looksSimpleDecl is @looks-simple-decl. Port of the c.ts cond.
 //
-// NOTE: attribute (GCC/MSVC/C23) handlers are not yet ported in this batch,
-// so attribute-prefixed declarations are routed to the legacy chomp path by
-// bailing here rather than skipping past the attributes.
+// Phase G: leading attribute specs (GCC / MSVC / C23) are skipped — they
+// can appear before the storage prefix or type head; spec_loop re-encounters
+// them via its own dispatch alts.
 func looksSimpleDecl(r *tabnas.Rule, ctx *tabnas.Context) bool {
 	if len(kTokens(r)) > 0 {
-		return false
-	}
-	if hasAttributeAt(ctx, 0) {
 		return false
 	}
 	i := 0
 	i = skipLeadingAttributes(ctx, i)
 	if storagePrefixSet[tokName(ctxTokAt(ctx, i))] {
 		i++
-	}
-	if hasAttributeAt(ctx, i) {
-		return false
 	}
 	i = skipLeadingAttributes(ctx, i)
 	typeStart := i

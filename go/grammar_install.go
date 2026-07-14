@@ -155,8 +155,10 @@ func cfgInt(v any) int {
 
 // scanAndStubRefs walks every alt's c:/a: fields and, for each @ref not
 // already in ref, installs a typed no-op stub: a false-returning AltCond for
-// c: refs, a no-op AltAction for a: refs. This lets the grammar install while
-// the real handlers (makeGrammarRefs) are ported incrementally.
+// c: refs, a no-op AltAction for a: refs. All grammar refs now have real
+// handlers in makeGrammarRefs, so this is a safety net that keeps the grammar
+// installable should a new ref land in c-grammar.jsonic before its handler
+// is ported.
 func scanAndStubRefs(ruleMap map[string]any, ref map[tabnas.FuncRef]any) {
 	visit := func(field string, isCond bool) func(any) {
 		return func(v any) {

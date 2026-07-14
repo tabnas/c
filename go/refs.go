@@ -14,11 +14,11 @@ import tabnas "github.com/tabnas/parser/go"
 // their rule by the engine's Grammar() via the key name. Alt refs are
 // tabnas.AltCond (c:) or tabnas.AltAction (a:).
 //
-// Ported so far: the extension gate and the top-level chomp path
-// (translation_unit / extdecl_loop / external_declaration token accumulation),
-// which yields a token-fidelity CST. The structured dispatch
-// (simple_declaration etc.) and the legacy finaliser (structure.go) are still
-// being ported; until then declarations are captured as raw token children.
+// The full ref map is ported: the extension gate, the top-level chomp path
+// (translation_unit / extdecl_loop / external_declaration), the preprocessor
+// directive family (below), the new-path structured dispatch
+// (refs_newpath*.go), and the extension constructs — inline asm, in-body
+// preprocessor lines, attribute specs, static_assert (refs_ext.go).
 func makeGrammarRefs(opts COptions) map[tabnas.FuncRef]any {
 	extended := opts.Extended
 	ref := map[tabnas.FuncRef]any{}
@@ -581,6 +581,10 @@ func makeGrammarRefs(opts COptions) map[tabnas.FuncRef]any {
 	// --- new-path structured dispatch (declarations, declarators,
 	// specifiers, struct/union/enum, initializers, statements) ---------
 	registerNewPathRefs(regFns{cond: cond, action: action, state: state}, extended)
+
+	// --- extension constructs (inline asm, in-body preprocessor lines,
+	// attribute specs, static_assert declarations) ----------------------
+	registerExtRefs(regFns{cond: cond, action: action, state: state})
 
 	return ref
 }
