@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.2](https://github.com/tabnas/c/compare/v0.2.1...v0.2.2) (2026-07-14)
+
+
+### Bug Fixes
+
+* **deps:** widen @tabnas/* plugin peer ranges to &gt;=0 ([2d3405f](https://github.com/tabnas/c/commit/2d3405f1709da7cb5a4d92373b7164ed619db9c7))
+* widen plugin peer ranges to &gt;=0 + gate npm publish ([e41a31f](https://github.com/tabnas/c/commit/e41a31f5e136d85a8b8d1a6c6baed905f1f82222))
+
 ## 0.2.0 (@tabnas/c)
 
 Ported from [`@jsonic/c`](https://github.com/jsonicjs/c) onto the
