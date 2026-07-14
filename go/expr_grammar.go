@@ -525,7 +525,7 @@ func makeAtomAction(kind, literalKind string) tabnas.AltAction {
 		node["literalKind"] = literalKind
 		node["value"] = tkn.Src
 		r.Node = node
-		r.U["cNode"] = node
+		r.EnsureU()["cNode"] = node
 	}
 }
 
@@ -541,6 +541,6 @@ func makeIDAction() tabnas.AltAction {
 		appendChild(node, tokenRef(tkn))
 		node["name"] = tkn.Src
 		r.Node = node
-		r.U["cNode"] = node
+		r.EnsureU()["cNode"] = node
 	}
 }

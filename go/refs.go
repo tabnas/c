@@ -23,9 +23,38 @@ func makeGrammarRefs(opts COptions) map[tabnas.FuncRef]any {
 	extended := opts.Extended
 	ref := map[tabnas.FuncRef]any{}
 
-	cond := func(name string, fn tabnas.AltCond) { ref[tabnas.FuncRef(name)] = fn }
-	action := func(name string, fn tabnas.AltAction) { ref[tabnas.FuncRef(name)] = fn }
-	state := func(name string, fn tabnas.StateAction) { ref[tabnas.FuncRef(name)] = fn }
+	// The parser (v0.2) leaves a fresh rule's K/U/N maps nil until first
+	// written, and requires handlers to allocate them (EnsureK/EnsureU/
+	// EnsureN) before writing. The canonical TS engine keeps these as
+	// always-present objects, so the ported handlers write r.K/r.U/r.N
+	// directly. Ensure the maps exist before every handler runs so those
+	// direct writes never hit a nil map. Empty maps are indistinguishable
+	// from nil in the parser's len-guarded propagation, so this is
+	// behaviour-preserving.
+	cond := func(name string, fn tabnas.AltCond) {
+		ref[tabnas.FuncRef(name)] = tabnas.AltCond(func(r *tabnas.Rule, ctx *tabnas.Context) bool {
+			r.EnsureK()
+			r.EnsureU()
+			r.EnsureN()
+			return fn(r, ctx)
+		})
+	}
+	action := func(name string, fn tabnas.AltAction) {
+		ref[tabnas.FuncRef(name)] = tabnas.AltAction(func(r *tabnas.Rule, ctx *tabnas.Context) {
+			r.EnsureK()
+			r.EnsureU()
+			r.EnsureN()
+			fn(r, ctx)
+		})
+	}
+	state := func(name string, fn tabnas.StateAction) {
+		ref[tabnas.FuncRef(name)] = tabnas.StateAction(func(r *tabnas.Rule, ctx *tabnas.Context) {
+			r.EnsureK()
+			r.EnsureU()
+			r.EnsureN()
+			fn(r, ctx)
+		})
+	}
 
 	// --- extension gate ---------------------------------------------------
 	cond("@extended-on", func(_ *tabnas.Rule, _ *tabnas.Context) bool { return extended })

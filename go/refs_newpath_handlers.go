@@ -69,7 +69,7 @@ func registerDeclRefs(
 		tkn := r.O0
 		pushTokenWithTrivia(uNode(owner, "specs"), tkn)
 		if tkn.Name == "KW_TYPEDEF" {
-			owner.U["isTypedef"] = true
+			owner.EnsureU()["isTypedef"] = true
 		}
 	})
 	action("@absorb-spec-type", func(r *tabnas.Rule, _ *tabnas.Context) {
@@ -369,7 +369,7 @@ func registerDeclRefs(
 	action("@ppi-pointer", func(r *tabnas.Rule, _ *tabnas.Context) {
 		owner := parentRule(r) // parameter_declaration
 		if kNode(owner, "declarator") == nil {
-			owner.K["declarator"] = makeNode("declarator", nil)
+			owner.EnsureK()["declarator"] = makeNode("declarator", nil)
 		}
 		ptr := makeNode("pointer", nil)
 		pushTokenWithTrivia(ptr, r.C0)
@@ -379,7 +379,7 @@ func registerDeclRefs(
 		owner := parentRule(r) // parameter_declaration
 		idTkn := stateTokCO(r)
 		if kNode(owner, "declarator") == nil {
-			owner.K["declarator"] = makeNode("declarator", nil)
+			owner.EnsureK()["declarator"] = makeNode("declarator", nil)
 		}
 		decl := kNode(owner, "declarator")
 		dd := makeNode("direct_declarator", nil)
