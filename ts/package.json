@@ -41,9 +41,9 @@
     "LICENSE"
   ],
   "devDependencies": {
-    "@tabnas/expr": "file:../../expr/ts",
-    "@tabnas/jsonic": "file:../../jsonic/ts",
-    "@tabnas/parser": "file:../../parser/ts",
+    "@tabnas/expr": "*",
+    "@tabnas/jsonic": "*",
+    "@tabnas/parser": "*",
     "@types/node": "25.6.0",
     "typescript": "6.0.3"
   },
