@@ -1,6 +1,6 @@
 {
   "name": "@tabnas/c",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "This plugin allows the [Tabnas](https://github.com/tabnas/parser) parser to parse C source into a concrete syntax tree, preserving macros and compiler extensions.",
   "main": "dist/c.js",
   "type": "commonjs",
@@ -17,7 +17,8 @@
   "author": "Richard Rodger (http://richardrodger.com)",
   "repository": {
     "type": "git",
-    "url": "git://github.com/tabnas/c.git"
+    "url": "git://github.com/tabnas/c.git",
+    "directory": "ts"
   },
   "scripts": {
     "test": "node --enable-source-maps --test \"dist-test/*.test.js\"",

@@ -23,7 +23,7 @@ import (
 )
 
 // Version is the Go module version of this plugin. Mirrors ts/package.json.
-const Version = "0.2.0"
+const Version = "0.2.2"
 
 // grammarText is the C grammar, single-sourced from c-grammar.jsonic (the TS
 // build copies it here). Embedded from file because the grammar contains
