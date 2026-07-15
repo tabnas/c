@@ -1,5 +1,12 @@
 # @tabnas/c
 
+<!-- tabnas-badges -->
+[![npm](https://tabnas.github.io/status/badges/c-npm.svg)](https://www.npmjs.com/package/@tabnas/c)
+[![CI](https://github.com/tabnas/c/actions/workflows/ci.yml/badge.svg)](https://github.com/tabnas/c/actions/workflows/ci.yml)
+[![go](https://tabnas.github.io/status/badges/c-go.svg)](https://pkg.go.dev/github.com/tabnas/c/go)
+[![tabnas standard](https://tabnas.github.io/status/badges/c-standard.svg)](https://tabnas.github.io/status/)
+<!-- /tabnas-badges -->
+
 A [Tabnas](https://github.com/tabnas/parser) parser plugin — layered on
 [@tabnas/jsonic](https://github.com/tabnas/jsonic) — that parses **C source code**
 into a **concrete syntax tree** — preserving every token, comment, macro
