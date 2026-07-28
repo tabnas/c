@@ -153,7 +153,7 @@ var Punctuators = []Punctuator{
 	{"PUNC_LT", "<"},
 	{"PUNC_GT", ">"},
 	{"PUNC_HASH", "#"},
-	{"PUNC_AT", "@"},        // not standard C; some extensions use it
+	{"PUNC_AT", "@"},         // not standard C; some extensions use it
 	{"PUNC_BACKSLASH", "\\"}, // line-continuation already handled separately
 }
 

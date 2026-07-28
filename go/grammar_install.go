@@ -36,6 +36,10 @@ func installGrammar(j *tabnas.Tabnas, opts COptions) error {
 	if err != nil {
 		return err
 	}
+	// The grammar text is an order-agnostic config spec; flatten any
+	// insertion-ordered *OrderedMap nodes to plain map[string]any so the
+	// GrammarSpec reconstruction below can read/mutate it as a map tree.
+	out = jsonic.Plainify(out)
 	gsMap, ok := out.(map[string]any)
 	if !ok {
 		return errInstall("grammar text did not parse to a map")
