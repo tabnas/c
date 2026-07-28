@@ -19,19 +19,20 @@ import (
 // per-parse CMeta (see getMeta).
 
 // scanResult is the outcome of a pure matcher scan.
-//   name == ""           -> not my prefix (wrapper returns nil)
-//   bad  != ""           -> error (wrapper returns lex.Bad(bad))
-//   otherwise            -> token named `name` consuming `consumed` bytes,
-//                           value = src[sI:sI+consumed]
+//
+//	name == ""           -> not my prefix (wrapper returns nil)
+//	bad  != ""           -> error (wrapper returns lex.Bad(bad))
+//	otherwise            -> token named `name` consuming `consumed` bytes,
+//	                        value = src[sI:sI+consumed]
 type scanResult struct {
 	name     string
 	consumed int
 	bad      string
 }
 
-func no() scanResult                  { return scanResult{} }
-func hit(n string, c int) scanResult  { return scanResult{name: n, consumed: c} }
-func bad(why string) scanResult       { return scanResult{bad: why} }
+func no() scanResult                 { return scanResult{} }
+func hit(n string, c int) scanResult { return scanResult{name: n, consumed: c} }
+func bad(why string) scanResult      { return scanResult{bad: why} }
 
 // getMeta returns the per-parse CMeta from the engine context.
 func getMeta(lex *tabnas.Lex) *CMeta {
@@ -46,7 +47,7 @@ func getMeta(lex *tabnas.Lex) *CMeta {
 
 // ---- char-class helpers (byte level, mirroring charCodeAt) ----
 
-func isDigit(c byte) bool   { return c >= '0' && c <= '9' }
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 func isIDStart(c byte) bool {
 	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_' || c == '$'
 }

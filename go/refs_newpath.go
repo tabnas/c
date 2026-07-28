@@ -162,7 +162,7 @@ var simpleTypeHeadSet = map[string]bool{
 	"KW___INT8": true, "KW___INT16": true, "KW___INT32": true, "KW___INT64": true,
 	"KW__COMPLEX": true, "KW__IMAGINARY": true,
 	"TYPEDEF_NAME": true,
-	"KW_CONST": true, "KW_VOLATILE": true, "KW_RESTRICT": true, "KW__ATOMIC": true,
+	"KW_CONST":     true, "KW_VOLATILE": true, "KW_RESTRICT": true, "KW__ATOMIC": true,
 	"KW___CONST__": true, "KW___CONST": true,
 	"KW___VOLATILE__": true, "KW___VOLATILE": true,
 	"KW___RESTRICT__": true, "KW___RESTRICT": true,
@@ -174,7 +174,7 @@ var storagePrefixSet = map[string]bool{
 	"KW_AUTO": true, "KW_REGISTER": true,
 	"KW__THREAD_LOCAL": true, "KW_THREAD_LOCAL": true, "KW_CONSTEXPR": true,
 	"KW___THREAD": true,
-	"KW_INLINE": true, "KW___INLINE__": true, "KW___INLINE": true,
+	"KW_INLINE":   true, "KW___INLINE__": true, "KW___INLINE": true,
 	"KW___EXTENSION__": true,
 }
 
