@@ -25,9 +25,11 @@ func zeroSpan() map[string]any {
 	return map[string]any{"start": 0, "end": 0, "line": 1, "col": 1}
 }
 
-// tokenSpan returns the span for a token, or nil.
+// tokenSpan returns the span for a token, or nil. The NoToken sentinel counts
+// as "no token": its -1 positions are not a location, and TS reaches the same
+// place with an `undefined` token, which makeNode turns into zeroSpan.
 func tokenSpan(tkn *tabnas.Token) map[string]any {
-	if tkn == nil {
+	if tkn == nil || tkn.IsNoToken() {
 		return nil
 	}
 	return map[string]any{
@@ -52,13 +54,20 @@ func makeNode(kind string, span map[string]any) CNode {
 	}
 }
 
-// tokenRef builds a {kind:"token", ...} reference node for a token.
+// tokenRef builds a {kind:"token", ...} reference node for a token. A token
+// with no position (the NoToken sentinel) still gets the zero span, matching
+// the TS side where the equivalent synthesized token carries {0,0,1,1} rather
+// than no span at all.
 func tokenRef(tkn *tabnas.Token) map[string]any {
+	span := tokenSpan(tkn)
+	if span == nil {
+		span = zeroSpan()
+	}
 	return map[string]any{
 		"kind":  "token",
 		"tname": tkn.Name,
 		"src":   tkn.Src,
-		"span":  tokenSpan(tkn),
+		"span":  span,
 	}
 }
 
