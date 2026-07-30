@@ -94,9 +94,16 @@ function runSpec(file: string) {
           return
         }
 
+        const raw = tn.parse(row.input)
+
+        // A fixture that says `null` must not be satisfied by a parse that
+        // produced nothing: the two are different results.
+        assert.notStrictEqual(raw, undefined,
+          `${file}:${row.line}: no value; expected ${row.expected}`)
+
         // Round-trip through JSON so null-prototype maps and numeric types
         // compare structurally against the fixture's decoded shape.
-        const got = JSON.parse(JSON.stringify(tn.parse(row.input) ?? null))
+        const got = JSON.parse(JSON.stringify(raw))
         assert.deepStrictEqual(got, JSON.parse(row.expected),
           `${file}:${row.line}`)
       })
