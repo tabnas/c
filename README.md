@@ -395,7 +395,7 @@ hybrid:
   (`fetchDeep()` drives `ctx.lex` directly so the body-supportedness
   check walks past the closing `}` of any function body), all
   unit tests passing on the new path, csmith fixtures regenerated.
-  Shipped as `0.2.0`.
+  See `ts/package.json` for the current version.
 - **F** struct / union / enum specifiers + members + bitfields +
   enumerators, dispatched from `simple_declaration` / `spec_loop`.
 - **G** attribute specs (3 forms × leading + between-specs

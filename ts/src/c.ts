@@ -6509,5 +6509,10 @@ function reclassifyAsTypedef(ctx: Context, name: string): void {
   if (lex.pnt && Array.isArray(lex.pnt.token)) for (const tkn of lex.pnt.token) fix(tkn)
 }
 
-export { C }
+// VERSION is this package's version. It MUST equal package.json "version":
+// the release orchestrator rewrites both, and the version test fails the
+// build if they drift. Mirrors `const VERSION` in go/c.go.
+const VERSION = '0.4.2'
+
+export { C, VERSION }
 export default C
