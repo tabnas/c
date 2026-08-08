@@ -22,8 +22,10 @@ import (
 	tabnas "github.com/tabnas/parser/go"
 )
 
-// Version is the Go module version of this plugin. Mirrors ts/package.json.
-const Version = "0.4.2"
+// VERSION is this module's version. It MUST equal ts/package.json
+// "version": the release orchestrator rewrites both, and
+// TestVersionMatchesPackageJSON fails the build if they drift.
+const VERSION = "0.4.2"
 
 // grammarText is the C grammar, single-sourced from c-grammar.jsonic (the TS
 // build copies it here). Embedded from file because the grammar contains
