@@ -413,7 +413,47 @@
       ]
       close: [
         { s: 'PUNC_RBRACKET' a: '@arr-close' g: 'arr-end-empty' }
+        # C99 array-parameter qualifiers and the unspecified-VLA
+        # marker — `int a[static 4]`, `char b[restrict 8]`,
+        # `int c[*]`. Only legal on a parameter's array declarator,
+        # but the grammar accepts them wherever array_postfix runs;
+        # a compiler, not a CST parser, is what rejects the misuse.
+        # `PUNC_STAR` needs a two-token guard so a genuine VLA size
+        # expression (`int a[*p]`) still routes into val.
+        { s: 'KW_STATIC' b: 1 p: 'array_qualifier_loop' g: 'arr-q-static' }
+        { s: 'KW_CONST' b: 1 p: 'array_qualifier_loop' g: 'arr-q-const' }
+        { s: 'KW_VOLATILE' b: 1 p: 'array_qualifier_loop' g: 'arr-q-volatile' }
+        { s: 'KW_RESTRICT' b: 1 p: 'array_qualifier_loop' g: 'arr-q-restrict' }
+        { s: 'KW__ATOMIC' b: 1 p: 'array_qualifier_loop' g: 'arr-q-atomic' }
+        { s: 'PUNC_STAR PUNC_RBRACKET' b: 2 p: 'array_qualifier_loop'
+          g: 'arr-q-star' }
         { p: 'val' g: 'arr-size' }
+      ]
+    }
+
+    # array_qualifier_loop: the qualifier / `static` prefix inside an
+    # array declarator's brackets, plus the lone `*` VLA marker. Each
+    # token is pushed straight onto the parent array_postfix node (the
+    # legacy CST keeps them as plain tokens in bracket order), then the
+    # loop recurses for the next one and falls through so
+    # array_postfix's close picks up the size expression or `]`.
+    array_qualifier_loop: {
+      open: [
+        { s: 'KW_STATIC' a: '@arrq-take'
+          r: 'array_qualifier_loop' g: 'aql-static' }
+        { s: 'KW_CONST' a: '@arrq-take'
+          r: 'array_qualifier_loop' g: 'aql-const' }
+        { s: 'KW_VOLATILE' a: '@arrq-take'
+          r: 'array_qualifier_loop' g: 'aql-volatile' }
+        { s: 'KW_RESTRICT' a: '@arrq-take'
+          r: 'array_qualifier_loop' g: 'aql-restrict' }
+        { s: 'KW__ATOMIC' a: '@arrq-take'
+          r: 'array_qualifier_loop' g: 'aql-atomic' }
+        { s: 'PUNC_STAR PUNC_RBRACKET' b: 1 a: '@arrq-take' g: 'aql-star' }
+        { s: [] g: 'aql-empty' }
+      ]
+      close: [
+        { s: [] g: 'aql-end' }
       ]
     }
 
@@ -535,6 +575,19 @@
         # absorbing more `*` and finally the optional ID.
         { s: 'PUNC_STAR' a: '@param-pointer'
           r: 'parameter_declaration' g: 'param-ptr' }
+        # Type qualifiers binding to the pointer just absorbed —
+        # `void f(int * const p)`, `void f(char * restrict s)`.
+        # Mirrors pointer_qualifier_loop for the top-level declarator.
+        # Gated on a pointer actually being pending so a stray
+        # qualifier is still an error rather than silently eaten.
+        { s: 'KW_CONST' c: '@param-has-pointer' a: '@param-pointer-qual'
+          r: 'parameter_declaration' g: 'param-ptr-const' }
+        { s: 'KW_VOLATILE' c: '@param-has-pointer' a: '@param-pointer-qual'
+          r: 'parameter_declaration' g: 'param-ptr-volatile' }
+        { s: 'KW_RESTRICT' c: '@param-has-pointer' a: '@param-pointer-qual'
+          r: 'parameter_declaration' g: 'param-ptr-restrict' }
+        { s: 'KW__ATOMIC' c: '@param-has-pointer' a: '@param-pointer-qual'
+          r: 'parameter_declaration' g: 'param-ptr-atomic' }
         # Returning from param_paren_inner: take the matching `)` of
         # the outer paren-form. Must come BEFORE the PUNC_LPAREN
         # alts so the closing token is consumed by the right alt.
@@ -579,6 +632,15 @@
         # Pointer prefix.
         { s: 'PUNC_STAR' a: '@ppi-pointer'
           r: 'param_paren_inner' g: 'ppi-ptr' }
+        # Qualifier on that pointer: `int (* const fp)(int)`.
+        { s: 'KW_CONST' c: '@ppi-has-pointer' a: '@ppi-pointer-qual'
+          r: 'param_paren_inner' g: 'ppi-ptr-const' }
+        { s: 'KW_VOLATILE' c: '@ppi-has-pointer' a: '@ppi-pointer-qual'
+          r: 'param_paren_inner' g: 'ppi-ptr-volatile' }
+        { s: 'KW_RESTRICT' c: '@ppi-has-pointer' a: '@ppi-pointer-qual'
+          r: 'param_paren_inner' g: 'ppi-ptr-restrict' }
+        { s: 'KW__ATOMIC' c: '@ppi-has-pointer' a: '@ppi-pointer-qual'
+          r: 'param_paren_inner' g: 'ppi-ptr-atomic' }
         # Bare ID with no pointer (rare, e.g. `int (fp)(…)`).
         { s: 'ID' a: '@ppi-name' g: 'ppi-id' }
         # Abstract: nothing inside `(*)` already-handled by re-entry
@@ -1420,6 +1482,18 @@
         { c: '@sd-reentered' s: [] g: 'sd-reentry' }
         { s: '#STORAGE_PREFIX' a: '@sd-absorb-spec-storage'
           p: 'spec_loop' g: 'sd-storage' }
+        # Tagged-type member heads dispatch into struct_specifier /
+        # enum_specifier, exactly as simple_declaration does. These
+        # MUST come before #SIMPLE_TYPE_HEAD (which also contains
+        # KW_STRUCT / KW_UNION / KW_ENUM) — otherwise the generic alt
+        # absorbs the keyword as a plain spec token and the tag name
+        # is mis-parsed as the member's declarator. Covers named
+        # members (`struct S0 f0;`), inline definitions
+        # (`struct { int a; } t;`) and C11 anonymous members
+        # (`union { int i; float f; };`).
+        { s: 'KW_STRUCT' b: 1 p: 'struct_specifier' g: 'sd-struct' }
+        { s: 'KW_UNION' b: 1 p: 'struct_specifier' g: 'sd-union' }
+        { s: 'KW_ENUM' b: 1 p: 'enum_specifier' g: 'sd-enum' }
         { s: '#SIMPLE_TYPE_HEAD' a: '@sd-absorb-spec-type'
           p: 'spec_loop' g: 'sd-type' }
       ]

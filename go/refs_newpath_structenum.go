@@ -21,6 +21,12 @@ func registerStructEnumRefs(
 		}
 		r.Node = makeNode("struct_specifier", nil)
 		r.K["ssNode"] = r.Node
+		// A fresh (non-recursive) entry must clear every flag this rule
+		// owns: the engine COPIES the parent's K into a pushed child, so a
+		// struct nested inside another struct's member list would otherwise
+		// inherit the outer specifier's progress flags and skip straight to
+		// its re-entry alt without consuming its own keyword.
+		r.K["ssKwTaken"] = false
 		r.K["ssTagTaken"] = false
 		r.K["ssBodyTaken"] = false
 	})
@@ -68,7 +74,9 @@ func registerStructEnumRefs(
 		}
 		r.Node = makeNode("member_decl_list", nil)
 		r.K["mdlNode"] = r.Node
+		// See @struct_specifier-bo: a pushed child inherits the parent's K.
 		r.K["mdlOpened"] = false
+		delete(r.K, "takenMembers")
 	})
 	cond("@mdl-reentered", func(r *tabnas.Rule, _ *tabnas.Context) bool {
 		return kBool(r, "mdlOpened")
@@ -103,6 +111,14 @@ func registerStructEnumRefs(
 		r.U["specs"] = makeNode("specifier_qualifier_list", nil)
 		r.U["sdl"] = makeNode("struct_declarator_list", nil)
 		r.K["sdNode"] = r.Node
+		// See @struct_specifier-bo: a pushed child inherits the parent's K.
+		// A member declaration nested inside an inline struct/union body must
+		// not inherit the outer member declaration's progress.
+		r.K["sdSpecsAttached"] = false
+		r.K["sdSdlAttached"] = false
+		r.K["sdAnyDecl"] = false
+		delete(r.K, "takenSdrs")
+		delete(r.K, "takenTagged")
 	})
 	cond("@sd-reentered", func(r *tabnas.Rule, _ *tabnas.Context) bool {
 		return kBool(r, "sdSpecsAttached")
@@ -140,6 +156,16 @@ func registerStructEnumRefs(
 			r.K["sdAnyDecl"] = true
 			takenSet(r, "takenSdrs")[r.Child] = true
 		}
+		// A tagged-type member head (`struct S0 f0;`, `union { … };`)
+		// dispatches straight into struct_specifier / enum_specifier from
+		// open; relay the returned node onto the specifier_qualifier_list,
+		// mirroring @spec_loop-bc for the spec_loop route.
+		cn := childName(r)
+		if (cn == "struct_specifier" || cn == "enum_specifier") &&
+			childNode(r) != nil && !takenHas(r, "takenTagged") {
+			pushKids(uNode(r, "specs"), childNode(r))
+			takenSet(r, "takenTagged")[r.Child] = true
+		}
 	})
 
 	// ---- struct_declarator ----
@@ -152,6 +178,10 @@ func registerStructEnumRefs(
 		}
 		r.Node = makeNode("struct_declarator", nil)
 		r.K["sdrNode"] = r.Node
+		// See @struct_specifier-bo: pushed children inherit K.
+		r.K["sdrDeclTaken"] = false
+		r.K["sdrBfTaken"] = false
+		r.K["sdrAnonBf"] = false
 	})
 	cond("@sdr-reentered", func(r *tabnas.Rule, _ *tabnas.Context) bool {
 		return kBool(r, "sdrDeclTaken")
@@ -218,6 +248,12 @@ func registerStructEnumRefs(
 		}
 		r.Node = makeNode("enum_specifier", nil)
 		r.K["esNode"] = r.Node
+		// See @struct_specifier-bo: pushed children inherit K.
+		r.K["esKwTaken"] = false
+		r.K["esTagTaken"] = false
+		r.K["esUtypeTaken"] = false
+		r.K["esUtypeAttached"] = false
+		r.K["esBodyTaken"] = false
 	})
 	cond("@es-tag-reentered", func(r *tabnas.Rule, _ *tabnas.Context) bool {
 		return kBool(r, "esKwTaken")
@@ -287,7 +323,9 @@ func registerStructEnumRefs(
 		}
 		r.Node = makeNode("enumerator_list", nil)
 		r.K["elNode"] = r.Node
+		// See @struct_specifier-bo: pushed children inherit K.
 		r.K["elOpened"] = false
+		delete(r.K, "takenEnums")
 	})
 	cond("@el-reentered", func(r *tabnas.Rule, _ *tabnas.Context) bool {
 		return kBool(r, "elOpened")

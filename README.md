@@ -47,6 +47,47 @@ Walk the tree depth-first and concatenate every `kind:'token'` `src` to
 recover the original source byte-for-byte (modulo whitespace, whose
 positions are preserved on token spans).
 
+## Options
+
+The plugin takes a single option, passed as the second argument to `use`:
+
+```ts
+const j = new Tabnas().use(jsonic).use(C, { extended: true })
+```
+
+| Option | Default | Effect |
+|---|---|---|
+| `extended` | `false` | Enable the compiler-extension surface. |
+
+**`extended: false` (the default) — plain C23.** Keywords, punctuators,
+literals, declarations / definitions / statements / expressions, C23
+attributes `[[...]]`, `static_assert`, typedef + macro tracking, and the
+**whole preprocessor** (`#define` / `#include` / `#if` family / `#pragma`
+/ `#error` / `#warning` / `#undef` / `#line`, plus `conditional_group`
+folding). Preprocessor directives are structured identically in both
+modes.
+
+**`extended: true` — plus GCC / Clang / MSVC extensions.** GCC keywords
+and syntax (`__attribute__`, `__asm__`, `__extension__`, `__inline__`,
+`__signed__`, `__volatile__`, `__const__`, `__restrict__`, `__typeof__`,
+`__alignof__`), MSVC keywords (`__declspec`, `__cdecl`,
+`__int8/16/32/64`, `__ptr32/64`), Clang nullability annotations, the
+structured CST shapes for inline assembly, and the legacy
+recursive-descent fallback that covers the long-tail declarator shapes
+(see *Coverage and known limitations*).
+
+Every extension dispatch alt in the grammar is gated on `@extended-on`,
+and the extension-only rules are stripped from the grammar spec
+altogether in plain-C mode — so plain C23 source parses through a
+provably extension-free grammar. Real-world C source (anything that
+includes a system header) needs `{ extended: true }`; source using an
+extension construct under the default is a parse error, not a
+silently-degraded parse.
+
+The sections below on **Attributes** (GCC/MSVC forms) and **GCC inline
+assembly** describe `extended: true` behaviour. C23 `[[...]]` attributes
+work in both modes.
+
 ## Architecture
 
 - **Focused lex matchers** (`src/matchers.ts`): one matcher per concept —
@@ -111,14 +152,18 @@ positions are preserved on token spans).
   - top-level GCC `__asm__`
   - all expression and statement forms
 
-  Shapes still on the legacy path:
+  Shapes still on the legacy path (each carries
+  `viaPath: 'legacy'` on the `external_declaration`, so you can tell
+  which path produced a node):
   - K&R parameter lists (`int f(a, b) int a; long b; { … }`) —
-    rare in modern code; csmith never generates them
-  - complex compound declarators beyond simple function pointers
-    (`int (*arr[N])(int);` arrays-of-fn-ptrs,
-    `int (*(*fpp))(int);` ptr-to-fn-ptr). Plain function pointers
-    `int (*fp)(int);` and top-level `static_assert(cond, msg);`
-    moved onto the grammar path in 2.0.
+    rare in modern code; csmith never generates them. These are the
+    one case that also gets `declKind: 'unknown'`
+    (`viaPath: 'legacy-unknown'`).
+  - pointer-to-function-pointer declarators, e.g.
+    `int (*(*fpp))(int);`. Plain function pointers
+    `int (*fp)(int);`, arrays of function pointers
+    `int (*arr[N])(int);` and top-level `static_assert(cond, msg);`
+    are on the grammar path.
 
   Both paths produce identical CST shapes; the
   `@tabnas/expr`-driven `val` handles initializer expressions in
@@ -279,19 +324,55 @@ bodies, function pointers, GCC inline assembly with operand
 sections, struct bitfields with anonymous unions, designated and
 indexed initialisers).
 
+Pointer type qualifiers are structured everywhere a declarator can
+appear, including parameter lists — `void f(char * restrict d, int *
+const p)` puts the qualifier token on the `pointer` node it qualifies,
+the same shape a top-level `int * const p;` produces. C99 array
+declarator qualifiers (`int a[static 4]`, `char b[restrict 8]`) and the
+unspecified-VLA marker (`int a[*]`) land as plain tokens inside the
+`array_postfix` node, in source order; a genuine VLA size expression
+(`int a[*p]`) still parses as an expression.
+
+Struct and union members take the same tagged-type shapes as top-level
+declarations: named members (`struct S0 f0;`), inline definitions
+(`struct { int a; } t;`), C11 anonymous members
+(`union { int i; float f; };`) and arbitrary nesting all produce a
+nested `struct_specifier` / `union_specifier` / `enum_specifier` inside
+the member's `specifier_qualifier_list`.
+
 Known fall-throughs that produce a `declKind: 'unknown'` external
 declaration rather than a structured one (still parseable, source
-fidelity preserved):
+fidelity preserved). These land on the legacy recursive-descent
+fallback, which only exists under `{ extended: true }` — in plain-C
+mode they are a parse error:
 
 - K&R-style parameter declarations (`int f(a, b) int a; long b; { … }`).
 - GCC `__extern_inline` declarations gated on a `__USE_EXTERN_INLINES`
   feature macro that hasn't been `#define`d.
 
-The first parse of `(struct point){ … }` (compound literal with a
-struct-tagged type) inside a function body is not yet structured —
-the struct-tagged type isn't in the new path's `SIMPLE_TYPE_HEAD`
-set. Top-level brace initialisers on struct types (`struct point p
-= { … };`) work because they go through the legacy fallback.
+Pointer-to-function-pointer declarators (`int (*(*fpp))(int);`) also
+need `{ extended: true }` — they are structured (`declKind:
+'declaration'`) but only the legacy fallback covers them.
+
+Compound literals with a struct-tagged type inside a function body
+(`(struct point){ … }`) ARE structured — they produce a
+`compound_literal` node with a `type_name` and an `initializer_list`,
+same as the anonymous-array form `(int[]){1,2,3}`.
+
+**Attribute insertion points are a deliberate subset.** All three
+attribute forms are recognised *leading* a declaration and *between*
+declaration specifiers (`static [[deprecated]] int x;`,
+`static __attribute__((unused)) int x;`,
+`static __declspec(dllexport) int x;`), GCC's form is also recognised
+after a declarator (`int x __attribute__((unused));`), and C23
+attributes are recognised on enumerators (`enum E { A [[deprecated]] };`).
+Attributes in the remaining standard positions are **not** parsed and
+are a syntax error: after a declarator in C23 form
+(`int x [[maybe_unused]];`), on a parameter
+(`void f(int x [[maybe_unused]])`, `void f([[maybe_unused]] int x)`),
+on a struct/union tag or member (`struct [[deprecated]] S { … };`,
+`struct S { [[deprecated]] int a; };`), and on a statement or label
+(`[[fallthrough]];`, `[[unlikely]] l: ;`).
 
 ## Architecture history
 

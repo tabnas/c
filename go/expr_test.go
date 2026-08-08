@@ -83,9 +83,33 @@ func TestExprUnaryAndAssign(t *testing.T) {
 }
 
 func TestExprTernary(t *testing.T) {
-	// Standalone (start='val') ternary needs the @tabnas/expr ternary trigger
-	// on the val-close path for non-VAL C atoms, which only engages with the
-	// surrounding grammar's expression context. Validated end-to-end in M7
-	// against the CSmith fixtures; deferred here.
-	t.Skip("ternary at start=val pending full-grammar expression context (M7)")
+	// a ? b : c => conditional_expression{cond,then,else}. Matches the
+	// TypeScript behaviour at start='val'.
+	n := parseExprVal(t, "a ? b : c")
+	if n["kind"] != "conditional_expression" {
+		t.Fatalf("root => %v", n)
+	}
+	for _, part := range []struct{ key, name string }{
+		{"cond", "a"}, {"then", "b"}, {"else", "c"},
+	} {
+		m, _ := n[part.key].(map[string]any)
+		if m["kind"] != "identifier_expression" || m["name"] != part.name {
+			t.Errorf("%s => %v, want identifier_expression %q", part.key, m, part.name)
+		}
+	}
+
+	// The ternary binds looser than the comparison, so the cond is the
+	// whole `x > 0` binary expression.
+	n = parseExprVal(t, "x > 0 ? 1 : -1")
+	if n["kind"] != "conditional_expression" {
+		t.Fatalf("root => %v", n)
+	}
+	cond, _ := n["cond"].(map[string]any)
+	if cond["kind"] != "binary_expression" || cond["op"] != ">" {
+		t.Errorf("cond => %v, want binary_expression >", cond)
+	}
+	els, _ := n["else"].(map[string]any)
+	if els["kind"] != "unary_expression" || els["op"] != "-" {
+		t.Errorf("else => %v, want unary_expression -", els)
+	}
 }

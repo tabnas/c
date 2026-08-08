@@ -218,6 +218,15 @@ func registerDeclRefs(
 			pushKids(decl, ruleNode(r))
 		}
 	})
+	// Push a C99 array-declarator qualifier / `static` / `*` token onto the
+	// owning array_postfix node, in source order.
+	action("@arrq-take", func(r *tabnas.Rule, _ *tabnas.Context) {
+		if owner := parentRule(r); owner != nil {
+			if n := ruleNode(owner); n != nil {
+				pushTokenWithTrivia(n, r.O0)
+			}
+		}
+	})
 	state("@array_postfix-bc", func(r *tabnas.Rule, _ *tabnas.Context) {
 		if childName(r) == "val" && childNode(r) != nil && uNode(r, "size") == nil {
 			pushKids(ruleNode(r), childNode(r))
@@ -336,6 +345,17 @@ func registerDeclRefs(
 		ptr := makeNode("pointer", nil)
 		pushTokenWithTrivia(ptr, r.C0)
 		pushKids(kNode(r, "declarator"), ptr)
+		// Stash for @param-pointer-qual: a type qualifier following `*`
+		// qualifies THIS pointer (`int * const p` is a const pointer).
+		r.EnsureK()["lastPointer"] = ptr
+	})
+	cond("@param-has-pointer", func(r *tabnas.Rule, _ *tabnas.Context) bool {
+		return kNode(r, "lastPointer") != nil
+	})
+	action("@param-pointer-qual", func(r *tabnas.Rule, _ *tabnas.Context) {
+		if ptr := kNode(r, "lastPointer"); ptr != nil {
+			pushTokenWithTrivia(ptr, r.C0)
+		}
 	})
 	action("@param-paren-open", func(r *tabnas.Rule, _ *tabnas.Context) {
 		if kNode(r, "declarator") == nil {
@@ -374,6 +394,15 @@ func registerDeclRefs(
 		ptr := makeNode("pointer", nil)
 		pushTokenWithTrivia(ptr, r.C0)
 		pushKids(kNode(owner, "declarator"), ptr)
+		r.EnsureK()["lastPointer"] = ptr
+	})
+	cond("@ppi-has-pointer", func(r *tabnas.Rule, _ *tabnas.Context) bool {
+		return kNode(r, "lastPointer") != nil
+	})
+	action("@ppi-pointer-qual", func(r *tabnas.Rule, _ *tabnas.Context) {
+		if ptr := kNode(r, "lastPointer"); ptr != nil {
+			pushTokenWithTrivia(ptr, stateTokCO(r))
+		}
 	})
 	action("@ppi-name", func(r *tabnas.Rule, _ *tabnas.Context) {
 		owner := parentRule(r) // parameter_declaration
