@@ -455,7 +455,47 @@ const grammarText = `
       ]
       close: [
         { s: 'PUNC_RBRACKET' a: '@arr-close' g: 'arr-end-empty' }
+        # C99 array-parameter qualifiers and the unspecified-VLA
+        # marker — \`int a[static 4]\`, \`char b[restrict 8]\`,
+        # \`int c[*]\`. Only legal on a parameter's array declarator,
+        # but the grammar accepts them wherever array_postfix runs;
+        # a compiler, not a CST parser, is what rejects the misuse.
+        # \`PUNC_STAR\` needs a two-token guard so a genuine VLA size
+        # expression (\`int a[*p]\`) still routes into val.
+        { s: 'KW_STATIC' b: 1 p: 'array_qualifier_loop' g: 'arr-q-static' }
+        { s: 'KW_CONST' b: 1 p: 'array_qualifier_loop' g: 'arr-q-const' }
+        { s: 'KW_VOLATILE' b: 1 p: 'array_qualifier_loop' g: 'arr-q-volatile' }
+        { s: 'KW_RESTRICT' b: 1 p: 'array_qualifier_loop' g: 'arr-q-restrict' }
+        { s: 'KW__ATOMIC' b: 1 p: 'array_qualifier_loop' g: 'arr-q-atomic' }
+        { s: 'PUNC_STAR PUNC_RBRACKET' b: 2 p: 'array_qualifier_loop'
+          g: 'arr-q-star' }
         { p: 'val' g: 'arr-size' }
+      ]
+    }
+
+    # array_qualifier_loop: the qualifier / \`static\` prefix inside an
+    # array declarator's brackets, plus the lone \`*\` VLA marker. Each
+    # token is pushed straight onto the parent array_postfix node (the
+    # legacy CST keeps them as plain tokens in bracket order), then the
+    # loop recurses for the next one and falls through so
+    # array_postfix's close picks up the size expression or \`]\`.
+    array_qualifier_loop: {
+      open: [
+        { s: 'KW_STATIC' a: '@arrq-take'
+          r: 'array_qualifier_loop' g: 'aql-static' }
+        { s: 'KW_CONST' a: '@arrq-take'
+          r: 'array_qualifier_loop' g: 'aql-const' }
+        { s: 'KW_VOLATILE' a: '@arrq-take'
+          r: 'array_qualifier_loop' g: 'aql-volatile' }
+        { s: 'KW_RESTRICT' a: '@arrq-take'
+          r: 'array_qualifier_loop' g: 'aql-restrict' }
+        { s: 'KW__ATOMIC' a: '@arrq-take'
+          r: 'array_qualifier_loop' g: 'aql-atomic' }
+        { s: 'PUNC_STAR PUNC_RBRACKET' b: 1 a: '@arrq-take' g: 'aql-star' }
+        { s: [] g: 'aql-empty' }
+      ]
+      close: [
+        { s: [] g: 'aql-end' }
       ]
     }
 
@@ -577,6 +617,19 @@ const grammarText = `
         # absorbing more \`*\` and finally the optional ID.
         { s: 'PUNC_STAR' a: '@param-pointer'
           r: 'parameter_declaration' g: 'param-ptr' }
+        # Type qualifiers binding to the pointer just absorbed —
+        # \`void f(int * const p)\`, \`void f(char * restrict s)\`.
+        # Mirrors pointer_qualifier_loop for the top-level declarator.
+        # Gated on a pointer actually being pending so a stray
+        # qualifier is still an error rather than silently eaten.
+        { s: 'KW_CONST' c: '@param-has-pointer' a: '@param-pointer-qual'
+          r: 'parameter_declaration' g: 'param-ptr-const' }
+        { s: 'KW_VOLATILE' c: '@param-has-pointer' a: '@param-pointer-qual'
+          r: 'parameter_declaration' g: 'param-ptr-volatile' }
+        { s: 'KW_RESTRICT' c: '@param-has-pointer' a: '@param-pointer-qual'
+          r: 'parameter_declaration' g: 'param-ptr-restrict' }
+        { s: 'KW__ATOMIC' c: '@param-has-pointer' a: '@param-pointer-qual'
+          r: 'parameter_declaration' g: 'param-ptr-atomic' }
         # Returning from param_paren_inner: take the matching \`)\` of
         # the outer paren-form. Must come BEFORE the PUNC_LPAREN
         # alts so the closing token is consumed by the right alt.
@@ -621,6 +674,15 @@ const grammarText = `
         # Pointer prefix.
         { s: 'PUNC_STAR' a: '@ppi-pointer'
           r: 'param_paren_inner' g: 'ppi-ptr' }
+        # Qualifier on that pointer: \`int (* const fp)(int)\`.
+        { s: 'KW_CONST' c: '@ppi-has-pointer' a: '@ppi-pointer-qual'
+          r: 'param_paren_inner' g: 'ppi-ptr-const' }
+        { s: 'KW_VOLATILE' c: '@ppi-has-pointer' a: '@ppi-pointer-qual'
+          r: 'param_paren_inner' g: 'ppi-ptr-volatile' }
+        { s: 'KW_RESTRICT' c: '@ppi-has-pointer' a: '@ppi-pointer-qual'
+          r: 'param_paren_inner' g: 'ppi-ptr-restrict' }
+        { s: 'KW__ATOMIC' c: '@ppi-has-pointer' a: '@ppi-pointer-qual'
+          r: 'param_paren_inner' g: 'ppi-ptr-atomic' }
         # Bare ID with no pointer (rare, e.g. \`int (fp)(…)\`).
         { s: 'ID' a: '@ppi-name' g: 'ppi-id' }
         # Abstract: nothing inside \`(*)\` already-handled by re-entry
@@ -1462,6 +1524,18 @@ const grammarText = `
         { c: '@sd-reentered' s: [] g: 'sd-reentry' }
         { s: '#STORAGE_PREFIX' a: '@sd-absorb-spec-storage'
           p: 'spec_loop' g: 'sd-storage' }
+        # Tagged-type member heads dispatch into struct_specifier /
+        # enum_specifier, exactly as simple_declaration does. These
+        # MUST come before #SIMPLE_TYPE_HEAD (which also contains
+        # KW_STRUCT / KW_UNION / KW_ENUM) — otherwise the generic alt
+        # absorbs the keyword as a plain spec token and the tag name
+        # is mis-parsed as the member's declarator. Covers named
+        # members (\`struct S0 f0;\`), inline definitions
+        # (\`struct { int a; } t;\`) and C11 anonymous members
+        # (\`union { int i; float f; };\`).
+        { s: 'KW_STRUCT' b: 1 p: 'struct_specifier' g: 'sd-struct' }
+        { s: 'KW_UNION' b: 1 p: 'struct_specifier' g: 'sd-union' }
+        { s: 'KW_ENUM' b: 1 p: 'enum_specifier' g: 'sd-enum' }
         { s: '#SIMPLE_TYPE_HEAD' a: '@sd-absorb-spec-type'
           p: 'spec_loop' g: 'sd-type' }
       ]
@@ -1970,18 +2044,24 @@ function parseGrammar(text: string): any {
 }
 
 export interface COptions {
-  // Enable extension support: preprocessor (#include, #define, #if family,
-  // #pragma, #error, #warning, #undef, #line), GCC keywords/syntax
-  // (__attribute__, __asm__, __extension__, __inline__, __signed__,
-  // __volatile__, __const__, __restrict__, __typeof__, __alignof__),
-  // MSVC keywords (__declspec, __cdecl, __int8/16/32/64, __ptr32/64,
-  // etc.), Clang nullability annotations, and the structured CST
-  // shapes for inline assembly.
+  // Enable extension support: GCC keywords/syntax (__attribute__,
+  // __asm__, __extension__, __inline__, __signed__, __volatile__,
+  // __const__, __restrict__, __typeof__, __alignof__), MSVC keywords
+  // (__declspec, __cdecl, __int8/16/32/64, __ptr32/64, etc.), Clang
+  // nullability annotations, the structured CST shapes for inline
+  // assembly, and the legacy recursive-descent fallback that covers the
+  // long-tail declarator shapes (K&R parameter lists, compound
+  // declarators beyond arrays-of-function-pointers).
   //
-  // When false (default), the parser only handles plain C23: keywords,
+  // When false (default), the parser handles plain C23: keywords,
   // punctuators, literals, declarations/definitions/statements/
-  // expressions, C23 attributes [[...]], typedef tracking. Source that
-  // uses any extension construct will fail to parse cleanly.
+  // expressions, C23 attributes [[...]], static_assert, typedef +
+  // macro tracking, and the whole preprocessor (#include, #define, #if
+  // family, #pragma, #error, #warning, #undef, #line, plus
+  // conditional_group folding) — directives are structured identically
+  // in both modes. Source that uses a GCC/MSVC/Clang extension
+  // construct, or a shape that only the legacy fallback covers, will
+  // fail to parse cleanly.
   //
   // The default is `false` to keep the plain-C path the canonical
   // reference. Real-world C source typically needs `{extended: true}`.
@@ -3130,6 +3210,13 @@ return {
   // bc: when val just produced a size expression, splice it into the
   // array_postfix node ahead of the closing `]` (which hasn't been
   // matched yet at this point).
+  // Push a C99 array-declarator qualifier / `static` / `*` token onto
+  // the owning array_postfix node, in source order.
+  '@arrq-take': (rule: Rule): void => {
+    const owner = rule.parent as Rule  // array_postfix
+    if (owner && owner.node) pushTokenWithTrivia(owner.node, rule.o0 as Token)
+  },
+
   '@array_postfix-bc': (rule: Rule): void => {
     if (rule.child && rule.child.name === 'val' && rule.child.node &&
         !rule.u.size) {
@@ -3292,6 +3379,22 @@ return {
     const ptr = makeNode('pointer')
     pushTokenWithTrivia(ptr, rule.c0 as Token)
     rule.k.declarator.children.push(ptr)
+    // Stash for @param-pointer-qual: a type qualifier following `*`
+    // qualifies THIS pointer (`int * const p` is a const pointer).
+    rule.k.lastPointer = ptr
+  },
+
+  // True once a `*` has been absorbed into this parameter's
+  // declarator, so a following type-qualifier keyword is a pointer
+  // qualifier rather than a (misplaced) declaration specifier.
+  '@param-has-pointer': (rule: Rule): boolean => !!rule.k.lastPointer,
+
+  // Append a type-qualifier token to the parameter's most recently
+  // pushed pointer node — the parameter-list analogue of
+  // @absorb-pq-const / pointer_qualifier_loop.
+  '@param-pointer-qual': (rule: Rule): void => {
+    const ptr = rule.k.lastPointer
+    if (ptr) pushTokenWithTrivia(ptr, rule.c0 as Token)
   },
 
   // ---- parenthesised abstract / named parameter declarator ----
@@ -3360,6 +3463,19 @@ return {
     const ptr = makeNode('pointer')
     pushTokenWithTrivia(ptr, rule.c0 as Token)
     owner.k.declarator.children.push(ptr)
+    rule.k.lastPointer = ptr
+  },
+
+  // True once a `*` has been absorbed inside the parenthesised inner
+  // declarator, so a following qualifier keyword qualifies it.
+  '@ppi-has-pointer': (rule: Rule): boolean => !!rule.k.lastPointer,
+
+  // Type qualifier following a `*` inside the parenthesised inner
+  // declarator, e.g. the `const` in `int (* const fp)(int)`.
+  '@ppi-pointer-qual': (rule: Rule): void => {
+    const ptr = rule.k.lastPointer
+    const tkn = (rule.state === 'o' ? rule.o0 : rule.c0) as Token
+    if (ptr) pushTokenWithTrivia(ptr, tkn)
   },
 
   // Capture the optional ID inside the parenthesised inner
@@ -4812,6 +4928,12 @@ return {
     }
     rule.node = makeNode('struct_specifier')
     rule.k.ssNode = rule.node
+    // A fresh (non-recursive) entry must clear every flag this rule
+    // owns: the engine COPIES the parent's `k` into a pushed child, so
+    // a struct nested inside another struct's member list would
+    // otherwise inherit the outer specifier's progress flags and skip
+    // straight to its re-entry alt without consuming its own keyword.
+    rule.k.ssKwTaken = false
     rule.k.ssTagTaken = false
     rule.k.ssBodyTaken = false
   },
@@ -4851,7 +4973,10 @@ return {
     }
     rule.node = makeNode('member_decl_list')
     rule.k.mdlNode = rule.node
+    // See @struct_specifier-bo: a pushed child inherits the parent's
+    // `k`, so a nested member list must clear its own flags.
     rule.k.mdlOpened = false
+    rule.k.takenMembers = undefined
   },
   '@mdl-reentered': (rule: Rule): boolean => rule.k.mdlOpened === true,
   '@mdl-take-lbrace': (rule: Rule): void => {
@@ -4889,6 +5014,14 @@ return {
     rule.u.specs = makeNode('specifier_qualifier_list')
     rule.u.sdl = makeNode('struct_declarator_list')
     rule.k.sdNode = rule.node
+    // See @struct_specifier-bo: a pushed child inherits the parent's
+    // `k`. A member declaration nested inside an inline struct/union
+    // body must not inherit the outer member declaration's progress.
+    rule.k.sdSpecsAttached = false
+    rule.k.sdSdlAttached = false
+    rule.k.sdAnyDecl = false
+    rule.k.takenSdrs = undefined
+    rule.k.takenTagged = undefined
   },
   '@sd-reentered': (rule: Rule): boolean => !!rule.k.sdSpecsAttached,
   '@sd-absorb-spec-storage': (rule: Rule): void => {
@@ -4923,6 +5056,18 @@ return {
       if (!rule.k.takenSdrs) rule.k.takenSdrs = new Set()
       rule.k.takenSdrs.add(rule.child)
     }
+    // A tagged-type member head (`struct S0 f0;`, `union { … };`)
+    // dispatches straight into struct_specifier / enum_specifier from
+    // open; relay the returned node onto the specifier_qualifier_list,
+    // mirroring @spec_loop-bc for the spec_loop route.
+    if (rule.child && rule.child.node &&
+        (rule.child.name === 'struct_specifier' ||
+         rule.child.name === 'enum_specifier') &&
+        !rule.k.takenTagged?.has(rule.child)) {
+      rule.u.specs.children.push(rule.child.node)
+      if (!rule.k.takenTagged) rule.k.takenTagged = new Set()
+      rule.k.takenTagged.add(rule.child)
+    }
   },
 
   // ---- struct_declarator (phase F.2) -------------------------------
@@ -4935,6 +5080,10 @@ return {
     }
     rule.node = makeNode('struct_declarator')
     rule.k.sdrNode = rule.node
+    // See @struct_specifier-bo: pushed children inherit `k`.
+    rule.k.sdrDeclTaken = false
+    rule.k.sdrBfTaken = false
+    rule.k.sdrAnonBf = false
   },
   '@sdr-reentered': (rule: Rule): boolean => !!rule.k.sdrDeclTaken,
   '@sdr-mark-anon-bf': (rule: Rule): void => {
@@ -4992,6 +5141,12 @@ return {
     }
     rule.node = makeNode('enum_specifier')
     rule.k.esNode = rule.node
+    // See @struct_specifier-bo: pushed children inherit `k`.
+    rule.k.esKwTaken = false
+    rule.k.esTagTaken = false
+    rule.k.esUtypeTaken = false
+    rule.k.esUtypeAttached = false
+    rule.k.esBodyTaken = false
   },
   '@es-tag-reentered': (rule: Rule): boolean => !!rule.k.esKwTaken,
   '@es-take-kw': (rule: Rule): void => {
@@ -5045,10 +5200,6 @@ return {
 
   // ---- enumerator_list (phase F.4) ---------------------------------
   '@enumerator_list-bo': (rule: Rule): void => {
-    if ((globalThis as any).Q22_DEBUG) {
-      const keys = Object.keys(rule.k).filter(k => k !== 'tokens')
-      console.error('EL-BO', { keys, parent: rule.parent?.name, prev: rule.prev?.name, hasElNode: 'elNode' in rule.k })
-    }
     const prev = (rule as any).prev
     const isRecursion = prev && prev.name === rule.name
     if (isRecursion && rule.k.elNode) {
@@ -5057,7 +5208,9 @@ return {
     }
     rule.node = makeNode('enumerator_list')
     rule.k.elNode = rule.node
+    // See @struct_specifier-bo: pushed children inherit `k`.
     rule.k.elOpened = false
+    rule.k.takenEnums = undefined
   },
   '@el-reentered': (rule: Rule): boolean => rule.k.elOpened === true,
   '@el-take-lbrace': (rule: Rule): void => {

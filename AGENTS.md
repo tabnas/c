@@ -38,7 +38,8 @@ const cst = new Tabnas().use(jsonic).use(C).parse('typedef int T; T x = 1;')
 | [`ts/src/expr.ts`](ts/src/expr.ts), [`ts/src/expr-grammar.ts`](ts/src/expr-grammar.ts) | C operator table + `evaluateCExpr` (converts `@tabnas/expr` S-expressions into the per-kind expression CST shapes); `installExpr` wires `@tabnas/expr` and the C val-atom alts. |
 | [`ts/src/structure.ts`](ts/src/structure.ts) | Recursive-descent post-processor for the legacy-fallback long-tail shapes (K&R params, complex compound declarators). |
 | [`ts/src/conditional-groups.ts`](ts/src/conditional-groups.ts) | Translation-unit post-pass that folds `#if`/`#elif`/`#else`/`#endif` runs into `conditional_group` nodes. |
-| [`ts/test/`](ts/test/) | TS tests (compiled to `dist-test/`): `c.test.ts` (parse cases), `csmith.test.ts` (replays the 100-program CSmith regression corpus against committed gzipped fixtures). |
+| [`ts/test/`](ts/test/) | TS tests (compiled to `dist-test/`): `c.test.ts` (parse cases), `csmith.test.ts` (replays the 100-program CSmith regression corpus against committed gzipped fixtures), `parity.test.ts` (runs the shared `test/spec/*.tsv` fixtures). |
+| [`test/spec/`](test/spec/) | **Shared cross-runtime fixtures** (`*.tsv`), auto-discovered and run by BOTH `ts/test/parity.test.ts` and `go/parity_test.go`. See [`test/AGENTS.md`](test/AGENTS.md). Prefer a fixture here over a one-off in-language assertion. |
 
 ## The tabnas engine dependency
 
@@ -58,9 +59,10 @@ fixed tokens). `expr_grammar.go`'s `withInstanceFixedTokens` shim bridges this
 by briefly exposing the C instance's tins through that global table across the
 `Use(Expr)` call. Additionally, `@tabnas/expr`'s Go `makeAllOps` iterates the
 operator table as a Go map, so the standalone bare-expression precedence test
-(`TestExprBinaryPrecedence`, start=`val`) is **non-deterministic** unless the op
-names are sorted — a one-line fix in `expr/go/expr.go` (`sort.Strings(opNames)`
-before building the ops). NOTE: the **CSmith corpus parity is 100/100 and
+(`TestExprBinaryPrecedence`, start=`val`) used to be **non-deterministic**
+unless the op names were sorted. That fix now ships upstream —
+`expr/go/expr.go` calls `sort.Strings(opNames)` before building the ops — so
+nothing is needed here. NOTE: the **CSmith corpus parity is 100/100 and
 deterministic with or without that sort fix** (the C-side call/paren handling
 makes full-program parsing robust); the sort fix only affects the synthetic
 start=`val` precedence unit test. The `call`/`paren` ambiguity is resolved
@@ -128,7 +130,30 @@ npm test               # node --enable-source-maps --test "dist-test/*.test.js"
 
 `npm run build` **embeds the grammar first** (into `src/c.ts`), then
 `tsc --build`s both `src` and `test`. The repo-root [`Makefile`](Makefile)
-wraps the package: `make build|test|clean|reset`.
+wraps both halves: `make build` = `build-ts` + `build-go`, `make test` =
+`test-ts` + `test-go`, plus `clean|reset`.
+
+The Go half needs a `go.work` over the sibling `@tabnas` module checkouts
+(`parser`, `jsonic`, `expr` and their deps); `cd go && go test ./...` then
+runs the unit tests, the shared `test/spec/*.tsv` fixtures (`TestSpec`) and
+the CSmith parity gate (`TestCsmithCorpus`).
+
+## Conformance bar
+
+There is no external C conformance suite for a CST parser (the ISO suites
+test compiled behaviour, not parse shape). The bar this repo holds itself
+to instead:
+
+1. **CSmith corpus, 100/100.** `ts/test/csmith-corpus/seed-*.c` are 100
+   random C programs; `ts/test/csmith-fixtures/seed-*.json.gz` are the
+   golden CSTs. Both runtimes replay every seed and byte-compare. Zero
+   `declKind: 'unknown'` declarations is asserted separately.
+2. **Shared `test/spec/*.tsv` fixtures** run identically in both runtimes.
+3. **The documented subset in README.md is what the code does.** The
+   `extended` option gates GCC/Clang/MSVC syntax and the legacy fallback;
+   plain C23 (including the whole preprocessor) is the default mode. Keep
+   the README "Options" and "Coverage and known limitations" sections
+   truthful — verify by parsing, not by memory.
 
 ## Authority rules
 

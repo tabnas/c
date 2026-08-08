@@ -1,5 +1,48 @@
 # Changelog
 
+## Unreleased (@tabnas/c)
+
+### Fixed
+
+- **Pointer type qualifiers in parameter declarators.** `void f(int *
+  const p)` / `void f(char * restrict d)` were a hard parse error; the
+  qualifier now lands on the `pointer` node it qualifies, matching the
+  top-level `int * const p;` shape. Also covers the parenthesised inner
+  declarator (`void g(int (* const fp)(int))`).
+- **Tagged-type struct/union members.** `struct S { struct T t; };` on
+  the grammar path built a `specifier_qualifier_list` holding only the
+  `struct` keyword and folded the tag name into a duplicated
+  `direct_declarator` — disagreeing with the legacy fallback, which
+  emitted the correct nested `struct_specifier`. `struct_declaration`
+  now dispatches tagged-type heads into `struct_specifier` /
+  `enum_specifier` exactly as `simple_declaration` does.
+- **Nested struct/union/enum state leak.** The engine copies a rule's
+  `k` into a pushed child, so a specifier nested inside another
+  specifier's member list inherited the outer rule's progress flags and
+  skipped its own keyword. Every `-bo` in the struct/enum family now
+  clears the flags it owns on a fresh (non-recursive) entry. This is
+  what made C11 anonymous members (`struct S { union { int i; }; };`),
+  inline definitions (`struct { int a; } t;`) and arbitrary nesting
+  parse.
+- **C99 array declarator qualifiers.** `int a[static 4]`,
+  `char b[restrict 8]` and the unspecified-VLA marker `int a[*]` are
+  accepted, with a two-token guard so a real VLA size expression
+  (`int a[*p]`) still routes into `val`.
+- Removed a leftover `Q22_DEBUG` console trace from
+  `@enumerator_list-bo`.
+
+### Changed
+
+- `make test` now runs `test-go` as well as `test-ts` (it previously
+  only ran the TypeScript half).
+- Go: `TestExprTernary` was an empty `t.Skip`; it now asserts the
+  `conditional_expression` shape at `start='val'`, matching TypeScript.
+- Docs: README gained an **Options** section documenting `extended`
+  (which is required for GCC/Clang/MSVC syntax and the legacy fallback,
+  and is NOT required for the preprocessor), and the coverage /
+  limitations sections were corrected against what the code actually
+  does.
+
 ## 0.2.0 (@tabnas/c)
 
 Ported from [`@jsonic/c`](https://github.com/jsonicjs/c) onto the

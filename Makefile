@@ -1,8 +1,8 @@
 # Build and test @tabnas/c.
 #
-# ts/ is the canonical implementation. go/ is currently a SCAFFOLD (module
-# wiring + embedded grammar + plugin/helper signatures only — the parsing
-# logic is not yet ported; see go/c.go and AGENTS.md).
+# ts/ is the canonical implementation. go/ is a COMPLETE hand-translation at
+# parity with it: `go test` runs the same shared test/spec/*.tsv fixtures and
+# the 100-program CSmith corpus against the TypeScript golden fixtures.
 #
 # Local builds resolve the unpublished @tabnas siblings via the file:
 # devDependencies in ts/package.json and, for Go, a go.work over sibling
@@ -14,7 +14,7 @@ all: build test
 
 build: build-ts build-go
 
-test: test-ts
+test: test-ts test-go
 
 # --- TypeScript (canonical) ---
 build-ts:
@@ -29,7 +29,7 @@ clean-ts:
 reset:
 	cd ts && npm run reset
 
-# --- Go (scaffold) ---
+# --- Go (port, at parity) ---
 # Requires a go.work covering the sibling parser/jsonic/expr Go modules.
 build-go:
 	cd go && go build ./...
