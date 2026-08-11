@@ -2,11 +2,11 @@
 
 import { test, describe } from 'node:test'
 import assert from 'node:assert'
-import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { Tabnas } from '@tabnas/parser'
 import { jsonic } from '@tabnas/jsonic'
+import { loadSpec } from '@tabnas/support'
 import { C } from '../dist/c.js'
 
 // Most tests in this file exercise extension constructs (preprocessor,
@@ -1399,38 +1399,34 @@ interface PathSpec {
 }
 
 function loadPathSpec(): PathSpec[] {
-  // Test runs with cwd = project root. The spec lives at
-  // test/spec/path-dispatch.tsv.
-  const tsvPath = join(process.cwd(), 'test', 'spec', 'path-dispatch.tsv')
-  const text = readFileSync(tsvPath, 'utf8')
-  const rows: PathSpec[] = []
-  const lines = text.split(/\r?\n/)
-  for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i]
-    if (!raw) continue
-    if (raw.startsWith('#')) continue
-    const cols = raw.split('\t')
-    if (cols.length < 3) {
-      throw new Error(
-        `path-dispatch.tsv:${i + 1}: expected 3+ tab-separated cols, got ${cols.length}: ${JSON.stringify(raw)}`,
-      )
-    }
-    const [src, path, declKind, col4, col5] = cols
+  // This one is TypeScript-only — it asserts an internal dispatch marker,
+  // not a parse result — so it lives under ts/ rather than in the
+  // cross-runtime test/spec at the repo root. It is still read by the
+  // shared @tabnas/support loader, so it obeys the same rules as every
+  // other tabnas fixture: no header (the columns are positional), blank
+  // lines and `#`-with-no-tab comment lines skipped, and a `#`-leading
+  // line WITH a tab treated as data — which is what a row whose C source
+  // is a preprocessor directive needs.
+  const spec = loadSpec(
+    join(__dirname, '..', 'test', 'spec', 'path-dispatch.tsv'),
+    { header: false, minCols: 3 })
+
+  return spec.rows.map((row) => {
+    const [src, path, declKind, col4, col5] = row.cols
     // Column 4 is declIdx if it parses as an integer, else it's
     // notes. Column 5 (when present) is always notes. This keeps
     // most rows at 3 columns and only opt in to declIdx when a
     // source produces multiple external_declarations.
-    let declIdx = 0
-    let notes = ''
-    if (col4 != null && /^\d+$/.test(col4)) {
-      declIdx = parseInt(col4, 10)
-      notes = col5 || ''
-    } else {
-      notes = col4 || ''
+    const hasIdx = null != col4 && /^\d+$/.test(col4)
+    return {
+      src,
+      path,
+      declKind,
+      declIdx: hasIdx ? parseInt(col4, 10) : 0,
+      notes: (hasIdx ? col5 : col4) || '',
+      line: row.line,
     }
-    rows.push({ src, path, declKind, declIdx, notes, line: i + 1 })
-  }
-  return rows
+  })
 }
 
 describe('path-dispatch spec', () => {
