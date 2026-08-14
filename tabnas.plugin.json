@@ -1,0 +1,18 @@
+{
+  "$schema": "https://tabnas.dev/schema/plugin.schema.json",
+  "name": "@tabnas/c",
+  "go": "github.com/tabnas/c/go",
+  "description": "C source parsing for the tabnas engine (C23 plus common compiler extensions), preserving macros.",
+  "base": "@tabnas/jsonic",
+  "engine": "@tabnas/parser",
+  "grammar": "ts/c-grammar.jsonic",
+  "extensions": [
+    ".c",
+    ".h"
+  ],
+  "specDir": "test/spec",
+  "errorCodes": [],
+  "docs": "https://tabnas.dev/docs/packages",
+  "repository": "https://github.com/tabnas/c",
+  "versionSource": "ts/package.json"
+}
