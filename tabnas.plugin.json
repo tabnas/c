@@ -11,6 +11,17 @@
     ".h"
   ],
   "specDir": "test/spec",
+  "clib": {
+    "dir": "go/clib",
+    "library": "libtabnasc",
+    "abi": "v1",
+    "errorCodes": [
+      "usage",
+      "grammar",
+      "handle",
+      "internal"
+    ]
+  },
   "errorCodes": [],
   "docs": "https://tabnas.dev/docs/packages",
   "repository": "https://github.com/tabnas/c",
