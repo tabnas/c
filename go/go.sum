@@ -8,5 +8,5 @@ github.com/tabnas/jsonic/go v0.6.4 h1:Uytv9kFSJEUzHeqKdWBiBMnZEtmV59Q7FfuHd+ukpz
 github.com/tabnas/jsonic/go v0.6.4/go.mod h1:975Xm5Ycg3QgT6LqYgBoHMGavaMaZOfUR84hj4LgRbg=
 github.com/tabnas/parser/go v0.8.10 h1:5RPYqyqIy9TOfEgeERQnsJ5AYQMf2FZF2VcUDVt6CQE=
 github.com/tabnas/parser/go v0.8.10/go.mod h1:WrlfEVyZ1QjEIowWiyEu3K1iHj7wxuPut5zoH9Trehk=
-github.com/tabnas/support/go v0.3.1 h1:xle/JiJO+vsiAUQqzR9KUh6rO4M4Tg9IHtL7d6DwkUc=
-github.com/tabnas/support/go v0.3.1/go.mod h1:q+EGPO8fRFQAYDwRHFH4lafD5l5W/NCdY8vhN9IJOkY=
+github.com/tabnas/support/go v0.3.2 h1:jDxWcR+cAbu87iSnIORlVZmzPC8TM1+vigSh4kzIwS8=
+github.com/tabnas/support/go v0.3.2/go.mod h1:q+EGPO8fRFQAYDwRHFH4lafD5l5W/NCdY8vhN9IJOkY=
