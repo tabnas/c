@@ -25,5 +25,6 @@
   "errorCodes": [],
   "docs": "https://tabnas.dev/docs/packages",
   "repository": "https://github.com/tabnas/c",
-  "versionSource": "ts/package.json"
+  "versionSource": "ts/package.json",
+  "pluginKind": "grammar"
 }
