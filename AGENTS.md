@@ -150,14 +150,22 @@ make build && make test      # both runtimes — the check that matters
 Narrower, when iterating:
 
 ```bash
-(cd ts && npm run build && npm test)   # build first: `npm test` only runs dist-test/
+(cd ts && npm test)                    # `pretest` builds first
 (cd go && go test ./...)               # unit tests + shared spec fixtures + the CSmith gate
 ```
 
-Each line is a subshell, and the TS one builds before testing on purpose.
-`npm test` runs the compiled `dist-test/*.test.js` and does **not** compile —
-run it alone on a fresh checkout and it either fails for want of `dist-test/`
-or silently passes against stale output.
+Each line is a subshell. `npm test` compiles first — its `pretest`
+runs `npm run build` — so the suite always reports on what you edited.
+The focused runners have their own hooks, because npm runs `pre<name>`
+only for the matching name.
+
+That was not always true, and it is worth knowing why the line above no
+longer says `npm run build && npm test`. `npm test` used to run the
+compiled `dist-test/*.test.js` WITHOUT compiling, so a fresh checkout
+either failed for want of `dist-test/` or silently passed against stale
+output. This file documented that hazard and asked contributors to work
+around it; the wiring is fixed instead, and
+`make ax-stale-test-artifact` in tabnas/admin keeps it fixed.
 
 What "correct" means here, in order of authority:
 
