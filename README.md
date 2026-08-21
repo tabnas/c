@@ -12,6 +12,8 @@ A [Tabnas](https://github.com/tabnas/parser) parser plugin — layered on
 into a **concrete syntax tree** — preserving every token, comment, macro
 definition, macro use, and compiler extension as-is.
 
+Docs, guides, the error reference and the playground: **[tabnas.dev](https://tabnas.dev)**.
+
 Targets **C23** plus the common **GCC / Clang / MSVC** extensions, with
 best-effort handling of preprocessor conditional groups.
 
