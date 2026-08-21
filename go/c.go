@@ -25,7 +25,7 @@ import (
 // VERSION is this module's version. It MUST equal ts/package.json
 // "version": the release orchestrator rewrites both, and
 // TestVersionMatchesPackageJSON fails the build if they drift.
-const VERSION = "0.5.4"
+const VERSION = "0.5.5"
 
 // grammarText is the C grammar, single-sourced from c-grammar.jsonic (the TS
 // build copies it here). Embedded from file because the grammar contains
