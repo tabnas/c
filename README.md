@@ -7,9 +7,9 @@
 [![tabnas standard](https://tabnas.github.io/status/badges/c-standard.svg)](https://tabnas.github.io/status/)
 <!-- /tabnas-badges -->
 
-A [Tabnas](https://github.com/tabnas/parser) parser plugin — layered on
-[@tabnas/jsonic](https://github.com/tabnas/jsonic) — that parses **C source code**
-into a **concrete syntax tree** — preserving every token, comment, macro
+A [Tabnas](https://github.com/tabnas/parser) parser plugin (layered on
+[@tabnas/jsonic](https://github.com/tabnas/jsonic)) that parses **C source code**
+into a **concrete syntax tree**, preserving every token, comment, macro
 definition, macro use, and compiler extension as-is.
 
 Docs, guides, the error reference and the playground: **[tabnas.dev](https://tabnas.dev)**.
@@ -61,7 +61,7 @@ const j = new Tabnas().use(jsonic).use(C, { extended: true })
 |---|---|---|
 | `extended` | `false` | Enable the compiler-extension surface. |
 
-**`extended: false` (the default) — plain C23.** Keywords, punctuators,
+**`extended: false` (the default): plain C23.** Keywords, punctuators,
 literals, declarations / definitions / statements / expressions, C23
 attributes `[[...]]`, `static_assert`, typedef + macro tracking, and the
 **whole preprocessor** (`#define` / `#include` / `#if` family / `#pragma`
@@ -69,7 +69,7 @@ attributes `[[...]]`, `static_assert`, typedef + macro tracking, and the
 folding). Preprocessor directives are structured identically in both
 modes.
 
-**`extended: true` — plus GCC / Clang / MSVC extensions.** GCC keywords
+**`extended: true`: plus GCC / Clang / MSVC extensions.** GCC keywords
 and syntax (`__attribute__`, `__asm__`, `__extension__`, `__inline__`,
 `__signed__`, `__volatile__`, `__const__`, `__restrict__`, `__typeof__`,
 `__alignof__`), MSVC keywords (`__declspec`, `__cdecl`,
@@ -80,7 +80,7 @@ recursive-descent fallback that covers the long-tail declarator shapes
 
 Every extension dispatch alt in the grammar is gated on `@extended-on`,
 and the extension-only rules are stripped from the grammar spec
-altogether in plain-C mode — so plain C23 source parses through a
+altogether in plain-C mode, so plain C23 source parses through a
 provably extension-free grammar. Real-world C source (anything that
 includes a system header) needs `{ extended: true }`; source using an
 extension construct under the default is a parse error, not a
@@ -92,7 +92,7 @@ work in both modes.
 
 ## Architecture
 
-- **Focused lex matchers** (`src/matchers.ts`): one matcher per concept —
+- **Focused lex matchers** (`src/matchers.ts`): one matcher per concept:
   whitespace, line continuation, line/block comments, preprocessor
   directive opener (line-start gated), directive newline, header name,
   identifier (with keyword/typedef-name/macro-name reclassification),
@@ -113,8 +113,8 @@ work in both modes.
   directly.
 
 - **Declarative grammar** (`c-grammar.jsonic`): the rule shapes for
-  the entire C surface — translation unit, external declarations,
-  declarators, statements, expressions — live as a Jsonic-DSL
+  the entire C surface (translation unit, external declarations,
+  declarators, statements, expressions) live as a Jsonic-DSL
   document, embedded at build time into `src/c.ts`. All conditions
   and actions are bound to `@`-named refs in the TS plugin, so the
   grammar file reads as structural intent and action logic stays
@@ -133,7 +133,7 @@ work in both modes.
 - **Conditional-group folding** (`src/conditional-groups.ts`): a
   translation-unit-level post-pass that collapses contiguous runs
   of `#if`/`#ifdef` … `#elif`/`#else` … `#endif` into a single
-  `conditional_group` node. Self-contained — operates only on
+  `conditional_group` node. Self-contained: operates only on
   already-parsed `conditional_directive` nodes.
 
 - **Hybrid dispatch + legacy fallback** (`src/structure.ts`,
@@ -157,11 +157,11 @@ work in both modes.
   Shapes still on the legacy path (each carries
   `viaPath: 'legacy'` on the `external_declaration`, so you can tell
   which path produced a node):
-  - K&R parameter lists (`int f(a, b) int a; long b; { … }`) —
-    rare in modern code; csmith never generates them. These are the
+  - K&R parameter lists (`int f(a, b) int a; long b; { … }`).
+    Rare in modern code; csmith never generates them. These are the
     one case that also gets `declKind: 'unknown'`
     (`viaPath: 'legacy-unknown'`).
-  - pointer-to-function-pointer declarators, e.g.
+  - pointer-to-function-pointer declarators, for example
     `int (*(*fpp))(int);`. Plain function pointers
     `int (*fp)(int);`, arrays of function pointers
     `int (*arr[N])(int);` and top-level `static_assert(cond, msg);`
@@ -327,7 +327,7 @@ sections, struct bitfields with anonymous unions, designated and
 indexed initialisers).
 
 Pointer type qualifiers are structured everywhere a declarator can
-appear, including parameter lists — `void f(char * restrict d, int *
+appear, including parameter lists: `void f(char * restrict d, int *
 const p)` puts the qualifier token on the `pointer` node it qualifies,
 the same shape a top-level `int * const p;` produces. C99 array
 declarator qualifiers (`int a[static 4]`, `char b[restrict 8]`) and the
@@ -345,7 +345,7 @@ the member's `specifier_qualifier_list`.
 Known fall-throughs that produce a `declKind: 'unknown'` external
 declaration rather than a structured one (still parseable, source
 fidelity preserved). These land on the legacy recursive-descent
-fallback, which only exists under `{ extended: true }` — in plain-C
+fallback, which only exists under `{ extended: true }`, and in plain-C
 mode they are a parse error:
 
 - K&R-style parameter declarations (`int f(a, b) int a; long b; { … }`).
@@ -353,11 +353,11 @@ mode they are a parse error:
   feature macro that hasn't been `#define`d.
 
 Pointer-to-function-pointer declarators (`int (*(*fpp))(int);`) also
-need `{ extended: true }` — they are structured (`declKind:
+need `{ extended: true }`: they are structured (`declKind:
 'declaration'`) but only the legacy fallback covers them.
 
 Compound literals with a struct-tagged type inside a function body
-(`(struct point){ … }`) ARE structured — they produce a
+(`(struct point){ … }`) ARE structured: they produce a
 `compound_literal` node with a `type_name` and an `initializer_list`,
 same as the anonymous-array form `(int[]){1,2,3}`.
 
@@ -384,7 +384,7 @@ hybrid:
 
 - **A** install `@tabnas/expr`; `val` accepts C atoms with the
   evaluate callback emitting the public CST shapes.
-- **B** `simple_declaration` family + statement family —
+- **B** `simple_declaration` family + statement family.
   `block_item` / `statement` / `expression_statement` /
   `jump_statement` / `if`/`while`/`do`/`switch`/`for` /
   `labeled_statement` / `asm_statement` / `preprocessor_line`.
@@ -402,15 +402,15 @@ hybrid:
   enumerators, dispatched from `simple_declaration` / `spec_loop`.
 - **G** attribute specs (3 forms × leading + between-specs
   insertion points).
-- **H** top-level preprocessor directives — define / undef /
-  include / conditional / pragma / error / warning / line — with
+- **H** top-level preprocessor directives (define / undef /
+  include / conditional / pragma / error / warning / line) with
   macro registration on `cmeta.macros`, header-name lex-mode
   feedback, and the typed sub-rules wrapped under
   `external_declaration`.
 - **I** top-level GCC `__asm__`. (`static_assert` grammar rule
   defined; top-level dispatch deferred pending comma-op gating.)
 - **K** `structureConditionalGroups` extracted to its own
-  module — a self-contained translation-unit-level post-pass.
+  module: a self-contained translation-unit-level post-pass.
 - **L** standalone struct / enum definitions through grammar
   (`@looks-simple-decl` walks past tagged-type bodies).
 - **N** ship `1.0.0`.
@@ -427,7 +427,7 @@ hybrid:
   architecture.
 
 The legacy chomp + `structureExternalDeclaration` fallback
-remains by design for the long-tail shapes — K&R parameter lists
+remains by design for the long-tail shapes: K&R parameter lists
 and complex compound declarators beyond simple function pointers.
 Both paths emit identical CST nodes, so consumers see one tree
 regardless of which path produced it.
@@ -454,7 +454,7 @@ against the TypeScript golden fixtures (the same `.json.gz` set the TS suite
 uses). Build/test the Go port with a `go.work` over the sibling `@tabnas`
 modules (see the CI note in [`AGENTS.md`](AGENTS.md)); one optional upstream
 `@tabnas/expr` sort fix makes the synthetic start=`val` precedence unit test
-deterministic (corpus parity is robust without it).
+deterministic (corpus parity holds without it).
 
 ## License
 
