@@ -1,6 +1,6 @@
 # @tabnas/c (TypeScript)
 
-The TypeScript implementation of `@tabnas/c` — a [Tabnas](https://github.com/tabnas/parser)
+The TypeScript implementation of `@tabnas/c`: a [Tabnas](https://github.com/tabnas/parser)
 parser plugin (layered on [@tabnas/jsonic](https://github.com/tabnas/jsonic))
 that parses C source into a concrete syntax tree.
 

@@ -1,0 +1,42 @@
+# Words Vale's dictionary does not have, accepted by name.
+#
+# LISTED ONE BY ONE, never matched by suffix. A pattern like `\w+ise`
+# accepts any word ending in those letters, `madeupise` included, and
+# punches a hole through the gate this file exists to make usable.
+#
+# CASE PAIRS ARE ONE ENTRY, WRITTEN AS A REGEX. Two plain lines make
+# Vale enforce one spelling over the other, and it then reports the
+# other as a misspelling.
+
+_Alignof
+[Aa]sm
+[Bb]itfields
+[Cc]allee
+[Cc]smith
+[Cc]utover
+[Dd]eclarator
+[Dd]eclarators
+[Ee]num
+[Ii]nitialisers
+[Ii]nitializer
+[Ii]nitializers
+[Ll]ookahead
+[Mm]atchers
+[Nn]pm
+[Nn]ullability
+[Pp]arseable
+[Pp]arser
+[Pp]ragma
+[Pp]ratt
+[Pp]reprocessor
+[Pp]unctuator
+[Pp]unctuators
+[Ss]izeof
+[Ss]rc
+[Ss]tatic_assert
+[Ss]tructurer
+[Tt]abnas
+[Tt]ypedef
+[Tt]ypedefs
+[Uu]nary
+[Uu]ndef
