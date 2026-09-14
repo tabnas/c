@@ -8,7 +8,8 @@
 # devDependencies in ts/package.json and, for Go, a go.work over sibling
 # checkouts of parser/jsonic/expr (and their deps).
 
-.PHONY: all build test clean reset build-ts test-ts clean-ts build-go test-go
+.PHONY: all build test clean reset build-ts test-ts clean-ts build-go test-go \
+        prose prose-counts
 
 all: build test
 
