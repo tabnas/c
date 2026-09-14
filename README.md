@@ -84,7 +84,7 @@ altogether in plain-C mode, so plain C23 source parses through a
 provably extension-free grammar. Real-world C source (anything that
 includes a system header) needs `{ extended: true }`; source using an
 extension construct under the default is a parse error, not a
-silently-degraded parse.
+silently degraded parse.
 
 The sections below on **Attributes** (GCC/MSVC forms) and **GCC inline
 assembly** describe `extended: true` behaviour. C23 `[[...]]` attributes
