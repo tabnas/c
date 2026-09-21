@@ -1,0 +1,41 @@
+input	ts	go	rust	why
+# divergent.tsv — the inputs where the RUST port answers differently from
+# the canonical TypeScript, executed by rs/tests/divergent_test.rs.
+#
+#   input  C source. Escapes \n \r \t \\ are decoded, as in test/spec.
+#   ts,go,rust
+#          what each runtime does: a JSON value, ERROR:<code>, or the
+#          literal ABORT, which means the runtime does not return at all
+#          — it exhausts its stack and the process dies. ABORT is this
+#          file's own vocabulary, defined here, because no error code can
+#          stand for "there was no error, there was no answer either".
+#   why    the entry in DIVERGENCE.md, and who repairs it.
+#
+# NOT A FIXTURE, and NOT IN test/spec. A fixture fails when behaviour
+# REGRESSES; this fails BOTH ways. When a port is repaired to agree with
+# the others, the row still claims they differ, the suite goes red, and it
+# names the row to delete. A divergence recorded as a passing test of
+# current behaviour survives its own repair and then describes something
+# that no longer happens, with nothing red. It also sits OUTSIDE test/spec
+# because both parity runners discover fixtures by listing that directory:
+# a register left in there would be run as a fixture by all three runtimes.
+#
+# MEASURED 2026-09-21 by running each runtime on each input: the canonical
+# under Node over a type-stripped copy of ts/src/c.ts, the Go port through
+# a driver binary, and the Rust port through cargo test.
+#
+# --- 1. A ternary in a declaration initializer --------------------------
+# The conditional_expression node holds itself among its descendants, so
+# every walk over the tree runs forever. TypeScript throws a catchable
+# RangeError; Go and a straight port into Rust kill the process. This port
+# refuses to enter a node twice and bounds the realize walk, so the parse
+# fails the way a parse fails.
+#
+# The cycle needs the ternary to be the WHOLE initializer: `int a = (b ? c
+# : d);` parses in every runtime, measured, so it is not a row here.
+int a = b ? c : d;	ABORT	ABORT	ERROR:cancel	DIVERGENCE.md#1; upstream, the canonical builds the cycle
+# --- 2. Source nested deeper than the realize cap -----------------------
+# Not expressible here: the input is thousands of braces, far larger than a
+# cell, and the TypeScript and Go answers depend on the stack the process
+# happens to have. Pinned by nesting_at_the_cap and nesting_past_the_cap in
+# rs/tests/limits_test.rs, and written up in DIVERGENCE.md#2.

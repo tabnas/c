@@ -21,3 +21,14 @@ This directory exists because session credentials cannot write
   suite already runs the other half of the gate
   (`ts/test/docs.test.js`), so promoting this adds the spelling and
   Google-convention arm rather than the whole gate.
+
+- **`workflows/rust.yml`** — the Rust port gate: format, build, tests,
+  doctests, clippy with `-D warnings`, and a lockfile check, all of them
+  inside `ci/rust/run.sh` so a contributor's local run and the hosted one
+  cannot say different things.
+
+  It clones five sibling repositories, because none of the crates it
+  depends on is published and `rs/Cargo.toml` takes each by path. It
+  needs no secrets. The `paths:` lists name everything the gate reads,
+  the grammar and its embedder included; a change there that skipped the
+  gate would be a grammar change nothing measured.

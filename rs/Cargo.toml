@@ -1,0 +1,33 @@
+[package]
+name = "tabnas-c"
+version = "0.5.6"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+description = "C23 concrete-syntax-tree grammar plugin for the tabnas parsing engine, over the jsonic base grammar and the expr operator plugin"
+repository = "https://github.com/tabnas/c"
+
+[lib]
+name = "tabnas_c"
+path = "src/lib.rs"
+
+[dependencies]
+# The engine, the jsonic base grammar and the expr operator plugin are
+# consumed as SIBLING CHECKOUTS, the standard tabnas development model:
+# clone https://github.com/tabnas/parser, https://github.com/tabnas/jsonic
+# and https://github.com/tabnas/expr next to this repository. None is
+# published, so there is no registry version to fall back on. jsonic in
+# turn takes https://github.com/tabnas/json the same way.
+tabnas = { path = "../../parser/rs" }
+tabnas-jsonic = { path = "../../jsonic/rs" }
+tabnas-expr = { path = "../../expr/rs" }
+indexmap = "2"
+serde_json = { version = "1.0", features = ["preserve_order"] }
+
+[dev-dependencies]
+# The shared fixture loader and runner: the Rust half of @tabnas/support,
+# another sibling checkout (https://github.com/tabnas/support). The
+# `serde_json` feature is the bridge from the engine's `Value::to_json` to
+# the runner's fixture value.
+tabnas-support = { path = "../../support/rs", features = ["serde_json"] }
+flate2 = "1"
