@@ -1,0 +1,7 @@
+/home/user/c/rs/target/debug/deps/equivalent-84d116a5e56f3354.d: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/equivalent-1.0.2/src/lib.rs
+
+/home/user/c/rs/target/debug/deps/libequivalent-84d116a5e56f3354.rlib: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/equivalent-1.0.2/src/lib.rs
+
+/home/user/c/rs/target/debug/deps/libequivalent-84d116a5e56f3354.rmeta: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/equivalent-1.0.2/src/lib.rs
+
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/equivalent-1.0.2/src/lib.rs:

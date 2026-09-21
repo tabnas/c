@@ -21,6 +21,7 @@ on:
     paths:
       - 'README.md'
       - 'ts/README.md'
+      - 'rs/README.md'
       - 'docs/STYLE-GUIDE.md'
       - 'ts/scripts/gated-docs.cjs'
       - 'ts/scripts/vale-counts.cjs'
@@ -31,6 +32,7 @@ on:
     paths:
       - 'README.md'
       - 'ts/README.md'
+      - 'rs/README.md'
       - 'docs/STYLE-GUIDE.md'
       - 'ts/scripts/gated-docs.cjs'
       - 'ts/scripts/vale-counts.cjs'

@@ -17,9 +17,12 @@ _Alignof
 [Dd]eclarator
 [Dd]eclarators
 [Ee]num
+[Ee]xpr
 [Ii]nitialisers
 [Ii]nitializer
 [Ii]nitializers
+[Jj]sonic
+[Ll]ockfile
 [Ll]ookahead
 [Mm]atchers
 [Nn]pm
@@ -31,6 +34,7 @@ _Alignof
 [Pp]reprocessor
 [Pp]unctuator
 [Pp]unctuators
+[Rr]ecurses
 [Ss]izeof
 [Ss]rc
 [Ss]tatic_assert
@@ -40,3 +44,4 @@ _Alignof
 [Tt]ypedefs
 [Uu]nary
 [Uu]ndef
+[Uu]noptimized

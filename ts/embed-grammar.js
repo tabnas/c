@@ -8,6 +8,10 @@
 //   - Go: copied verbatim to ../go/c-grammar.jsonic. The C grammar contains
 //     backticks, so the Go port embeds it from the file with //go:embed
 //     rather than inlining it as a raw string (as the smaller ports do).
+//   - Rust: copied verbatim to ../rs/c-grammar.jsonic, which src/lib.rs pulls
+//     in with include_str!. Same reason as Go: the text has backticks and
+//     would have to be escaped to inline, and a file copy cannot drift in a
+//     way the embedded-grammar test cannot see.
 //
 // Run via: npm run embed  (or: node embed-grammar.js)
 
@@ -17,6 +21,7 @@ const path = require('path')
 const GRAMMAR_FILE = path.join(__dirname, 'c-grammar.jsonic')
 const TS_FILE = path.join(__dirname, 'src', 'c.ts')
 const GO_GRAMMAR_FILE = path.join(__dirname, '..', 'go', 'c-grammar.jsonic')
+const RS_GRAMMAR_FILE = path.join(__dirname, '..', 'rs', 'c-grammar.jsonic')
 
 const BEGIN = '// --- BEGIN EMBEDDED c-grammar.jsonic ---'
 const END = '// --- END EMBEDDED c-grammar.jsonic ---'
@@ -53,4 +58,11 @@ console.log('Embedded grammar into', TS_FILE)
 if (fs.existsSync(path.dirname(GO_GRAMMAR_FILE))) {
   fs.writeFileSync(GO_GRAMMAR_FILE, grammar)
   console.log('Copied grammar to', GO_GRAMMAR_FILE)
+}
+
+// And into the Rust crate for include_str!, on the same guard: a checkout
+// without rs/ is not an error, it is a checkout without the Rust port.
+if (fs.existsSync(path.dirname(RS_GRAMMAR_FILE))) {
+  fs.writeFileSync(RS_GRAMMAR_FILE, grammar)
+  console.log('Copied grammar to', RS_GRAMMAR_FILE)
 }

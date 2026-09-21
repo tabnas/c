@@ -9,7 +9,8 @@ const REPO = Path.join(__dirname, '..', '..')
 // docs/STYLE-GUIDE.md.
 const PAGES = [
   "README.md",
-  "ts/README.md"
+  "ts/README.md",
+  "rs/README.md"
 ]
 
 const TUTORIALS = []
