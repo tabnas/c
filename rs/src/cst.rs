@@ -581,3 +581,111 @@ fn realize_node(node: usize, depth: usize) -> Value {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The id of a node reachable from itself, with the path that got
+    /// there, or `None` when the arena is a directed ACYCLIC graph.
+    ///
+    /// A node that holds itself is invisible to the fixtures until the
+    /// walk over it reaches [`REALIZE_DEPTH_CAP`], and then the parse
+    /// reports `cancel` rather than naming the shape that did it. The
+    /// two constructs below both built one: a cast as the whole of a
+    /// declaration initializer, and a compound literal in the same
+    /// position.
+    fn first_cycle() -> Option<(usize, Vec<usize>)> {
+        fn children_of(node: usize) -> Vec<usize> {
+            with_state(|state| {
+                let Some(data) = state.nodes.get(node) else {
+                    return Vec::new();
+                };
+                let mut out = Vec::new();
+                let mut push = |item: &Item| {
+                    let mut stack = vec![item.clone()];
+                    while let Some(item) = stack.pop() {
+                        match item {
+                            Item::Node(id) => out.push(id),
+                            Item::List(items) => stack.extend(items),
+                            _ => {}
+                        }
+                    }
+                };
+                for item in data
+                    .children
+                    .iter()
+                    .chain(data.leading.iter())
+                    .chain(data.trailing.iter())
+                    .chain(data.extras.values())
+                {
+                    push(item);
+                }
+                out
+            })
+        }
+
+        let count = with_state(|state| state.nodes.len());
+        // Depth-first from every node, carrying the path, so the report
+        // names the loop rather than only the node it closes on.
+        for root in 0..count {
+            let mut stack = vec![(root, vec![root])];
+            let mut seen = std::collections::HashSet::new();
+            while let Some((node, path)) = stack.pop() {
+                for child in children_of(node) {
+                    if path.contains(&child) {
+                        let mut loop_path = path.clone();
+                        loop_path.push(child);
+                        return Some((child, loop_path));
+                    }
+                    if seen.insert(child) {
+                        let mut next = path.clone();
+                        next.push(child);
+                        stack.push((child, next));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Every shape below parses into a tree, not into a graph that
+    /// holds itself.
+    ///
+    /// The one input that does build a cycle, a ternary as the whole of
+    /// a declaration initializer, is not here: the canonical builds it
+    /// too, and `DIVERGENCE.md` section 1 records it.
+    #[test]
+    fn no_ordinary_source_builds_a_node_that_holds_itself() {
+        let parser = crate::make_with(&crate::COptions::new().with_extended(true));
+        for source in [
+            "int g = (int)0;",
+            "int *p = (int[2]){1,2};",
+            "int g = (int)0 + 1;",
+            "void f(void) { int y = (int)x + 1; }",
+            "int g = sizeof(int);",
+            "int g[2] = {1,2};",
+            "int g[2][2] = {{1,2},{3,4}};",
+            "struct S { int x; }; struct S s = { .x = 1 };",
+            "int g = _Generic(x, int: 1, default: 0);",
+            "int g = ({ 1; });",
+            "const char *s = \"a\" \"b\";",
+            "void f(void) { for (int i = 0; i < 2; i++) { g(i); } }",
+            "typedef int T; T f(T a) { return a; }",
+            "#define M(a) (a)\nint g = M(1);",
+            "void f(void) { switch (x) { case 1: break; default: break; } }",
+            "int f(int (*p)(void)) { return p(); }",
+            "enum E { A = 1, B };",
+            "union U { int a; char b; };",
+            "static const volatile int *const p = 0;",
+            "void f(void) { while (x) { y = a ? b : c; } }",
+        ] {
+            let _ = crate::parse_with(&parser, source);
+            assert_eq!(
+                first_cycle(),
+                None,
+                "{source:?} built a node that is its own descendant"
+            );
+        }
+    }
+}
