@@ -429,8 +429,11 @@ pub fn realize_truncated() -> bool {
 /// Values that are not handles pass through unchanged, so a tree that
 /// mixes CST nodes with engine values realizes correctly.
 ///
-/// Check [`realize_truncated`] afterwards: a walk that ran out of depth
-/// answers with a value that stops short of the whole tree.
+/// A walk that runs out of depth answers with a value that stops short
+/// of the whole tree. [`crate::parse_with`] and [`crate::parse_with_meta`]
+/// check for that and report the engine's `cancel` code rather than hand
+/// back a tree with a hole in it; a caller driving a `tabnas` instance
+/// itself gets the same answer from `realize_truncated` in this module.
 pub fn realize(value: &Value) -> Value {
     REALIZE_TRUNCATED.with(|cell| cell.set(false));
     REALIZED.with(|memo| memo.borrow_mut().clear());
@@ -522,6 +525,16 @@ fn realize_node(node: usize, depth: usize) -> Value {
     let Some(data) = with_state(|state| state.nodes.get(node).cloned()) else {
         return Value::Null;
     };
+    // Whether the walk truncated is asked of THIS subtree, not of the
+    // walk so far: the flag is saved and cleared here, and restored
+    // below with this subtree's answer folded in. A sticky flag would
+    // read at the memo line as "this value has a hole in it" for every
+    // node realized after the first truncation ANYWHERE, so nothing
+    // would be memoized from that point on -- and an un-memoized walk
+    // over a DAG re-walks each node once per path that reaches it,
+    // which on a CSmith translation unit is the difference between a
+    // fraction of a second and exhausting the machine.
+    let outer_truncated = REALIZE_TRUNCATED.with(|cell| cell.replace(false));
     let mut entries = IndexMap::new();
     entries.insert("kind".to_string(), Value::String(data.kind));
     entries.insert("span".to_string(), data.span.to_value());
@@ -558,10 +571,12 @@ fn realize_node(node: usize, depth: usize) -> Value {
         entries.insert(key.clone(), realize_item(item, depth + 1));
     }
     let out = Value::object(entries);
-    // Only a walk that finished is worth keeping: one that stopped at
-    // the cap built a value with a hole in it, and a shallower path to
-    // the same node must be free to build the whole thing.
-    if !REALIZE_TRUNCATED.with(|cell| cell.get()) {
+    // Only a subtree that finished is worth keeping: one that stopped
+    // at the cap built a value with a hole in it, and a shallower path
+    // to the same node must be free to build the whole thing.
+    let truncated_here = REALIZE_TRUNCATED.with(|cell| cell.get());
+    REALIZE_TRUNCATED.with(|cell| cell.set(outer_truncated || truncated_here));
+    if !truncated_here {
         REALIZED.with(|memo| memo.borrow_mut().insert(node, out.clone()));
     }
     out
