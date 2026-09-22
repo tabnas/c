@@ -456,6 +456,32 @@ modules (see the CI note in [`AGENTS.md`](AGENTS.md)); one optional upstream
 `@tabnas/expr` sort fix makes the synthetic start=`val` precedence unit test
 deterministic (corpus parity holds without it).
 
+## Rust port
+
+A Rust port lives under [`rs/`](rs/): crate `tabnas-c`, library
+`tabnas_c`, a hand-translation of the TypeScript onto the Rust `tabnas`
+engine over `tabnas-jsonic` and `tabnas-expr`. The engine and the two
+plugins are sibling checkouts rather than published crates, so
+`rs/Cargo.toml` takes each by path.
+
+```rust
+let value = tabnas_c::parse("int f(int a) { return a + 1; }")?;
+assert_eq!(value.to_json()["kind"], "translation_unit");
+```
+
+**Parity:** every shared `test/spec` fixture passes, and the Rust corpus
+test replays all 100 CSmith seeds: 63 match their golden fixture
+exactly, and the other 37 differ in one recorded way, a prefix operator
+standing alone as a brace-initializer item, which the canonical leaves
+as a raw operator array and this port drops. That difference and the
+two others (a ternary as a whole declaration initializer, which the
+canonical cannot walk, and a cap on nesting depth) are recorded with
+their measurements in [`DIVERGENCE.md`](DIVERGENCE.md), and each is
+pinned by a test that fails when it is repaired as well as when it
+regresses. Build and test from `rs/` with
+`cargo test --all-targets && cargo test --doc`, or run the whole gate
+with `ci/rust/run.sh`; [`rs/README.md`](rs/README.md) has the details.
+
 ## License
 
 MIT. Copyright (c) 2026 Richard Rodger and contributors.

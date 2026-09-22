@@ -68,7 +68,7 @@ is capability, not preference.**
 
 **A Google rule sitting below error level was tried at error first and
 found wrong for these pages.** `.vale.ini` records what each produced on
-a clean run over the gated set: 101 alerts across 3 files. Those numbers
+a clean run over the gated set: 109 alerts across 3 files. Those numbers
 were written by hand once, and this sentence and the one in `.vale.ini`
 drifted apart from each other and from a run.
 `node ts/scripts/vale-counts.cjs` now reads both against a live Vale run
