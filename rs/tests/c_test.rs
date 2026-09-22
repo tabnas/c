@@ -42,9 +42,8 @@ fn the_embedded_grammar_matches_the_source() {
 #[test]
 fn a_bare_engine_is_refused() {
     let mut parser = Tabnas::new();
-    let error = tabnas_c::c(&mut parser, &COptions::default())
-        .err()
-        .expect("a bare engine has no val rule");
+    let error =
+        tabnas_c::c(&mut parser, &COptions::default()).expect_err("a bare engine has no val rule");
     assert!(
         error.0.contains("jsonic"),
         "the refusal should name what is missing, got {:?}",

@@ -100,7 +100,11 @@ fn multibyte_tails_do_not_panic() {
 fn very_long_input_returns() {
     let parser = tabnas_c::make();
     // One long flat translation unit: 20,000 declarations.
-    let flat: String = (0..20_000).map(|i| format!("int v{i};\n")).collect();
+    let mut flat = String::new();
+    for index in 0..20_000 {
+        use std::fmt::Write;
+        writeln!(flat, "int v{index};").expect("a String write cannot fail");
+    }
     assert!(survives(&parser, &flat), "a long flat unit did not return");
 
     // One very long identifier, and one very long string literal.
