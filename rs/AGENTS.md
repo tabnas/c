@@ -34,7 +34,7 @@ root.
 | `src/conditional_groups.rs` | the `#if`/`#endif` folding post-pass |
 | `src/trivia.rs` | the sub-lex hook that buffers comments onto the next token |
 
-## Two things the canonical does that Rust cannot do directly
+## Three things the canonical does that Rust cannot do directly
 
 **The parse state is a thread local, not a live object.** The canonical
 hangs the symbol table, the macro table, the lexer mode and the tree on
@@ -46,6 +46,26 @@ into it (`{"#node": 12}`). `crate::realize` turns the handles back into
 plain engine values at the parse boundary, which is why a caller driving
 a `tabnas` instance directly has to call it before the next parse on
 that thread. `parse_with` does it for you.
+
+**A rule's node is a shared cell, and the parent's link to it is
+frozen.** In the canonical every rule object has a `node` field of its
+own, and a rule reads its finished child through `rule.child.node`.
+Here a rule's node is an `Rc<RefCell<Value>>` that a pushed or replaced
+rule SHARES with the rule it came from, and `set_node` installs a fresh
+cell rather than writing through the shared one, which is what
+`r.node = v` means in the canonical. The engine freezes the parent's
+link to a pushed child at the FIRST link of a replacement chain,
+matching how TypeScript never relinks `rule.child`. Put those together
+and a rule that builds its node on a LATER link of an `r:` chain hands
+the parent nothing: the frozen link still names the cell the parent
+itself is holding, so the parent reads its own node back as the child's.
+`cast_or_compound_literal` is the one rule here that works that way, and
+the canonical's own `@cocl-finalize` writes the node onto the frozen
+link (`parent.child.node = node`) for the same reason. That write is not
+available here, because the cell is shared with the ancestors: the rule
+takes a private cell in its open action instead, and `@cocl-finalize`
+writes THROUGH it. `test/spec/cast.tsv` is the fixture that fails if
+either half goes.
 
 **The engine's lookahead buffer has a different shape.** In the
 canonical engine and in Go, `ctx.t` is an array that never shrinks:
@@ -71,6 +91,7 @@ grammar path where the canonical routes them through the legacy one.
 | `tests/c_test.rs` | behaviour that a fixture row cannot express: the plugin API, the options, the symbol table |
 | `tests/limits_test.rs` | untrusted input: deep nesting, long input, unterminated constructs, odd Unicode |
 | `tests/perf_test.rs` | that parse time stays linear in input size |
+| `tests/divergent_test.rs` | `test/divergent.tsv`, the register that fails when a recorded divergence REGRESSES and when it is repaired |
 | `tests/version_test.rs` | `Cargo.toml`, `VERSION`, `ts/package.json` and `go/c.go` agree |
 
 Run one file with `cargo test --test <name>`. The whole gate is

@@ -72,8 +72,14 @@ spends a little under a kilobyte of stack per level:
 
 `REALIZE_DEPTH_CAP` is 256, below the smallest of those with room to
 spare, so the bound holds wherever the parse runs rather than only on
-the main thread. Nothing in `test/spec` and no program in the
-100-program CSmith corpus reaches a tenth of it.
+the main thread.
+
+**How much room real source leaves, measured 2026-09-22.** The deepest
+row in `test/spec` realizes at 17. The deepest of the 100 CSmith
+programs realizes at 146, which is over half the cap, so the headroom
+on generated C is real but not large. Every seed still returns a tree:
+a walk that stopped short reports `cancel`, and the corpus test would
+fail on it rather than compare a truncated one.
 
 **Who repairs it.** Nobody: the cap is deliberate, and removing it would
 trade a clean error for a process abort. The number moves only with a

@@ -206,8 +206,12 @@ The cap is measured rather than copied: a translation unit of N nested
 compound statements realizes at depth `N + 2`, and an unoptimized build
 spends a little under a kilobyte of stack per level, so a thread with
 the 1 MiB stack a small runtime hands out gives out somewhere past 300.
-The cap sits below that, and no fixture and no program in the
-100-program CSmith corpus reaches a tenth of it.
+The cap sits below that. How much room ordinary source leaves under it
+is a second measurement, taken 2026-09-22: the deepest of the shared
+fixtures realizes at 17, and the deepest of the 100 CSmith programs at
+146, which is over half the cap. Every one of those programs still
+returns a tree, and the corpus test would report `cancel` for any that
+stopped short.
 
 ## Options
 
