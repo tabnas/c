@@ -204,3 +204,59 @@ fn other_deep_shapes_return() {
         );
     }
 }
+
+/// Every construct the extended mode's structurer recurses on, nested
+/// past the cap, reports `cancel`.
+///
+/// That structurer is a recursive-descent parser, and nesting reaches it
+/// through more than blocks: a statement body without braces, an `else`,
+/// a label, a parenthesised declarator, a parameter list, a struct in a
+/// struct, a brace initializer, an operand. It counts every one of them
+/// against `REALIZE_DEPTH_CAP`, and every shape but the last two reaches
+/// that count on the test harness's 2 MiB thread, so a frame on any of
+/// those paths that grows past what the cap was measured against aborts
+/// this test rather than a caller. The last two are chains a loop
+/// builds, not a recursion: they reach the tree walks after the
+/// structurer thousands of levels deep, and stop at the realize cap.
+///
+/// The canonical answers these with a tree or with its own stack running
+/// out, depending on the construct: see DIVERGENCE.md section 2.
+#[test]
+fn every_recursive_construct_stops_at_the_cap() {
+    let parser = tabnas_c::make_with(&tabnas_c::COptions::new().with_extended(true));
+    // `open` 2000 times, then `core`, then `close` 2000 times.
+    let deep = |open: &str, core: &str, close: &str| {
+        format!("{}{core}{}", open.repeat(2_000), close.repeat(2_000))
+    };
+    let body = |statements: String| format!("void f(void) {{ {statements} }}");
+    for source in [
+        body(deep("if (a) ", " ;", "")),
+        body(deep("if (a) ; else ", " ;", "")),
+        body(deep("", "if (a) ;", " else if (a) ;")),
+        body(deep("while (a) ", " ;", "")),
+        body(deep("for (;;) ", " ;", "")),
+        body(deep("do ", " ;", " while (a);")),
+        body(deep("switch (a) ", " ;", "")),
+        body(deep("l: ", " ;", "")),
+        body(format!("switch (a) {{ {} }}", deep("case 1: ", " ;", ""))),
+        body(deep("if (a) {", " ;", "}")),
+        format!("{};", deep("struct s { ", "int x;", "} y;")),
+        format!("int {};", deep("(", "x", ")")),
+        format!("int {};", deep("(*", "x", ")(void)")),
+        format!("void f({});", deep("void (*)(", "int", ")")),
+        body(format!("int x = {};", deep("{", "1", "}"))),
+        body(format!("x = {};", deep("(", "1", ")"))),
+        body(format!("x = {};", deep("-", "1", ""))),
+        body(format!("x = {};", deep("(int)", "1", ""))),
+        body(format!("{};", deep("a = ", "1", ""))),
+        body(format!("{};", deep("f(", "1", ")"))),
+        body(format!("x = {};", deep("", "1", " + 1"))),
+        body(format!("{};", deep("", "x", ".m"))),
+    ] {
+        let head = &source[..40.min(source.len())];
+        let error = tabnas_c::parse_with(&parser, &source)
+            .err()
+            .unwrap_or_else(|| panic!("{head:?} should not have realized"));
+        assert_eq!(error.code, "cancel", "{head:?} reported the wrong code");
+    }
+}

@@ -143,8 +143,32 @@ pub fn parse_expression(stream: &mut TokenStream, stoppers: &[&str]) -> Option<u
     parse_comma_expr(stream, stoppers)
 }
 
+// How the functions below are split, and why.
+//
+// A parenthesised operand descends through every level of the ladder,
+// comma to primary, before the next `(` descends again: eight functions
+// per level of nesting. An unoptimized build gives each function one
+// frame slot per temporary it ever makes, so a level used to cost about
+// 8 KiB of stack, and the 256 levels the structurer's cap admits
+// (`TokenStream::deeper`) were more than a 2 MiB thread holds.
+//
+// So each level DESCENDS FIRST, in a function that holds almost nothing,
+// and builds its node in a separate `*_tail` function that runs after the
+// operand has returned. The frames that stay on the stack while the
+// descent goes deeper are the small ones, and a level costs under
+// 2.5 KiB (measured 2026-09-23). The recursion that starts in a tail (an
+// assignment's right side, a call's arguments, a cast's operand) is a
+// different cycle, with its own cost. `every_recursive_construct_stops_at_the_cap`
+// in `tests/limits_test.rs` drives each of these cycles to the cap on the
+// test harness's 2 MiB thread, so a frame that grows back past the budget
+// aborts there.
+
 fn parse_comma_expr(stream: &mut TokenStream, stoppers: &[&str]) -> Option<usize> {
     let first = parse_assignment_expression(stream, stoppers)?;
+    comma_tail(stream, stoppers, first)
+}
+
+fn comma_tail(stream: &mut TokenStream, stoppers: &[&str], first: usize) -> Option<usize> {
     if stoppers.contains(&"PUNC_COMMA") || stream.peek_name(0) != "PUNC_COMMA" {
         return Some(first);
     }
@@ -160,8 +184,21 @@ fn parse_comma_expr(stream: &mut TokenStream, stoppers: &[&str]) -> Option<usize
     Some(node)
 }
 
+/// An assignment expression, one node deeper than whatever holds it.
+///
+/// Every nested operand reaches this level on its way down, whether it
+/// sits in parentheses, in a call's arguments, in either arm of a
+/// conditional or on the right of another assignment, so this is where
+/// the expression descent is counted. The only nestings that bypass it
+/// are a prefix operator's operand and a cast's, which count themselves.
 pub fn parse_assignment_expression(stream: &mut TokenStream, stoppers: &[&str]) -> Option<usize> {
-    let left = parse_conditional_expression(stream, stoppers)?;
+    stream.deeper(|stream| {
+        let left = parse_conditional_expression(stream, stoppers)?;
+        assignment_tail(stream, stoppers, left)
+    })
+}
+
+fn assignment_tail(stream: &mut TokenStream, stoppers: &[&str], left: usize) -> Option<usize> {
     let name = stream.peek_name(0);
     if name.is_empty() || stoppers.contains(&name.as_str()) {
         return Some(left);
@@ -183,6 +220,10 @@ pub fn parse_assignment_expression(stream: &mut TokenStream, stoppers: &[&str]) 
 
 fn parse_conditional_expression(stream: &mut TokenStream, stoppers: &[&str]) -> Option<usize> {
     let cond = parse_binary_expression(stream, stoppers, i64::MIN)?;
+    conditional_tail(stream, stoppers, cond)
+}
+
+fn conditional_tail(stream: &mut TokenStream, stoppers: &[&str], cond: usize) -> Option<usize> {
     if stream.peek_name(0) != "PUNC_QUESTION" {
         return Some(cond);
     }
@@ -216,7 +257,16 @@ fn parse_binary_expression(
     stoppers: &[&str],
     min_power: i64,
 ) -> Option<usize> {
-    let mut left = parse_unary(stream, stoppers)?;
+    let left = parse_unary(stream, stoppers)?;
+    binary_tail(stream, stoppers, min_power, left)
+}
+
+fn binary_tail(
+    stream: &mut TokenStream,
+    stoppers: &[&str],
+    min_power: i64,
+    mut left: usize,
+) -> Option<usize> {
     loop {
         let name = stream.peek_name(0);
         if name.is_empty() || stoppers.contains(&name.as_str()) {
@@ -249,123 +299,146 @@ fn parse_binary_expression(
 /// Prefix operators, including `sizeof` and the alignment operators in
 /// their expression form.
 fn parse_unary(stream: &mut TokenStream, stoppers: &[&str]) -> Option<usize> {
-    let name = stream.peek_name(0);
-    if !name.is_empty() && PREFIX_OPS.contains(&name.as_str()) {
-        let start = stream.peek(0)?;
-        let node = cst::new_node("unary_expression", Some(span_of_token(start)));
-        let token = stream.take_into(node)?;
-        cst::set_extra(node, "op", Item::str(cst::token_src(token)));
-        // `sizeof` and the alignment operators can take a
-        // parenthesised type name rather than an expression.
-        if matches!(
-            name.as_str(),
-            "KW_SIZEOF" | "KW__ALIGNOF" | "KW_ALIGNOF" | "KW___ALIGNOF__" | "KW___ALIGNOF"
-        ) && stream.peek_name(0) == "PUNC_LPAREN"
-            && looks_like_type_name(stream, 1)
-        {
-            let start = stream.peek(0)?;
-            let type_name = cst::new_node("type_name", Some(span_of_token(start)));
-            consume_balanced(stream, type_name, "PUNC_LPAREN", "PUNC_RPAREN");
-            cst::push_child(node, Item::Node(type_name));
-            cst::set_extra(node, "operand", Item::Node(type_name));
-            return Some(node);
-        }
-        if let Some(operand) = parse_unary(stream, stoppers) {
-            cst::push_child(node, Item::Node(operand));
-            cst::set_extra(node, "operand", Item::Node(operand));
-        }
-        return Some(node);
+    if let Some(name) = prefix_operator(stream) {
+        return parse_prefix(stream, stoppers, name);
     }
     parse_postfix(stream, stoppers)
+}
+
+/// The prefix operator at the head of the stream, if there is one.
+fn prefix_operator(stream: &TokenStream) -> Option<String> {
+    let name = stream.peek_name(0);
+    (!name.is_empty() && PREFIX_OPS.contains(&name.as_str())).then_some(name)
+}
+
+fn parse_prefix(stream: &mut TokenStream, stoppers: &[&str], name: String) -> Option<usize> {
+    let start = stream.peek(0)?;
+    let node = cst::new_node("unary_expression", Some(span_of_token(start)));
+    let token = stream.take_into(node)?;
+    cst::set_extra(node, "op", Item::str(cst::token_src(token)));
+    // `sizeof` and the alignment operators can take a
+    // parenthesised type name rather than an expression.
+    if matches!(
+        name.as_str(),
+        "KW_SIZEOF" | "KW__ALIGNOF" | "KW_ALIGNOF" | "KW___ALIGNOF__" | "KW___ALIGNOF"
+    ) && stream.peek_name(0) == "PUNC_LPAREN"
+        && looks_like_type_name(stream, 1)
+    {
+        let start = stream.peek(0)?;
+        let type_name = cst::new_node("type_name", Some(span_of_token(start)));
+        consume_balanced(stream, type_name, "PUNC_LPAREN", "PUNC_RPAREN");
+        cst::push_child(node, Item::Node(type_name));
+        cst::set_extra(node, "operand", Item::Node(type_name));
+        return Some(node);
+    }
+    // The operand nests inside this node without passing through the
+    // assignment level, so it counts itself.
+    if let Some(operand) = stream.deeper(|stream| parse_unary(stream, stoppers)) {
+        cst::push_child(node, Item::Node(operand));
+        cst::set_extra(node, "operand", Item::Node(operand));
+    }
+    Some(node)
 }
 
 /// The postfix loop: subscript, call, member access, increment and
 /// decrement.
 fn parse_postfix(stream: &mut TokenStream, stoppers: &[&str]) -> Option<usize> {
-    let mut target = parse_primary(stream, stoppers)?;
+    let target = parse_primary(stream, stoppers)?;
+    postfix_tail(stream, stoppers, target)
+}
+
+fn postfix_tail(stream: &mut TokenStream, stoppers: &[&str], mut target: usize) -> Option<usize> {
     loop {
         let name = stream.peek_name(0);
         if name.is_empty() || stoppers.contains(&name.as_str()) {
             break;
         }
-        if name == "PUNC_LBRACKET" {
-            let node = cst::new_node("subscript_expression", Some(cst::span_of(target)));
-            cst::push_child(node, Item::Node(target));
-            cst::set_extra(node, "target", Item::Node(target));
-            let Some(start) = stream.peek(0) else {
-                break;
-            };
-            let index = cst::new_node("index_list", Some(span_of_token(start)));
-            consume_balanced(stream, index, "PUNC_LBRACKET", "PUNC_RBRACKET");
-            cst::push_child(node, Item::Node(index));
-            target = node;
-            continue;
+        // Each form builds its node around the target, or answers
+        // `None` where the loop stops with the target as it stands.
+        let next = if name == "PUNC_LBRACKET" {
+            postfix_subscript(stream, target)
+        } else if name == "PUNC_LPAREN" {
+            postfix_call(stream, target)
+        } else if name == "PUNC_DOT" || name == "PUNC_ARROW" {
+            postfix_member(stream, target)
+        } else if POSTFIX_OPS.contains(&name.as_str()) {
+            postfix_step(stream, target)
+        } else {
+            None
+        };
+        match next {
+            Some(node) => target = node,
+            None => break,
         }
-        if name == "PUNC_LPAREN" {
-            let node = cst::new_node("call_expression", Some(cst::span_of(target)));
-            cst::push_child(node, Item::Node(target));
-            if let Some(callee) = unwrap_callee(target) {
-                cst::set_extra(node, "callee", Item::str(cst::token_src(callee)));
-                cst::set_extra(
-                    node,
-                    "isMacro",
-                    Item::bool(cst::token_name(callee) == "MACRO_NAME"),
-                );
-            }
-            let Some(start) = stream.peek(0) else {
-                break;
-            };
-            let args = cst::new_node("argument_list", Some(span_of_token(start)));
-            stream.take_into(args);
-            while !stream.done() && stream.peek_name(0) != "PUNC_RPAREN" {
-                match parse_assignment_expression(stream, &["PUNC_COMMA", "PUNC_RPAREN"]) {
-                    Some(argument) => cst::push_child(args, Item::Node(argument)),
-                    None => {
-                        stream.take_into(args);
-                    }
-                }
-                if stream.peek_name(0) == "PUNC_COMMA" {
-                    stream.take_into(args);
-                }
-            }
-            if stream.peek_name(0) == "PUNC_RPAREN" {
-                stream.take_into(args);
-            }
-            cst::push_child(node, Item::Node(args));
-            target = node;
-            continue;
-        }
-        if name == "PUNC_DOT" || name == "PUNC_ARROW" {
-            let node = cst::new_node("member_expression", Some(cst::span_of(target)));
-            cst::push_child(node, Item::Node(target));
-            cst::set_extra(node, "object", Item::Node(target));
-            let Some(token) = stream.take_into(node) else {
-                break;
-            };
-            cst::set_extra(node, "op", Item::str(cst::token_src(token)));
-            let member = stream.peek_name(0);
-            if matches!(member.as_str(), "ID" | "TYPEDEF_NAME" | "MACRO_NAME") {
-                if let Some(token) = stream.take_into(node) {
-                    cst::set_extra(node, "memberName", Item::str(cst::token_src(token)));
-                }
-            }
-            target = node;
-            continue;
-        }
-        if POSTFIX_OPS.contains(&name.as_str()) {
-            let node = cst::new_node("postfix_unary_expression", Some(cst::span_of(target)));
-            cst::push_child(node, Item::Node(target));
-            cst::set_extra(node, "target", Item::Node(target));
-            let Some(token) = stream.take_into(node) else {
-                break;
-            };
-            cst::set_extra(node, "op", Item::str(cst::token_src(token)));
-            target = node;
-            continue;
-        }
-        break;
     }
     Some(target)
+}
+
+fn postfix_subscript(stream: &mut TokenStream, target: usize) -> Option<usize> {
+    let node = cst::new_node("subscript_expression", Some(cst::span_of(target)));
+    cst::push_child(node, Item::Node(target));
+    cst::set_extra(node, "target", Item::Node(target));
+    let start = stream.peek(0)?;
+    let index = cst::new_node("index_list", Some(span_of_token(start)));
+    consume_balanced(stream, index, "PUNC_LBRACKET", "PUNC_RBRACKET");
+    cst::push_child(node, Item::Node(index));
+    Some(node)
+}
+
+fn postfix_call(stream: &mut TokenStream, target: usize) -> Option<usize> {
+    let node = cst::new_node("call_expression", Some(cst::span_of(target)));
+    cst::push_child(node, Item::Node(target));
+    if let Some(callee) = unwrap_callee(target) {
+        cst::set_extra(node, "callee", Item::str(cst::token_src(callee)));
+        cst::set_extra(
+            node,
+            "isMacro",
+            Item::bool(cst::token_name(callee) == "MACRO_NAME"),
+        );
+    }
+    let start = stream.peek(0)?;
+    let args = cst::new_node("argument_list", Some(span_of_token(start)));
+    stream.take_into(args);
+    while !stream.done() && stream.peek_name(0) != "PUNC_RPAREN" {
+        match parse_assignment_expression(stream, &["PUNC_COMMA", "PUNC_RPAREN"]) {
+            Some(argument) => cst::push_child(args, Item::Node(argument)),
+            None => {
+                stream.take_into(args);
+            }
+        }
+        if stream.peek_name(0) == "PUNC_COMMA" {
+            stream.take_into(args);
+        }
+    }
+    if stream.peek_name(0) == "PUNC_RPAREN" {
+        stream.take_into(args);
+    }
+    cst::push_child(node, Item::Node(args));
+    Some(node)
+}
+
+fn postfix_member(stream: &mut TokenStream, target: usize) -> Option<usize> {
+    let node = cst::new_node("member_expression", Some(cst::span_of(target)));
+    cst::push_child(node, Item::Node(target));
+    cst::set_extra(node, "object", Item::Node(target));
+    let token = stream.take_into(node)?;
+    cst::set_extra(node, "op", Item::str(cst::token_src(token)));
+    let member = stream.peek_name(0);
+    if matches!(member.as_str(), "ID" | "TYPEDEF_NAME" | "MACRO_NAME") {
+        if let Some(token) = stream.take_into(node) {
+            cst::set_extra(node, "memberName", Item::str(cst::token_src(token)));
+        }
+    }
+    Some(node)
+}
+
+fn postfix_step(stream: &mut TokenStream, target: usize) -> Option<usize> {
+    let node = cst::new_node("postfix_unary_expression", Some(cst::span_of(target)));
+    cst::push_child(node, Item::Node(target));
+    cst::set_extra(node, "target", Item::Node(target));
+    let token = stream.take_into(node)?;
+    cst::set_extra(node, "op", Item::str(cst::token_src(token)));
+    Some(node)
 }
 
 fn unwrap_callee(node: usize) -> Option<usize> {
@@ -380,6 +453,14 @@ fn unwrap_callee(node: usize) -> Option<usize> {
 /// literal.
 fn parse_primary(stream: &mut TokenStream, stoppers: &[&str]) -> Option<usize> {
     let start = stream.peek(0)?;
+    if cst::token_name(start) == "PUNC_LPAREN" {
+        return parse_parenthesised(stream, stoppers, start);
+    }
+    parse_atom(stream, start)
+}
+
+/// A primary expression that does not open with `(`.
+fn parse_atom(stream: &mut TokenStream, start: usize) -> Option<usize> {
     let name = cst::token_name(start);
 
     if matches!(name.as_str(), "KW_NULLPTR" | "KW_TRUE" | "KW_FALSE") {
@@ -418,69 +499,82 @@ fn parse_primary(stream: &mut TokenStream, stoppers: &[&str]) -> Option<usize> {
         return Some(parse_generic_selection(stream));
     }
 
-    if name == "PUNC_LPAREN" {
-        // The GCC statement expression `({ ... })`.
-        if stream.peek_name(1) == "PUNC_LBRACE" {
-            let node = cst::new_node("statement_expression", Some(span_of_token(start)));
-            consume_balanced(stream, node, "PUNC_LPAREN", "PUNC_RPAREN");
-            return Some(node);
-        }
-        // A cast, a parenthesised expression or a compound literal.
-        if looks_like_type_name(stream, 1) {
-            let mark = stream.mark();
-            let opener = stream.take()?;
-            let type_name = cst::new_node("type_name", Some(span_of_token(opener.token)));
-            cst::push_child(type_name, Item::Token(opener.token));
-            let mut depth = 1i32;
-            while !stream.done() && depth > 0 {
-                let name = stream.peek_name(0);
-                if name == "PUNC_LPAREN" {
-                    depth += 1;
-                } else if name == "PUNC_RPAREN" {
-                    depth -= 1;
-                    if depth == 0 {
-                        stream.take_into(type_name);
-                        break;
-                    }
-                }
-                stream.take_into(type_name);
-            }
-            // A compound literal is followed by `{`.
-            if stream.peek_name(0) == "PUNC_LBRACE" {
-                let node = cst::new_node("compound_literal", Some(cst::span_of(type_name)));
-                cst::push_child(node, Item::Node(type_name));
-                cst::set_extra(node, "typeName", Item::Node(type_name));
-                let Some(brace) = stream.peek(0) else {
-                    return Some(node);
-                };
-                let list = cst::new_node("initializer_list", Some(span_of_token(brace)));
-                consume_balanced(stream, list, "PUNC_LBRACE", "PUNC_RBRACE");
-                cst::push_child(node, Item::Node(list));
-                return Some(node);
-            }
-            // A cast is followed by an expression.
-            if let Some(operand) = parse_unary(stream, stoppers) {
-                let node = cst::new_node("cast_expression", Some(cst::span_of(type_name)));
-                cst::push_child(node, Item::Node(type_name));
-                cst::push_child(node, Item::Node(operand));
-                cst::set_extra(node, "typeName", Item::Node(type_name));
-                cst::set_extra(node, "operand", Item::Node(operand));
-                return Some(node);
-            }
-            // Neither: rewind and read a parenthesised expression.
-            stream.restore(mark);
-        }
-        let node = cst::new_node("paren_expression", Some(span_of_token(start)));
-        stream.take_into(node);
-        if let Some(inner) = parse_expression(stream, &["PUNC_RPAREN"]) {
-            cst::push_child(node, Item::Node(inner));
-        }
-        if stream.peek_name(0) == "PUNC_RPAREN" {
-            stream.take_into(node);
-        }
+    None
+}
+
+/// A primary expression that opens with `(`: a statement expression, a
+/// cast, a compound literal or a parenthesised expression.
+fn parse_parenthesised(stream: &mut TokenStream, stoppers: &[&str], start: usize) -> Option<usize> {
+    // The GCC statement expression `({ ... })`.
+    if stream.peek_name(1) == "PUNC_LBRACE" {
+        let node = cst::new_node("statement_expression", Some(span_of_token(start)));
+        consume_balanced(stream, node, "PUNC_LPAREN", "PUNC_RPAREN");
         return Some(node);
     }
+    // A cast or a compound literal.
+    if looks_like_type_name(stream, 1) {
+        if let Some(node) = parse_cast_or_compound_literal(stream, stoppers) {
+            return Some(node);
+        }
+    }
+    let node = cst::new_node("paren_expression", Some(span_of_token(start)));
+    stream.take_into(node);
+    if let Some(inner) = parse_expression(stream, &["PUNC_RPAREN"]) {
+        cst::push_child(node, Item::Node(inner));
+    }
+    if stream.peek_name(0) == "PUNC_RPAREN" {
+        stream.take_into(node);
+    }
+    Some(node)
+}
 
+/// A parenthesised type name followed by a brace list or an operand, or
+/// `None` with the stream rewound when it is followed by neither, so the
+/// caller reads a parenthesised expression instead.
+fn parse_cast_or_compound_literal(stream: &mut TokenStream, stoppers: &[&str]) -> Option<usize> {
+    let mark = stream.mark();
+    let opener = stream.take()?;
+    let type_name = cst::new_node("type_name", Some(span_of_token(opener.token)));
+    cst::push_child(type_name, Item::Token(opener.token));
+    let mut depth = 1i32;
+    while !stream.done() && depth > 0 {
+        let name = stream.peek_name(0);
+        if name == "PUNC_LPAREN" {
+            depth += 1;
+        } else if name == "PUNC_RPAREN" {
+            depth -= 1;
+            if depth == 0 {
+                stream.take_into(type_name);
+                break;
+            }
+        }
+        stream.take_into(type_name);
+    }
+    // A compound literal is followed by `{`.
+    if stream.peek_name(0) == "PUNC_LBRACE" {
+        let node = cst::new_node("compound_literal", Some(cst::span_of(type_name)));
+        cst::push_child(node, Item::Node(type_name));
+        cst::set_extra(node, "typeName", Item::Node(type_name));
+        let Some(brace) = stream.peek(0) else {
+            return Some(node);
+        };
+        let list = cst::new_node("initializer_list", Some(span_of_token(brace)));
+        consume_balanced(stream, list, "PUNC_LBRACE", "PUNC_RBRACE");
+        cst::push_child(node, Item::Node(list));
+        return Some(node);
+    }
+    // A cast is followed by an expression, which nests inside the cast
+    // without passing through the assignment level, so it counts itself.
+    if let Some(operand) = stream.deeper(|stream| parse_unary(stream, stoppers)) {
+        let node = cst::new_node("cast_expression", Some(cst::span_of(type_name)));
+        cst::push_child(node, Item::Node(type_name));
+        cst::push_child(node, Item::Node(operand));
+        cst::set_extra(node, "typeName", Item::Node(type_name));
+        cst::set_extra(node, "operand", Item::Node(operand));
+        return Some(node);
+    }
+    // Neither: rewind and read a parenthesised expression.
+    stream.restore(mark);
     None
 }
 

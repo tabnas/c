@@ -94,12 +94,12 @@ fn statement_cost_is_linear_in_input_size() {
 /// walk memoizes what each node realized to and hands the same value
 /// back on the second path. A node whose own walk stopped at the cap is
 /// the one thing it must NOT keep, because the value has a hole in it.
-/// Reading that as "the walk has truncated" rather than "this subtree
-/// truncated" turns the memo off for everything realized afterwards,
-/// and an un-memoized DAG walk is exponential in expression depth. The
+/// A walk that went on past that point with the memo off would be
+/// exponential in expression depth, so the walk stops at the first
+/// truncation instead: the parse fails with `cancel` either way. The
 /// input below is one truncating declaration followed by one ordinary
-/// nested expression: with the memo working the second costs what it
-/// costs alone, and without it the parse does not finish at all (over
+/// nested expression: the second must cost no more than it does alone,
+/// and a walk that carries on un-memoized does not finish at all (over
 /// 300 seconds, against under two here).
 #[test]
 fn a_truncated_subtree_does_not_cost_the_rest_of_the_walk() {

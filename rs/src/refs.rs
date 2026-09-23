@@ -487,7 +487,31 @@ pub fn finalize_external_declaration(rule: &mut Rule, context: &mut Context) {
 
 /// Walk a freshly structured node and register every `#define` macro,
 /// removing the ones a `#undef` names.
+///
+/// The walk keeps its own stack rather than recursing, because the tree
+/// is as deep as the source is nested and a Rust stack overflow aborts
+/// the process. The structurer bounds its own recursion, but not the
+/// depth of what it builds: a chain like `x = a + a + ... + a` is built
+/// by a loop, one level per operator. Popping the children in source
+/// order visits the nodes in the order the recursion did, which matters:
+/// a `#define` and a later `#undef` of the same name must apply in that
+/// order.
 pub fn register_macros_from_tree(node: usize, context: &mut Context) {
+    let mut pending = vec![node];
+    while let Some(node) = pending.pop() {
+        register_macros_at(node, context);
+        pending.extend(
+            cst::children_of(node)
+                .iter()
+                .rev()
+                .filter_map(|child| child.as_node()),
+        );
+    }
+}
+
+/// Register the macro one directive node defines, or drop the one it
+/// undefines.
+fn register_macros_at(node: usize, context: &mut Context) {
     let kind = cst::kind_of(node);
     if kind == "define_directive" {
         if let Some(name) = extra_string(node, "macroName") {
@@ -513,11 +537,6 @@ pub fn register_macros_from_tree(node: usize, context: &mut Context) {
         if let Some(name) = extra_string(node, "macroName") {
             with_state(|state| state.macros.undefine(&name));
             reclassify(context, &name, "MACRO_NAME", "ID");
-        }
-    }
-    for child in cst::children_of(node) {
-        if let Some(child_node) = child.as_node() {
-            register_macros_from_tree(child_node, context);
         }
     }
 }

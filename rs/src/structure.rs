@@ -114,11 +114,61 @@ pub struct Taken {
 pub struct TokenStream {
     tokens: Vec<usize>,
     index: usize,
+    /// How many nodes deep the descent is. See [`TokenStream::deeper`].
+    depth: usize,
+    /// Set when the descent reached the cap. The stream then reads as
+    /// empty, and a rewind cannot refill it.
+    stopped: bool,
 }
 
 impl TokenStream {
     pub fn new(tokens: Vec<usize>) -> Self {
-        TokenStream { tokens, index: 0 }
+        TokenStream {
+            tokens,
+            index: 0,
+            depth: 0,
+            stopped: false,
+        }
+    }
+
+    /// Run `body` one node deeper, or give up when that reaches the cap.
+    ///
+    /// The structurer is a recursive-descent parser, so a construct
+    /// nested N deep costs N sets of frames, and that holds for every
+    /// construct that nests, not only blocks: a statement body, a
+    /// parenthesised declarator, a struct inside a struct, a brace
+    /// initializer, an operand. The canonical has the same shape and the
+    /// same exposure. JavaScript throws when its stack runs out and Rust
+    /// ABORTS THE PROCESS, so this port counts every one of them.
+    ///
+    /// Each call site wraps a parse that builds a node inside the node
+    /// its caller is building, so the count never exceeds the depth the
+    /// finished tree realizes at, and the cap is the realize cap: a
+    /// source this refuses could not have been handed back either, and
+    /// no source realize admits is refused here. See
+    /// `crate::cst::REALIZE_DEPTH_CAP`.
+    ///
+    /// Reaching the cap marks the parse as given up, which makes it
+    /// report `cancel`, and empties the stream. Every loop in the
+    /// structurer stops at an empty stream, so the descent unwinds at
+    /// once instead of resuming at the next token and descending again,
+    /// and a caller that would otherwise retry from a mark (a cast read
+    /// again as a parenthesised expression, a named declarator read
+    /// again as an abstract one) finds nothing to retry on.
+    pub fn deeper<T>(&mut self, body: impl FnOnce(&mut TokenStream) -> Option<T>) -> Option<T> {
+        if self.stopped {
+            return None;
+        }
+        if self.depth + 1 >= cst::REALIZE_DEPTH_CAP {
+            self.stopped = true;
+            self.index = self.tokens.len();
+            crate::state::with_state(|state| state.gave_up = true);
+            return None;
+        }
+        self.depth += 1;
+        let out = body(self);
+        self.depth -= 1;
+        out
     }
 
     /// The next real token at `offset`, trivia skipped.
@@ -180,7 +230,9 @@ impl TokenStream {
     }
 
     pub fn restore(&mut self, mark: usize) {
-        self.index = mark;
+        if !self.stopped {
+            self.index = mark;
+        }
     }
 }
 
@@ -188,7 +240,15 @@ impl TokenStream {
 // Specifiers
 // ---------------------------------------------------------------------
 
+/// Declaration specifiers, one node deeper than what holds them. A
+/// struct or union body holds its members' specifiers, and an enum's
+/// fixed underlying type is specifiers too, so this is where a struct
+/// nested inside a struct recurses.
 pub fn parse_declaration_specifiers(stream: &mut TokenStream) -> Option<usize> {
+    stream.deeper(parse_declaration_specifiers_here)
+}
+
+fn parse_declaration_specifiers_here(stream: &mut TokenStream) -> Option<usize> {
     let start = stream.peek(0)?;
     let c23_head = is_c23_attribute_open(stream);
     if !is_specifier_start(&cst::token_name(start)) && !c23_head {
@@ -496,7 +556,18 @@ pub fn parse_struct_or_union_spec(stream: &mut TokenStream) -> Option<usize> {
     };
     let node = cst::new_node(kind, Some(span_of_token(start)));
     stream.take_into(node);
+    parse_struct_head(stream, node);
 
+    if stream.peek_name(0) == "PUNC_LBRACE" {
+        let body = parse_member_decl_list(stream)?;
+        cst::push_child(node, Item::Node(body));
+    }
+
+    Some(node)
+}
+
+/// The attributes and the tag between `struct` or `union` and its body.
+fn parse_struct_head(stream: &mut TokenStream, node: usize) {
     while stream
         .peek(0)
         .is_some_and(|token| ATTRIBUTE_OPENERS.contains(&cst::token_name(token).as_str()))
@@ -517,26 +588,28 @@ pub fn parse_struct_or_union_spec(stream: &mut TokenStream) -> Option<usize> {
             cst::set_extra(node, "tagName", Item::str(cst::token_src(taken.token)));
         }
     }
+}
 
-    if stream.peek_name(0) == "PUNC_LBRACE" {
-        let start = stream.peek(0)?;
-        let body = cst::new_node("member_decl_list", Some(span_of_token(start)));
-        stream.take_into(body);
-        while !stream.done() && stream.peek_name(0) != "PUNC_RBRACE" {
-            match parse_struct_declaration(stream) {
-                Some(member) => cst::push_child(body, Item::Node(member)),
-                None => {
-                    stream.take_into(body);
-                }
+/// The braced member list of a struct or union. A member can be a
+/// struct in turn, so this is on the recursive path, and it is split
+/// out of `parse_struct_or_union_spec` to keep the frames there small:
+/// see `legacy_expr` for why that matters.
+fn parse_member_decl_list(stream: &mut TokenStream) -> Option<usize> {
+    let start = stream.peek(0)?;
+    let body = cst::new_node("member_decl_list", Some(span_of_token(start)));
+    stream.take_into(body);
+    while !stream.done() && stream.peek_name(0) != "PUNC_RBRACE" {
+        match parse_struct_declaration(stream) {
+            Some(member) => cst::push_child(body, Item::Node(member)),
+            None => {
+                stream.take_into(body);
             }
         }
-        if stream.peek_name(0) == "PUNC_RBRACE" {
-            stream.take_into(body);
-        }
-        cst::push_child(node, Item::Node(body));
     }
-
-    Some(node)
+    if stream.peek_name(0) == "PUNC_RBRACE" {
+        stream.take_into(body);
+    }
+    Some(body)
 }
 
 pub fn parse_struct_declaration(stream: &mut TokenStream) -> Option<usize> {
@@ -793,7 +866,13 @@ pub fn parse_enumerator(stream: &mut TokenStream) -> Option<usize> {
 // Declarators
 // ---------------------------------------------------------------------
 
+/// A declarator, one node deeper than what holds it: a parenthesised
+/// declarator and a parameter both hold another.
 pub fn parse_declarator(stream: &mut TokenStream, abstract_form: bool) -> Option<usize> {
+    stream.deeper(|stream| parse_declarator_here(stream, abstract_form))
+}
+
+fn parse_declarator_here(stream: &mut TokenStream, abstract_form: bool) -> Option<usize> {
     let start = stream.peek(0)?;
     let node = cst::new_node(
         if abstract_form {
@@ -804,7 +883,29 @@ pub fn parse_declarator(stream: &mut TokenStream, abstract_form: bool) -> Option
         Some(span_of_token(start)),
     );
 
-    // The pointer prefix: `*` followed by qualifiers, repeated.
+    parse_pointers(stream, node);
+
+    let Some(direct) = parse_direct_declarator(stream, abstract_form) else {
+        if cst::child_count(node) > 0 {
+            return Some(node);
+        }
+        return None;
+    };
+    cst::push_child(node, Item::Node(direct));
+    if let Some(declared) = cst::extra_of(direct, "declaredName") {
+        cst::set_extra(node, "declaredName", declared);
+    }
+    Some(node)
+}
+
+/// The pointer prefix: `*` followed by qualifiers, repeated.
+///
+/// This and the other helpers below are split out of the functions
+/// that recurse, a parenthesised declarator into its inner one and a
+/// parameter list into each parameter's, so the frames that stay on the
+/// stack while that recursion goes deeper are small ones. See
+/// `legacy_expr` for the measurement behind it.
+fn parse_pointers(stream: &mut TokenStream, node: usize) {
     while stream.peek_name(0) == "PUNC_STAR" {
         let Some(star) = stream.peek(0) else {
             break;
@@ -833,18 +934,6 @@ pub fn parse_declarator(stream: &mut TokenStream, abstract_form: bool) -> Option
         }
         cst::push_child(node, Item::Node(pointer));
     }
-
-    let Some(direct) = parse_direct_declarator(stream, abstract_form) else {
-        if cst::child_count(node) > 0 {
-            return Some(node);
-        }
-        return None;
-    };
-    cst::push_child(node, Item::Node(direct));
-    if let Some(declared) = cst::extra_of(direct, "declaredName") {
-        cst::set_extra(node, "declaredName", declared);
-    }
-    Some(node)
 }
 
 fn parse_direct_declarator(stream: &mut TokenStream, abstract_form: bool) -> Option<usize> {
@@ -860,54 +949,70 @@ fn parse_direct_declarator(stream: &mut TokenStream, abstract_form: bool) -> Opt
 
     let head = stream.peek_name(0);
     if is_id_like(&head) {
-        if let Some(taken) = stream.take() {
-            for token in taken.trivia {
-                cst::push_child(node, Item::Token(token));
-            }
-            cst::push_child(node, Item::Token(taken.token));
-            cst::set_extra(node, "declaredName", Item::str(cst::token_src(taken.token)));
-        }
+        take_declared_name(stream, node);
     } else if head == "PUNC_LPAREN" {
-        // Either a parenthesised subdeclarator or the parameter list of
-        // an abstract declarator. The first token inside decides.
-        let mark = stream.mark();
-        stream.take_into(node);
-        let inner = stream.peek_name(0);
-        if matches!(inner.as_str(), "PUNC_STAR" | "PUNC_LPAREN")
-            || is_id_like(&inner)
-            || ATTRIBUTE_OPENERS.contains(&inner.as_str())
-        {
-            if let Some(sub) = parse_declarator(stream, abstract_form) {
-                cst::push_child(node, Item::Node(sub));
-                if let Some(declared) = cst::extra_of(sub, "declaredName") {
-                    cst::set_extra(node, "declaredName", declared);
-                }
-            }
-            if stream.peek_name(0) == "PUNC_RPAREN" {
-                stream.take_into(node);
-            }
-        } else {
-            // A parameter list after all: rewind and let the postfix
-            // loop take it. The canonical code leaves the `(` it
-            // already pushed on the node, so that token appears once
-            // here and again inside the function postfix; that is the
-            // shape the fixtures pin.
-            stream.restore(mark);
-        }
+        parse_parenthesised_declarator(stream, node, abstract_form);
     } else if !abstract_form {
         return None;
     }
 
-    // The postfixes.
+    parse_declarator_postfixes(stream, node);
+
+    if cst::child_count(node) == 0 && !abstract_form {
+        return None;
+    }
+    Some(node)
+}
+
+/// The identifier a direct declarator declares.
+fn take_declared_name(stream: &mut TokenStream, node: usize) {
+    if let Some(taken) = stream.take() {
+        for token in taken.trivia {
+            cst::push_child(node, Item::Token(token));
+        }
+        cst::push_child(node, Item::Token(taken.token));
+        cst::set_extra(node, "declaredName", Item::str(cst::token_src(taken.token)));
+    }
+}
+
+/// Either a parenthesised subdeclarator or the parameter list of an
+/// abstract declarator. The first token inside decides.
+fn parse_parenthesised_declarator(stream: &mut TokenStream, node: usize, abstract_form: bool) {
+    let mark = stream.mark();
+    stream.take_into(node);
+    let inner = stream.peek_name(0);
+    if matches!(inner.as_str(), "PUNC_STAR" | "PUNC_LPAREN")
+        || is_id_like(&inner)
+        || ATTRIBUTE_OPENERS.contains(&inner.as_str())
+    {
+        if let Some(sub) = parse_declarator(stream, abstract_form) {
+            cst::push_child(node, Item::Node(sub));
+            if let Some(declared) = cst::extra_of(sub, "declaredName") {
+                cst::set_extra(node, "declaredName", declared);
+            }
+        }
+        if stream.peek_name(0) == "PUNC_RPAREN" {
+            stream.take_into(node);
+        }
+    } else {
+        // A parameter list after all: rewind and let the postfix
+        // loop take it. The canonical code leaves the `(` it
+        // already pushed on the node, so that token appears once
+        // here and again inside the function postfix; that is the
+        // shape the fixtures pin.
+        stream.restore(mark);
+    }
+}
+
+/// The array and function postfixes of a direct declarator.
+fn parse_declarator_postfixes(stream: &mut TokenStream, node: usize) {
     while !stream.done() {
         let name = stream.peek_name(0);
         if name == "PUNC_LBRACKET" {
-            let Some(start) = stream.peek(0) else {
-                break;
-            };
-            let array = cst::new_node("array_postfix", Some(span_of_token(start)));
-            consume_balanced(stream, array, "PUNC_LBRACKET", "PUNC_RBRACKET");
-            cst::push_child(node, Item::Node(array));
+            match parse_array_postfix(stream) {
+                Some(array) => cst::push_child(node, Item::Node(array)),
+                None => break,
+            }
             continue;
         }
         if name == "PUNC_LPAREN" {
@@ -919,11 +1024,13 @@ fn parse_direct_declarator(stream: &mut TokenStream, abstract_form: bool) -> Opt
         }
         break;
     }
+}
 
-    if cst::child_count(node) == 0 && !abstract_form {
-        return None;
-    }
-    Some(node)
+fn parse_array_postfix(stream: &mut TokenStream) -> Option<usize> {
+    let start = stream.peek(0)?;
+    let array = cst::new_node("array_postfix", Some(span_of_token(start)));
+    consume_balanced(stream, array, "PUNC_LBRACKET", "PUNC_RBRACKET");
+    Some(array)
 }
 
 pub fn parse_function_postfix(stream: &mut TokenStream) -> Option<usize> {
@@ -933,16 +1040,28 @@ pub fn parse_function_postfix(stream: &mut TokenStream) -> Option<usize> {
     }
     let node = cst::new_node("function_postfix", Some(span_of_token(start)));
     stream.take_into(node);
+    if parse_untyped_parameters(stream, node) {
+        return Some(node);
+    }
+    parse_parameter_type_list(stream, node)?;
+    Some(node)
+}
 
+/// The parameter lists that hold no declaration: the empty list of an
+/// unspecified prototype, `(void)` and a K&R identifier list. True when
+/// the list was one of those and is now taken, `)` included.
+fn parse_untyped_parameters(stream: &mut TokenStream, node: usize) -> bool {
     // The empty list of an unspecified prototype.
     if stream.peek_name(0) == "PUNC_RPAREN" {
         stream.take_into(node);
-        return Some(node);
+        return true;
     }
 
     // The prototype with an explicit `void` and no parameters.
     if stream.peek_name(0) == "KW_VOID" && stream.peek_name(1) == "PUNC_RPAREN" {
-        let start = stream.peek(0)?;
+        let Some(start) = stream.peek(0) else {
+            return false;
+        };
         let list = cst::new_node("parameter_type_list", Some(span_of_token(start)));
         let parameter = cst::new_node("parameter_declaration", Some(span_of_token(start)));
         let specs = cst::new_node("declaration_specifiers", Some(span_of_token(start)));
@@ -951,12 +1070,14 @@ pub fn parse_function_postfix(stream: &mut TokenStream) -> Option<usize> {
         cst::push_child(list, Item::Node(parameter));
         cst::push_child(node, Item::Node(list));
         stream.take_into(node);
-        return Some(node);
+        return true;
     }
 
     // The K&R identifier list.
     if looks_like_kr_identifier_list(stream) {
-        let start = stream.peek(0)?;
+        let Some(start) = stream.peek(0) else {
+            return false;
+        };
         let list = cst::new_node("identifier_list", Some(span_of_token(start)));
         while !stream.done() && stream.peek_name(0) != "PUNC_RPAREN" {
             stream.take_into(list);
@@ -965,20 +1086,22 @@ pub fn parse_function_postfix(stream: &mut TokenStream) -> Option<usize> {
         if stream.peek_name(0) == "PUNC_RPAREN" {
             stream.take_into(node);
         }
-        return Some(node);
+        return true;
     }
+    false
+}
 
+/// A parameter type list and its closing `)`, or `None` when the source
+/// ends straight after the `(`.
+fn parse_parameter_type_list(stream: &mut TokenStream, node: usize) -> Option<()> {
     let start = stream.peek(0)?;
     let list = cst::new_node("parameter_type_list", Some(span_of_token(start)));
     while !stream.done() && stream.peek_name(0) != "PUNC_RPAREN" {
         if stream.peek_name(0) == "PUNC_ELLIPSIS" {
-            let Some(start) = stream.peek(0) else {
-                break;
-            };
-            let variadic = cst::new_node("parameter_variadic", Some(span_of_token(start)));
-            stream.take_into(variadic);
-            cst::push_child(list, Item::Node(variadic));
-            cst::set_extra(list, "variadic", Item::bool(true));
+            if let Some(variadic) = parse_parameter_variadic(stream) {
+                cst::push_child(list, Item::Node(variadic));
+                cst::set_extra(list, "variadic", Item::bool(true));
+            }
             break;
         }
         match parse_parameter_declaration(stream) {
@@ -995,7 +1118,14 @@ pub fn parse_function_postfix(stream: &mut TokenStream) -> Option<usize> {
     if stream.peek_name(0) == "PUNC_RPAREN" {
         stream.take_into(node);
     }
-    Some(node)
+    Some(())
+}
+
+fn parse_parameter_variadic(stream: &mut TokenStream) -> Option<usize> {
+    let start = stream.peek(0)?;
+    let variadic = cst::new_node("parameter_variadic", Some(span_of_token(start)));
+    stream.take_into(variadic);
+    Some(variadic)
 }
 
 fn looks_like_kr_identifier_list(stream: &TokenStream) -> bool {
@@ -1158,7 +1288,13 @@ pub fn parse_initializer(stream: &mut TokenStream) -> Option<usize> {
     Some(node)
 }
 
+/// A brace initializer list, one node deeper than what holds it: an
+/// item can hold another list.
 pub fn parse_initializer_list(stream: &mut TokenStream) -> Option<usize> {
+    stream.deeper(parse_initializer_list_here)
+}
+
+fn parse_initializer_list_here(stream: &mut TokenStream) -> Option<usize> {
     let start = stream.peek(0)?;
     if cst::token_name(start) != "PUNC_LBRACE" {
         return None;
@@ -1303,40 +1439,7 @@ fn parse_designation(stream: &mut TokenStream) -> Option<usize> {
 // Statements
 // ---------------------------------------------------------------------
 
-thread_local! {
-    /// How many compound statements the structurer is inside.
-    ///
-    /// The structurer is a recursive-descent parser, and a block nested
-    /// N deep costs N frames. The canonical has the same shape and the
-    /// same exposure; JavaScript throws when its stack runs out and Rust
-    /// ABORTS THE PROCESS, so this port counts. The cap is the same one
-    /// `realize` uses, because a source too deep to structure is also
-    /// too deep to hand back: see `crate::REALIZE_DEPTH_CAP`.
-    static BLOCK_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// Run `body` one block deeper, or give up when that is past the cap.
-fn one_block_deeper<T>(body: impl FnOnce() -> Option<T>) -> Option<T> {
-    let depth = BLOCK_DEPTH.with(|cell| {
-        let depth = cell.get() + 1;
-        cell.set(depth);
-        depth
-    });
-    let out = if depth >= crate::cst::REALIZE_DEPTH_CAP {
-        crate::state::with_state(|state| state.gave_up = true);
-        None
-    } else {
-        body()
-    };
-    BLOCK_DEPTH.with(|cell| cell.set(cell.get().saturating_sub(1)));
-    out
-}
-
 pub fn parse_compound_statement(stream: &mut TokenStream) -> Option<usize> {
-    one_block_deeper(|| parse_compound_statement_inner(stream))
-}
-
-fn parse_compound_statement_inner(stream: &mut TokenStream) -> Option<usize> {
     let start = stream.peek(0)?;
     if cst::token_name(start) != "PUNC_LBRACE" {
         return None;
@@ -1405,7 +1508,15 @@ pub fn parse_declaration(stream: &mut TokenStream) -> Option<usize> {
     }
 }
 
+/// A statement, one node deeper than the statement or block holding it.
+/// Every statement that holds another (a block, `if`, `else`, `while`,
+/// `do`, `for`, `switch`, a label) reaches it through here, so nesting
+/// that needs no braces is counted as surely as nesting that does.
 pub fn parse_statement(stream: &mut TokenStream) -> Option<usize> {
+    stream.deeper(parse_statement_here)
+}
+
+fn parse_statement_here(stream: &mut TokenStream) -> Option<usize> {
     let start = stream.peek(0)?;
     let head = cst::token_name(start);
 
@@ -1521,74 +1632,83 @@ fn parse_for_statement(stream: &mut TokenStream) -> usize {
     let node = cst::new_node("for_statement", Some(start_span));
     stream.take_into(node);
     if stream.peek_name(0) == "PUNC_LPAREN" {
-        let controls_span = stream.peek(0).map(span_of_token).unwrap_or_else(Span::zero);
-        let controls = cst::new_node("for_controls", Some(controls_span));
-        stream.take_into(controls);
-
-        let init_span = stream.peek(0).map(span_of_token).unwrap_or(start_span);
-        let init = cst::new_node("for_init", Some(init_span));
-        if stream.peek_name(0) != "PUNC_SEMI" && !stream.done() {
-            let head = stream.peek_name(0);
-            if is_specifier_start(&head)
-                || head == "KW_STATIC_ASSERT"
-                || head == "KW__STATIC_ASSERT"
-                || is_c23_attribute_open(stream)
-            {
-                if let Some(declaration) = parse_declaration(stream) {
-                    cst::push_child(init, Item::Node(declaration));
-                    cst::set_extra(init, "value", Item::Node(declaration));
-                }
-                // The declaration's own `;` is part of it, so no other
-                // terminator is expected here.
-            } else {
-                if let Some(expression) = parse_expression(stream, &["PUNC_SEMI"]) {
-                    cst::push_child(init, Item::Node(expression));
-                    cst::set_extra(init, "value", Item::Node(expression));
-                }
-                if stream.peek_name(0) == "PUNC_SEMI" {
-                    stream.take_into(init);
-                }
-            }
-        } else if stream.peek_name(0) == "PUNC_SEMI" {
-            stream.take_into(init);
-        }
-        cst::push_child(controls, Item::Node(init));
-        cst::set_extra(controls, "init", Item::Node(init));
-
-        let cond_span = stream.peek(0).map(span_of_token).unwrap_or(start_span);
-        let condition = cst::new_node("for_cond", Some(cond_span));
-        if stream.peek_name(0) != "PUNC_SEMI" && stream.peek_name(0) != "PUNC_RPAREN" {
-            if let Some(expression) = parse_expression(stream, &["PUNC_SEMI", "PUNC_RPAREN"]) {
-                cst::push_child(condition, Item::Node(expression));
-                cst::set_extra(condition, "value", Item::Node(expression));
-            }
-        }
-        if stream.peek_name(0) == "PUNC_SEMI" {
-            stream.take_into(condition);
-        }
-        cst::push_child(controls, Item::Node(condition));
-        cst::set_extra(controls, "cond", Item::Node(condition));
-
-        let iter_span = stream.peek(0).map(span_of_token).unwrap_or(start_span);
-        let iteration = cst::new_node("for_iter", Some(iter_span));
-        if stream.peek_name(0) != "PUNC_RPAREN" {
-            if let Some(expression) = parse_expression(stream, &["PUNC_RPAREN"]) {
-                cst::push_child(iteration, Item::Node(expression));
-                cst::set_extra(iteration, "value", Item::Node(expression));
-            }
-        }
-        cst::push_child(controls, Item::Node(iteration));
-        cst::set_extra(controls, "iter", Item::Node(iteration));
-
-        if stream.peek_name(0) == "PUNC_RPAREN" {
-            stream.take_into(controls);
-        }
+        let controls = parse_for_controls(stream, start_span);
         cst::push_child(node, Item::Node(controls));
     }
+    // The body recurses, so the controls are built in a frame of their
+    // own that is gone by the time it does: see `legacy_expr` on why a
+    // frame on the recursive path has to stay small.
     if let Some(body) = parse_statement(stream) {
         cst::push_child(node, Item::Node(body));
     }
     node
+}
+
+/// The parenthesised `init; cond; iter` of a `for` statement.
+fn parse_for_controls(stream: &mut TokenStream, start_span: Span) -> usize {
+    let controls_span = stream.peek(0).map(span_of_token).unwrap_or_else(Span::zero);
+    let controls = cst::new_node("for_controls", Some(controls_span));
+    stream.take_into(controls);
+
+    let init_span = stream.peek(0).map(span_of_token).unwrap_or(start_span);
+    let init = cst::new_node("for_init", Some(init_span));
+    if stream.peek_name(0) != "PUNC_SEMI" && !stream.done() {
+        let head = stream.peek_name(0);
+        if is_specifier_start(&head)
+            || head == "KW_STATIC_ASSERT"
+            || head == "KW__STATIC_ASSERT"
+            || is_c23_attribute_open(stream)
+        {
+            if let Some(declaration) = parse_declaration(stream) {
+                cst::push_child(init, Item::Node(declaration));
+                cst::set_extra(init, "value", Item::Node(declaration));
+            }
+            // The declaration's own `;` is part of it, so no other
+            // terminator is expected here.
+        } else {
+            if let Some(expression) = parse_expression(stream, &["PUNC_SEMI"]) {
+                cst::push_child(init, Item::Node(expression));
+                cst::set_extra(init, "value", Item::Node(expression));
+            }
+            if stream.peek_name(0) == "PUNC_SEMI" {
+                stream.take_into(init);
+            }
+        }
+    } else if stream.peek_name(0) == "PUNC_SEMI" {
+        stream.take_into(init);
+    }
+    cst::push_child(controls, Item::Node(init));
+    cst::set_extra(controls, "init", Item::Node(init));
+
+    let cond_span = stream.peek(0).map(span_of_token).unwrap_or(start_span);
+    let condition = cst::new_node("for_cond", Some(cond_span));
+    if stream.peek_name(0) != "PUNC_SEMI" && stream.peek_name(0) != "PUNC_RPAREN" {
+        if let Some(expression) = parse_expression(stream, &["PUNC_SEMI", "PUNC_RPAREN"]) {
+            cst::push_child(condition, Item::Node(expression));
+            cst::set_extra(condition, "value", Item::Node(expression));
+        }
+    }
+    if stream.peek_name(0) == "PUNC_SEMI" {
+        stream.take_into(condition);
+    }
+    cst::push_child(controls, Item::Node(condition));
+    cst::set_extra(controls, "cond", Item::Node(condition));
+
+    let iter_span = stream.peek(0).map(span_of_token).unwrap_or(start_span);
+    let iteration = cst::new_node("for_iter", Some(iter_span));
+    if stream.peek_name(0) != "PUNC_RPAREN" {
+        if let Some(expression) = parse_expression(stream, &["PUNC_RPAREN"]) {
+            cst::push_child(iteration, Item::Node(expression));
+            cst::set_extra(iteration, "value", Item::Node(expression));
+        }
+    }
+    cst::push_child(controls, Item::Node(iteration));
+    cst::set_extra(controls, "iter", Item::Node(iteration));
+
+    if stream.peek_name(0) == "PUNC_RPAREN" {
+        stream.take_into(controls);
+    }
+    controls
 }
 
 fn parse_jump_statement(stream: &mut TokenStream) -> usize {

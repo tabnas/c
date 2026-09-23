@@ -54,11 +54,50 @@ row goes.
 |---|---|---|---|
 | `void f(void) { {{{ ... }}} }`, 4000 deep | a tree | a tree | `ERROR:cancel` |
 | the same, 20000 deep | `RangeError` or an out-of-memory kill | `fatal error: stack overflow` | `ERROR:cancel` |
+| `int x = ((( ... 1 ... )));`, 5000 deep | `RangeError` | a tree | `ERROR:cancel` |
+| `int x = --- ... 1;`, 5000 deep | a tree | a tree | `ERROR:cancel` |
+| `void f(void) { if (a) if (a) ... ; }`, 2000 deep | a tree | a tree | `ERROR:cancel` |
+
+The last three rows were measured 2026-09-23 with `extended: true`, the
+option `other_deep_shapes_return` in `rs/tests/limits_test.rs` parses
+them with.
 
 **What happens.** The tree is realized into engine values by a recursive
 walk, and the value it builds recurses again in `Value::to_json` and in
 its own `Drop`. JavaScript throws when its stack runs out and Rust
 aborts, so the port needs a bound that JavaScript does not.
+
+**The structurer recurses too.** With `extended: true`, a declaration
+the grammar path does not take is chomped as a flat token run and
+handed to a recursive-descent structurer (`rs/src/structure.rs` and
+`rs/src/legacy_expr.rs`, ports of `ts/src/structure.ts` and
+`ts/src/expr.ts`). It spends a set of frames on every level of nesting
+it meets, and nesting reaches it through more than blocks: a statement
+inside a statement with no braces at all, a label, a declarator inside
+a declarator, a parameter list inside a parameter list, a struct inside
+a struct, a brace initializer inside another, an operand inside an
+expression. `TokenStream::deeper` counts every one of those levels
+against the same cap and gives up the same way, with `cancel`. Each
+counted level builds a node inside the node its caller is building, so
+the count never passes the depth the tree realizes at, and the count
+refuses nothing that realize would admit. That is measured as well as
+argued: on 13 shapes, the deepest input that returns a tree is the same
+with the count as with it removed. At the cap, the costliest of those
+paths in an unoptimized build, a struct in a struct or a parameter list
+in a parameter list, holds about 0.85 MiB of stack, measured
+2026-09-23.
+
+The trees the structurer builds by a loop rather than by recursion, as
+`x = 1 + 1 + ... + 1` is, are as deep as they are long, so the walks
+between the structurer and the realize cap (macro registration and the
+conditional-group fold) keep their own stacks rather than recursing.
+
+Measured 2026-09-23 with `extended: true` on the 22 shapes of
+`every_recursive_construct_stops_at_the_cap`, each 2000 deep: the
+canonical returns a tree for 15 of them and throws `RangeError` for the
+other 7, the Go port returns a tree for 21 and does not finish the
+nested parameter lists in two minutes, and this port reports `cancel`
+for all 22.
 
 **Where the cap sits, measured.** A translation unit of N nested
 compound statements realizes at depth `N + 2`, and an unoptimized build
@@ -85,8 +124,10 @@ fail on it rather than compare a truncated one.
 trade a clean error for a process abort. The number moves only with a
 fresh measurement.
 
-**Pinned by.** `test/divergent.tsv`, and `nesting_at_the_cap` and
-`nesting_past_the_cap` in `rs/tests/limits_test.rs`.
+**Pinned by.** `test/divergent.tsv`, and `nesting_at_the_cap`,
+`nesting_past_the_cap`, `other_deep_shapes_return` and
+`every_recursive_construct_stops_at_the_cap` in
+`rs/tests/limits_test.rs`.
 
 ## 3. An initializer item whose expression is left un-evaluated
 
