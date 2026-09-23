@@ -70,7 +70,7 @@ pub use state::{Binding, MacroDef, MacroTable, Scope, ScopeKind, SymbolTable, Ta
 /// release orchestrator rewrites both, and `tests/version_test.rs`
 /// fails the build if they drift. Mirrors `VERSION` in `ts/src/c.ts`
 /// and `const VERSION` in `go/c.go`.
-pub const VERSION: &str = "0.5.6";
+pub const VERSION: &str = "0.5.7";
 
 /// The plugin's name, as `use_plugin` records it.
 pub const PLUGIN_NAME: &str = "C";
