@@ -45,12 +45,22 @@ const cst = new Tabnas().use(jsonic).use(C).parse('typedef int T; T x = 1;')
 ## The tabnas engine dependency
 
 This repo sits **above jsonic** in the stack (not directly on the bare
-engine). Peer dependencies (`ts/package.json`, all `^0.2.0`):
-`@tabnas/parser`, `@tabnas/jsonic`, `@tabnas/expr`. Each is mirrored as a
-`file:../../<dep>/ts` devDependency for local builds. Clone
-`parser`, `jsonic` and `expr` (plus jsonic's own deps `json`, `debug`,
-`abnf`, `railroad`) as siblings of this repo and build their `ts/` halves
-first; CI (`.github/workflows/build.yml`) does exactly this.
+engine). Peer dependencies (`ts/package.json`, all `>=0`):
+`@tabnas/parser`, `@tabnas/jsonic`, `@tabnas/expr`. The same three, plus
+`@tabnas/support`, are `"*"` devDependencies resolved from the **registry**,
+so a plain `npm install` builds against the published packages; the Go
+module likewise requires published versions in `go/go.mod`. Testing against
+unreleased siblings is local wiring you add yourself and never commit (see
+"Never commit the local wiring" below).
+
+CI is `.github/workflows/ci.yml`, a caller of the org-shared
+`tabnas/.github` `polyglot-ci.yml` that passes
+`deps: "parser support debug json jsonic expr"` — those repos are cloned as
+siblings at `main` and this repo is built against them. The rest of the
+matrix lives in the shared workflow, not here. Alongside it:
+`.github/workflows/rust.yml` (`ci/rust/run.sh`), `clib.yml` (the C-ABI
+library, on pull requests touching `go/**`) and `docs.yml` (the prose
+gate).
 
 ## Go port: upstream @tabnas/expr requirement
 
@@ -124,7 +134,7 @@ work.
 From `ts/`:
 
 ```bash
-npm install            # resolves the @tabnas/parser + jsonic + expr file: siblings
+npm install            # resolves @tabnas/parser, jsonic, expr and support from the registry
 npm run build          # node embed-grammar.js && tsc --build src test
 npm test               # node --enable-source-maps --test "dist-test/*.test.js"
 ```
@@ -134,10 +144,11 @@ npm test               # node --enable-source-maps --test "dist-test/*.test.js"
 wraps both halves: `make build` = `build-ts` + `build-go`, `make test` =
 `test-ts` + `test-go`, plus `clean|reset`.
 
-The Go half needs a `go.work` over the sibling `@tabnas` module checkouts
-(`parser`, `jsonic`, `expr` and their deps); `cd go && go test ./...` then
-runs the unit tests, the shared `test/spec/*.tsv` fixtures (`TestSpec`) and
-the CSmith parity gate (`TestCsmithCorpus`).
+The Go half builds against the published modules `go/go.mod` requires;
+a `go.work` over sibling checkouts (kept outside the repo) is only for
+testing unreleased ones. `cd go && go test ./...` runs the unit tests, the
+shared `test/spec/*.tsv` fixtures (`TestSpec`) and the CSmith parity gate
+(`TestCsmithCorpus`).
 
 The Rust half takes the engine, `jsonic` and `expr` as path dependencies
 on sibling checkouts, with `support` as a path dev-dependency and `json`
