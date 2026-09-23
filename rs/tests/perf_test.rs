@@ -85,3 +85,56 @@ fn statement_cost_is_linear_in_input_size() {
          {large_ms:.1} ms, a ratio of {ratio:.1} for 4x the input"
     );
 }
+
+/// A subtree that stops at the realize cap costs that subtree, and
+/// nothing else.
+///
+/// The realized tree is a DAG: an expression node sits in its parent's
+/// `children` and again under the parent's `left` or `right`, so the
+/// walk memoizes what each node realized to and hands the same value
+/// back on the second path. A node whose own walk stopped at the cap is
+/// the one thing it must NOT keep, because the value has a hole in it.
+/// A walk that went on past that point with the memo off would be
+/// exponential in expression depth, so the walk stops at the first
+/// truncation instead: the parse fails with `cancel` either way. The
+/// input below is one truncating declaration followed by one ordinary
+/// nested expression: the second must cost no more than it does alone,
+/// and a walk that carries on un-memoized does not finish at all (over
+/// 300 seconds, against under two here).
+#[test]
+fn a_truncated_subtree_does_not_cost_the_rest_of_the_walk() {
+    let parser = tabnas_c::make();
+
+    // 24 levels of nesting is 2^24 paths through the DAG if each one is
+    // walked, and a few hundred nodes if they are not.
+    let mut expression = String::from("1");
+    for term in 0..24 {
+        expression = format!("({expression} + {term})");
+    }
+    let tail = format!("int g = {expression};\n");
+    // Nested past REALIZE_DEPTH_CAP, so realizing it truncates.
+    let deep = 300;
+    let prefix = format!(
+        "void f(void) {{ {}{} }}\n",
+        "{".repeat(deep),
+        "}".repeat(deep)
+    );
+
+    let cost = |source: &str| {
+        let start = Instant::now();
+        // The truncating input reports `cancel`; the cost is the point,
+        // not the answer.
+        let _ = tabnas_c::parse_with(&parser, source);
+        start.elapsed().as_secs_f64() * 1000.0
+    };
+
+    let _ = cost(&tail);
+    let prefix_ms = cost(&prefix);
+    let both_ms = cost(&format!("{prefix}{tail}"));
+
+    assert!(
+        both_ms < prefix_ms * 4.0 + 1_000.0,
+        "the declaration after a truncated one cost {both_ms:.0} ms on top of \
+         {prefix_ms:.0} ms, so the realize memo is off for it"
+    );
+}

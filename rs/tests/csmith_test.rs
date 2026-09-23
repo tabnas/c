@@ -15,7 +15,6 @@
 
 mod common;
 
-use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -230,8 +229,21 @@ fn string_at(entries: &indexmap::IndexMap<String, Value>, key: &str) -> Option<S
 }
 
 /// The seeds whose only difference from the golden fixture is the
-/// recorded divergence. MEASURED, not guessed: grading writes it.
-const KNOWN_DIVERGENT: &[&str] = &[];
+/// recorded divergence of DIVERGENCE.md section 3. MEASURED, not
+/// guessed: this is the list the assertion below printed when it was
+/// run with the list empty, and it is exactly the set of golden
+/// fixtures that carry an `initializer_item` with a `{}` child, which
+/// is how `toFixture` writes the raw operator array the canonical
+/// leaves on such an item. Pinning the seeds by name means a repair
+/// goes red here and says which names to delete, and a regression
+/// that widens the set goes red the same way.
+const KNOWN_DIVERGENT: &[&str] = &[
+    "seed-002", "seed-004", "seed-006", "seed-008", "seed-010", "seed-022", "seed-026", "seed-027",
+    "seed-030", "seed-035", "seed-039", "seed-044", "seed-046", "seed-047", "seed-048", "seed-049",
+    "seed-051", "seed-055", "seed-056", "seed-057", "seed-060", "seed-063", "seed-069", "seed-073",
+    "seed-074", "seed-077", "seed-079", "seed-082", "seed-085", "seed-086", "seed-087", "seed-090",
+    "seed-091", "seed-093", "seed-094", "seed-095", "seed-098",
+];
 
 /// Remove the empty-object child the canonical writes for an
 /// initializer item whose expression it left un-evaluated.
@@ -351,6 +363,26 @@ fn csmith_corpus_matches_the_golden_fixtures() {
             failures.push(format!("{name}: the root is not a translation_unit"));
             continue;
         }
+        // As `csmith.test.ts` asserts before it reads the fixture: a
+        // seed that parses but leaves an external declaration
+        // unstructured has already failed, whatever the fixture says.
+        let unknown = object_of(&value)
+            .and_then(|entries| entries.get("children").map(list_of))
+            .unwrap_or_default()
+            .iter()
+            .filter(|child| {
+                object_of(child)
+                    .and_then(|entries| string_at(&entries, "declKind"))
+                    .as_deref()
+                    == Some("unknown")
+            })
+            .count();
+        if unknown > 0 {
+            failures.push(format!(
+                "{name}: {unknown} external declaration(s) came back with declKind unknown"
+            ));
+            continue;
+        }
         let fixture = fixtures_dir().join(format!("{name}.json.gz"));
         let raw = match gunzip(&fixture) {
             Ok(raw) => raw,
@@ -410,7 +442,8 @@ fn csmith_corpus_matches_the_golden_fixtures() {
     assert_eq!(
         divergent, KNOWN_DIVERGENT,
         "the set of seeds that differ only by the recorded divergence has changed. \
-         If the repair landed, delete this list, delete section 3 of DIVERGENCE.md \
-         and the row in test/divergent.tsv."
+         If the repair landed, delete this list, section 3 of DIVERGENCE.md and \
+         `unevaluated_initializer_items_are_dropped` in tests/c_test.rs; if it \
+         merely moved, re-measure and record the new set."
     );
 }

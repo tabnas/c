@@ -19,10 +19,12 @@ the grammar document itself is written in.
 [`tabnas-expr`](https://github.com/tabnas/expr) supplies Pratt-style
 expression parsing with the C operator table.
 
-This is the Rust port of the canonical TypeScript implementation in
-[`../ts`](../ts); the TypeScript version is authoritative and this crate
-tracks it. The Go port in [`../go`](../go) has the same shape. All
-three run the same fixtures in [`../test/spec`](../test/spec).
+This is the Rust port of the canonical TypeScript implementation,
+[`@tabnas/c`](https://www.npmjs.com/package/@tabnas/c); the TypeScript
+version is authoritative and this crate tracks it. The Go port,
+[`github.com/tabnas/c/go`](https://pkg.go.dev/github.com/tabnas/c/go),
+has the same shape. All three run the same shared fixtures, and the
+same 100-program CSmith corpus.
 
 ## Use
 
@@ -78,10 +80,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Spans are BYTE offsets into the source. The canonical TypeScript counts
-UTF-16 code units and Go counts bytes, so the three agree on every ASCII
-input and differ on the offsets of anything past it. The shared fixtures
-are ASCII for that reason; see [`../test/AGENTS.md`](../test/AGENTS.md).
+Spans count Unicode scalar values, the `char`s of the source. The
+canonical TypeScript counts UTF-16 code units and Go counts bytes, so
+the three agree on every ASCII input, this port and the canonical agree
+on anything inside the Basic Multilingual Plane, and all three drift
+apart past it: after a block comment holding one astral character, the
+`int` of `int x;` starts at 8 here, at 9 in the canonical and at 11 in
+Go. The shared fixtures are ASCII for that reason.
 
 ## Extensions
 
@@ -155,10 +160,10 @@ instance a second copy of every alternate.
 ## What the tree keeps
 
 The tree keeps every token verbatim, at a span that names exactly the
-text the token carries, in source order and without overlaps. The test
-`tokens_are_verbatim_and_ordered` in
-[`tests/roundtrip_test.rs`](tests/roundtrip_test.rs) reassembles every
-fixture input from its tree and holds the port to that.
+text the token carries, in source order and without overlaps. The
+crate's round-trip test, `tokens_are_verbatim_and_ordered` in
+`tests/roundtrip_test.rs`, reassembles every fixture input from its
+tree and holds the port to that.
 
 Three things are kept somewhere other than a token, and one group is
 not kept at all. Both lists are measured, and the same inputs behave
@@ -201,8 +206,12 @@ The cap is measured rather than copied: a translation unit of N nested
 compound statements realizes at depth `N + 2`, and an unoptimized build
 spends a little under a kilobyte of stack per level, so a thread with
 the 1 MiB stack a small runtime hands out gives out somewhere past 300.
-The cap sits below that, and no fixture and no program in the
-100-program CSmith corpus reaches a tenth of it.
+The cap sits below that. How much room ordinary source leaves under it
+is a second measurement, taken 2026-09-22: the deepest of the shared
+fixtures realizes at 17, and the deepest of the 100 CSmith programs at
+146, which is over half the cap. Every one of those programs still
+returns a tree, and the corpus test would report `cancel` for any that
+stopped short.
 
 ## Options
 
@@ -234,8 +243,9 @@ repository before building.
 
 ## Differences from the canonical TypeScript
 
-Recorded, with the measurement behind each, in
-[`../DIVERGENCE.md`](../DIVERGENCE.md). The short version:
+Three, each measured against a run of the canonical under Node and
+recorded, with the measurement behind it, in the repository's
+`DIVERGENCE.md`. The short version:
 
 - A ternary in a declaration initializer, as in `int a = b ? c : d;`,
   builds a tree that holds itself. The canonical throws
@@ -244,11 +254,13 @@ Recorded, with the measurement behind each, in
   the caller carries on.
 - Deeply nested source is bounded by the realize cap described above.
   The canonical has no cap and aborts instead.
-- For a few initializer shapes, `static int g[2] = {-5,1};` among them,
-  the canonical leaves the raw operator array `tabnas-expr` handed it on
-  the initializer item. This port drops it, so the item comes back with
-  no children. Every shared fixture passes either way; the CSmith corpus
-  is where it shows.
+- A prefix operator as the whole of a brace initializer item, the `-5`
+  of `static int g[2] = {-5,1};`, is left by the canonical as the raw
+  operator array `tabnas-expr` handed it. This port drops the array, so
+  the item comes back with no children and the tokens of that expression
+  are not in the tree. Every shared fixture passes either way; 37 of the
+  100 CSmith programs carry at least one such item, and the corpus test
+  names them.
 
 ## Build and test
 
@@ -261,8 +273,8 @@ cargo clippy --all-targets --all-features -- -D warnings
 `bash ../ci/rust/run.sh` runs the whole gate, including a lockfile
 check, and leaves the tree as it found it.
 
-The grammar lives in [`../ts/c-grammar.jsonic`](../ts/c-grammar.jsonic)
-and is copied here by `ts/embed-grammar.js`. Edit it there, then run
+The grammar lives in `ts/c-grammar.jsonic` at the repository root and
+is copied here by `ts/embed-grammar.js`. Edit it there, then run
 `make embed` from the repository root.
 
 ## License

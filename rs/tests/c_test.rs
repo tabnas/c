@@ -42,9 +42,8 @@ fn the_embedded_grammar_matches_the_source() {
 #[test]
 fn a_bare_engine_is_refused() {
     let mut parser = Tabnas::new();
-    let error = tabnas_c::c(&mut parser, &COptions::default())
-        .err()
-        .expect("a bare engine has no val rule");
+    let error =
+        tabnas_c::c(&mut parser, &COptions::default()).expect_err("a bare engine has no val rule");
     assert!(
         error.0.contains("jsonic"),
         "the refusal should name what is missing, got {:?}",
@@ -334,4 +333,25 @@ fn unevaluated_initializer_items_are_dropped() {
          closed: delete section 3 of DIVERGENCE.md, the seed list in \
          tests/csmith_test.rs, and this test."
     );
+}
+
+/// Spans count Unicode scalar values, the `char`s of the source, and
+/// that is what the README says they do. On ASCII input every runtime
+/// agrees. Past it the three count differently, measured 2026-09-21 on
+/// the two inputs below: the canonical counts UTF-16 code units, so
+/// `int` starts at 8 after `é` and at 9 after the astral U+1F600; Go
+/// counts bytes, so 9 and 11; this port counts scalar values, so 8 and
+/// 8. The shared fixtures are ASCII for exactly this reason.
+#[test]
+fn spans_count_unicode_scalar_values() {
+    let parser = tabnas_c::make();
+    for comment in ["/* é */", "/* \u{1F600} */"] {
+        let source = format!("{comment} int x;");
+        let value = tabnas_c::parse_with(&parser, &source).expect("non-ASCII trivia parses");
+        let tokens = common::tokens_of(&value.to_json());
+        assert_eq!(tokens[0].src, comment);
+        assert_eq!((tokens[0].start, tokens[0].end), (0, 7), "{source:?}");
+        assert_eq!(tokens[1].src, "int");
+        assert_eq!((tokens[1].start, tokens[1].end), (8, 11), "{source:?}");
+    }
 }

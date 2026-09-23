@@ -66,10 +66,33 @@ pub fn structure_conditional_groups(parent: usize) {
 /// twice makes the walk terminate on that input, so the parse fails the
 /// way a parse fails: see `expression_cycle` in
 /// `rs/tests/limits_test.rs` and the entry in `DIVERGENCE.md`.
-fn structure_from(parent: usize, seen: &mut std::collections::HashSet<usize>) {
-    if !seen.insert(parent) {
-        return;
+///
+/// The walk keeps its own stack rather than recursing. The tree it
+/// walks is as deep as the source is nested, and nothing before this
+/// pass bounds that: a chain like `x = a + a + ... + a` is built by a
+/// loop, not by recursion, so it arrives here thousands of levels deep
+/// and is refused only later, by the realize cap. Popping the children
+/// in source order visits the nodes in the order the recursion did.
+fn structure_from(root: usize, seen: &mut std::collections::HashSet<usize>) {
+    let mut pending = vec![root];
+    while let Some(parent) = pending.pop() {
+        if !seen.insert(parent) {
+            continue;
+        }
+        let out = fold_children(parent);
+        // Walk into preserved children (a function body, for instance).
+        pending.extend(
+            out.iter()
+                .rev()
+                .filter_map(Item::as_node)
+                .filter(|node| !kind_of(*node).is_empty()),
+        );
     }
+}
+
+/// Fold the conditional runs among `parent`'s own children, and answer
+/// the children it keeps.
+fn fold_children(parent: usize) -> Vec<Item> {
     let children = children_of(parent);
     let mut out: Vec<Item> = Vec::new();
     let mut index = 0;
@@ -89,14 +112,7 @@ fn structure_from(parent: usize, seen: &mut std::collections::HashSet<usize>) {
         index += 1;
     }
     set_children(parent, out.clone());
-    // Recurse into preserved children (a function body, for instance).
-    for child in out {
-        if let Some(node) = child.as_node() {
-            if !kind_of(node).is_empty() {
-                structure_from(node, seen);
-            }
-        }
-    }
+    out
 }
 
 /// Build a `conditional_group` starting at `from`, returning the new

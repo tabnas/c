@@ -399,9 +399,10 @@ pub fn push_token_with_trivia(node: usize, token: usize) {
 pub const REALIZE_DEPTH_CAP: usize = 256;
 
 thread_local! {
-    // Set when a realize walk stopped at the cap, cleared when one
-    // starts. `crate::parse_with` reads it and fails the parse rather
-    // than handing back a tree with a hole in it.
+    // Set when a realize walk reached the cap, cleared when one starts.
+    // `crate::parse_with` reads it and fails the parse rather than
+    // handing back a tree with a hole in it, and the walk itself stops
+    // the moment it is set: see `past_the_cap`.
     static REALIZE_TRUNCATED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 
     // What each node realized to, for the length of one walk.
@@ -429,8 +430,11 @@ pub fn realize_truncated() -> bool {
 /// Values that are not handles pass through unchanged, so a tree that
 /// mixes CST nodes with engine values realizes correctly.
 ///
-/// Check [`realize_truncated`] afterwards: a walk that ran out of depth
-/// answers with a value that stops short of the whole tree.
+/// A walk that runs out of depth answers with a value that stops short
+/// of the whole tree. [`crate::parse_with`] and [`crate::parse_with_meta`]
+/// check for that and report the engine's `cancel` code rather than hand
+/// back a tree with a hole in it; a caller driving a `tabnas` instance
+/// itself gets the same answer from `realize_truncated` in this module.
 pub fn realize(value: &Value) -> Value {
     REALIZE_TRUNCATED.with(|cell| cell.set(false));
     REALIZED.with(|memo| memo.borrow_mut().clear());
@@ -441,9 +445,29 @@ pub fn realize(value: &Value) -> Value {
     out
 }
 
+/// True when the walk must not go on from here: this level is at the
+/// cap, or some earlier part of the walk already reached it.
+///
+/// Stopping the WHOLE walk at the first truncation, not only the branch
+/// that reached the cap, is what keeps a truncated walk linear. The value
+/// it would go on to build is thrown away, since a truncation anywhere
+/// fails the parse, so nothing is lost. What the walk would cost is
+/// exponential: a subtree with a hole in it cannot be memoized, and the
+/// tree is a DAG (see `REALIZED`), so every node above the hole would be
+/// walked once per path that reaches it. An expression chain two hundred
+/// levels past the cap, each level reachable through `children` and
+/// through `left` or `operand`, is two to the two hundred paths.
+fn past_the_cap(depth: usize) -> bool {
+    REALIZE_TRUNCATED.with(|cell| {
+        if !cell.get() && depth >= REALIZE_DEPTH_CAP {
+            cell.set(true);
+        }
+        cell.get()
+    })
+}
+
 fn realize_at(value: &Value, depth: usize) -> Value {
-    if depth >= REALIZE_DEPTH_CAP {
-        REALIZE_TRUNCATED.with(|cell| cell.set(true));
+    if past_the_cap(depth) {
         return Value::Null;
     }
     if let Some(node) = handle_node(value) {
@@ -482,8 +506,7 @@ fn realize_at(value: &Value, depth: usize) -> Value {
 }
 
 fn realize_item(item: &Item, depth: usize) -> Value {
-    if depth >= REALIZE_DEPTH_CAP {
-        REALIZE_TRUNCATED.with(|cell| cell.set(true));
+    if past_the_cap(depth) {
         return Value::Null;
     }
     match item {
@@ -512,8 +535,7 @@ fn realize_token(token: usize) -> Value {
 }
 
 fn realize_node(node: usize, depth: usize) -> Value {
-    if depth >= REALIZE_DEPTH_CAP {
-        REALIZE_TRUNCATED.with(|cell| cell.set(true));
+    if past_the_cap(depth) {
         return Value::Null;
     }
     if let Some(done) = REALIZED.with(|memo| memo.borrow().get(&node).cloned()) {
@@ -558,11 +580,119 @@ fn realize_node(node: usize, depth: usize) -> Value {
         entries.insert(key.clone(), realize_item(item, depth + 1));
     }
     let out = Value::object(entries);
-    // Only a walk that finished is worth keeping: one that stopped at
-    // the cap built a value with a hole in it, and a shallower path to
-    // the same node must be free to build the whole thing.
+    // Only a subtree that finished is worth keeping. The flag was clear
+    // when this node started, or the walk would have stopped above, so
+    // a flag set now means this subtree is the one with the hole in it.
     if !REALIZE_TRUNCATED.with(|cell| cell.get()) {
         REALIZED.with(|memo| memo.borrow_mut().insert(node, out.clone()));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The id of a node reachable from itself, with the path that got
+    /// there, or `None` when the arena is a directed ACYCLIC graph.
+    ///
+    /// A node that holds itself is invisible to the fixtures until the
+    /// walk over it reaches [`REALIZE_DEPTH_CAP`], and then the parse
+    /// reports `cancel` rather than naming the shape that did it. The
+    /// two constructs below both built one: a cast as the whole of a
+    /// declaration initializer, and a compound literal in the same
+    /// position.
+    fn first_cycle() -> Option<(usize, Vec<usize>)> {
+        fn children_of(node: usize) -> Vec<usize> {
+            with_state(|state| {
+                let Some(data) = state.nodes.get(node) else {
+                    return Vec::new();
+                };
+                let mut out = Vec::new();
+                let mut push = |item: &Item| {
+                    let mut stack = vec![item.clone()];
+                    while let Some(item) = stack.pop() {
+                        match item {
+                            Item::Node(id) => out.push(id),
+                            Item::List(items) => stack.extend(items),
+                            _ => {}
+                        }
+                    }
+                };
+                for item in data
+                    .children
+                    .iter()
+                    .chain(data.leading.iter())
+                    .chain(data.trailing.iter())
+                    .chain(data.extras.values())
+                {
+                    push(item);
+                }
+                out
+            })
+        }
+
+        let count = with_state(|state| state.nodes.len());
+        // Depth-first from every node, carrying the path, so the report
+        // names the loop rather than only the node it closes on.
+        for root in 0..count {
+            let mut stack = vec![(root, vec![root])];
+            let mut seen = std::collections::HashSet::new();
+            while let Some((node, path)) = stack.pop() {
+                for child in children_of(node) {
+                    if path.contains(&child) {
+                        let mut loop_path = path.clone();
+                        loop_path.push(child);
+                        return Some((child, loop_path));
+                    }
+                    if seen.insert(child) {
+                        let mut next = path.clone();
+                        next.push(child);
+                        stack.push((child, next));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Every shape below parses into a tree, not into a graph that
+    /// holds itself.
+    ///
+    /// The one input that does build a cycle, a ternary as the whole of
+    /// a declaration initializer, is not here: the canonical builds it
+    /// too, and `DIVERGENCE.md` section 1 records it.
+    #[test]
+    fn no_ordinary_source_builds_a_node_that_holds_itself() {
+        let parser = crate::make_with(&crate::COptions::new().with_extended(true));
+        for source in [
+            "int g = (int)0;",
+            "int *p = (int[2]){1,2};",
+            "int g = (int)0 + 1;",
+            "void f(void) { int y = (int)x + 1; }",
+            "int g = sizeof(int);",
+            "int g[2] = {1,2};",
+            "int g[2][2] = {{1,2},{3,4}};",
+            "struct S { int x; }; struct S s = { .x = 1 };",
+            "int g = _Generic(x, int: 1, default: 0);",
+            "int g = ({ 1; });",
+            "const char *s = \"a\" \"b\";",
+            "void f(void) { for (int i = 0; i < 2; i++) { g(i); } }",
+            "typedef int T; T f(T a) { return a; }",
+            "#define M(a) (a)\nint g = M(1);",
+            "void f(void) { switch (x) { case 1: break; default: break; } }",
+            "int f(int (*p)(void)) { return p(); }",
+            "enum E { A = 1, B };",
+            "union U { int a; char b; };",
+            "static const volatile int *const p = 0;",
+            "void f(void) { while (x) { y = a ? b : c; } }",
+        ] {
+            let _ = crate::parse_with(&parser, source);
+            assert_eq!(
+                first_cycle(),
+                None,
+                "{source:?} built a node that is its own descendant"
+            );
+        }
+    }
 }

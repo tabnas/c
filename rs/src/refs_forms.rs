@@ -102,7 +102,28 @@ pub fn register(reg: &mut Reg<'_>) {
     });
 
     // --- cast_or_compound_literal ---------------------------------------
-    reg.act("@cast_or_compound_literal-bo", |_rule, _context| {});
+    //
+    // The open action gives the rule a node cell of its own, which the
+    // canonical does not have to do and which the other sub-rules of
+    // `val` do not need. This rule alone reaches its finished node
+    // through `r:` re-entry, and the parent's link to a pushed child is
+    // frozen at the FIRST link of a replacement chain (the engine's
+    // `Rule::freeze_child`, matching how TypeScript never relinks
+    // `rule.child`). A rule is pushed sharing its parent's node cell,
+    // so without this the frozen link names the cell `val` itself is
+    // holding: the finished cast node, installed on a later link of the
+    // chain, is invisible to `val`, and `val` falls back to the node it
+    // inherited -- which is the enclosing `initializer`'s own node, so
+    // `@initializer-bc` pushes that node into itself and the tree stops
+    // being a tree. `int g = (int)0;` is the shortest input that does
+    // it. Taking a private cell here, and WRITING THROUGH it in
+    // `@cocl-finalize` rather than replacing it, is this engine's
+    // spelling of the canonical's `parent.child.node = node`.
+    reg.act("@cast_or_compound_literal-bo", |rule, _context| {
+        if k_token(rule, "lparenTkn").is_none() {
+            set_node(rule, Value::Undefined);
+        }
+    });
     reg.act("@cocl-take-lparen", |rule, _context| {
         if let Some(token) = o0(rule) {
             k_set_token(rule, "lparenTkn", token);
@@ -190,15 +211,22 @@ pub fn register(reg: &mut Reg<'_>) {
             }
             node
         };
-        set_node_id(rule, node);
-        // The canonical handler ALSO writes the finished node onto the
-        // parent's `child` rule, because an `r:` re-entry builds a fresh
-        // rule there while the parent still points at the first one.
-        // This engine hands the parent the node of the LAST rule of a
-        // replacement chain, which is this one, so there is nothing to
-        // propagate; and a snapshot's node cell is shared with its
-        // parent, so writing through it would overwrite an ancestor's
-        // node instead.
+        // Written THROUGH the cell, not into a fresh one: the parent
+        // reads this rule's node through the cell it froze when the
+        // first link of the `r:` chain was replaced, and a fresh cell
+        // installed here would never reach it. The cell is private to
+        // the chain because `@cast_or_compound_literal-bo` took one;
+        // the check keeps the write off an ancestor's node if the
+        // rule is ever reached without that open action having run.
+        let private = rule
+            .parent_node
+            .as_ref()
+            .is_none_or(|parent| !std::rc::Rc::ptr_eq(parent, &rule.node));
+        if private {
+            *rule.node.borrow_mut() = crate::state::node_handle(node);
+        } else {
+            set_node_id(rule, node);
+        }
     });
 
     // --- compound_literal_body ------------------------------------------

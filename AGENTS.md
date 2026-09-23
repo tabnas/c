@@ -29,6 +29,7 @@ const cst = new Tabnas().use(jsonic).use(C).parse('typedef int T; T x = 1;')
 |---|---|
 | [`ts/`](ts/) | **Canonical** implementation — the `@tabnas/c` package. |
 | [`go/`](go/) | **Go port — COMPLETE & at parity.** Full hand-translation of the TypeScript: lexer (`tokens.go`/`symbols.go`/`matchers.go`), CST helpers (`cst.go`), `@tabnas/expr` wiring + C-atom expressions (`expr_grammar.go`), grammar parse/install + ref map (`grammar_install.go`/`refs.go`), `#if`-folding (`conditional_groups.go`), top-level chomp + preprocessor directives (`refs.go`), the new-path structured dispatch (`refs_newpath*.go`: declarations/declarators/specifiers, struct/union/enum, initializers, statements), the legacy structurer + hand-rolled Pratt expression parser (`structure.go`/`expr.go`), and the CSmith parity test (`csmith_test.go`). `tabnasc.Parse`/`MakeC`/`ParseMeta` produce structured CSTs. **`go test` is green and `TestCsmithCorpus` passes 100/100** against the TypeScript golden fixtures. The upstream `@jsonic/c` is TypeScript-only, so this is a from-scratch hand-translation. |
+| [`rs/`](rs/) | **Rust port** — crate `tabnas-c` (lib `tabnas_c`), a hand-translation of the TypeScript onto the Rust `tabnas` engine over `tabnas-jsonic` and `tabnas-expr`, all taken as path dependencies on sibling checkouts. `cargo test` runs the shared `test/spec/*.tsv` fixtures (`tests/parity_test.rs`), the CSmith corpus (`tests/csmith_test.rs`) and the path-dispatch catalogue (`tests/path_dispatch_test.rs`); the inputs where it answers differently from the canonical are recorded in [`DIVERGENCE.md`](DIVERGENCE.md) and pinned by `test/divergent.tsv` and named tests. See [`rs/AGENTS.md`](rs/AGENTS.md). |
 | [`ts/c-grammar.jsonic`](ts/c-grammar.jsonic) | **Single source of truth** for the declarative grammar (rule shapes for the whole C surface), authored in jsonic-DSL syntax. |
 | [`ts/embed-grammar.js`](ts/embed-grammar.js) | Embeds `c-grammar.jsonic` into `src/c.ts` (between `BEGIN/END EMBEDDED` markers) as the `grammarText` string literal, **and** copies it verbatim to `go/c-grammar.jsonic` for `//go:embed`. The grammar contains backticks, so the Go side embeds from the file rather than inlining a raw string (unlike the smaller ports). Runs as the first half of `npm run build`. |
 | [`ts/src/c.ts`](ts/src/c.ts) | Plugin entry: token catalog wiring, lex matchers, grammar install, and the `@`-named ref map (conditions/actions bound by name from the grammar). |
@@ -39,7 +40,7 @@ const cst = new Tabnas().use(jsonic).use(C).parse('typedef int T; T x = 1;')
 | [`ts/src/structure.ts`](ts/src/structure.ts) | Recursive-descent post-processor for the legacy-fallback long-tail shapes (K&R params, complex compound declarators). |
 | [`ts/src/conditional-groups.ts`](ts/src/conditional-groups.ts) | Translation-unit post-pass that folds `#if`/`#elif`/`#else`/`#endif` runs into `conditional_group` nodes. |
 | [`ts/test/`](ts/test/) | TS tests (compiled to `dist-test/`): `c.test.ts` (parse cases), `csmith.test.ts` (replays the 100-program CSmith regression corpus against committed gzipped fixtures), `parity.test.ts` (runs the shared `test/spec/*.tsv` fixtures). |
-| [`test/spec/`](test/spec/) | **Shared cross-runtime fixtures** (`*.tsv`), auto-discovered and run by BOTH `ts/test/parity.test.ts` and `go/parity_test.go`. See [`test/AGENTS.md`](test/AGENTS.md). Prefer a fixture here over a one-off in-language assertion. |
+| [`test/spec/`](test/spec/) | **Shared cross-runtime fixtures** (`*.tsv`), auto-discovered and run by all three runners: `ts/test/parity.test.ts`, `go/parity_test.go` and `rs/tests/parity_test.rs`. See [`test/AGENTS.md`](test/AGENTS.md). Prefer a fixture here over a one-off in-language assertion. |
 
 ## The tabnas engine dependency
 
@@ -138,13 +139,22 @@ The Go half needs a `go.work` over the sibling `@tabnas` module checkouts
 runs the unit tests, the shared `test/spec/*.tsv` fixtures (`TestSpec`) and
 the CSmith parity gate (`TestCsmithCorpus`).
 
+The Rust half takes the engine, `jsonic` and `expr` as path dependencies
+on sibling checkouts, with `support` as a path dev-dependency and `json`
+arriving through `jsonic` (`rs/Cargo.toml`), so nothing has to be
+published; `cd rs && cargo test --all-targets && cargo test --doc` runs
+the unit tests, the shared fixtures (`tests/parity_test.rs`), the CSmith
+gate (`tests/csmith_test.rs`), the path-dispatch catalogue and the README's
+examples. `ci/rust/run.sh` is the full gate, clippy and the lockfile check
+included. See [`rs/AGENTS.md`](rs/AGENTS.md).
+
 ## Verify your work
 
 The commands that prove a change is correct. Run them from the repo root
 unless stated:
 
 ```bash
-make build && make test      # both runtimes — the check that matters
+make build && make test      # all three runtimes — the check that matters
 ```
 
 Narrower, when iterating:
@@ -152,6 +162,7 @@ Narrower, when iterating:
 ```bash
 (cd ts && npm test)                    # `pretest` builds first
 (cd go && go test ./...)               # unit tests + shared spec fixtures + the CSmith gate
+bash ci/rust/run.sh                    # the Rust gate: fmt, build, tests, doctests, clippy, lockfile
 ```
 
 Each line is a subshell. `npm test` compiles first — its `pretest`
@@ -169,21 +180,32 @@ around it; the wiring is fixed instead, and
 
 What "correct" means here, in order of authority:
 
-1. **The shared fixtures pass in BOTH runtimes, and the CSmith gate stays
-   100/100.** `test/spec/*.tsv` is the parity contract (run by
-   `ts/test/parity.test.ts` and `go/parity_test.go`), and
-   `ts/test/csmith.test.ts` / `TestCsmithCorpus` byte-compare every seed's
-   CST against the committed golden fixtures. A row or seed green in one
-   runtime and red in the other is a failure, not a discrepancy.
-2. **The three version constants agree** — `ts/package.json` `"version"`,
-   `VERSION` in `ts/src/c.ts`, and `const VERSION` in `go/c.go`.
-   `ts/test/version.test.ts` and `go/version_test.go` fail the build if they
-   drift, so a version bump is three edits, not one.
+1. **The shared fixtures pass in ALL THREE runtimes, and the CSmith gate
+   stays 100/100.** `test/spec/*.tsv` is the parity contract (run by
+   `ts/test/parity.test.ts`, `go/parity_test.go` and
+   `rs/tests/parity_test.rs`), and `ts/test/csmith.test.ts` /
+   `TestCsmithCorpus` / `rs/tests/csmith_test.rs` compare every seed's
+   CST against the committed golden fixtures. The Rust grader accepts the
+   37 seeds named in its `KNOWN_DIVERGENT` list when they differ ONLY by
+   the divergence `DIVERGENCE.md` section 3 records, and fails when that
+   set changes in either direction. A row or seed green in one runtime
+   and red in another is a failure, not a discrepancy.
+2. **The five version sites agree** — `ts/package.json` `"version"`,
+   `VERSION` in `ts/src/c.ts`, `const VERSION` in `go/c.go`, `version` in
+   `rs/Cargo.toml` and `pub const VERSION` in `rs/src/lib.rs`.
+   `ts/test/version.test.ts`, `go/version_test.go` and
+   `rs/tests/version_test.rs` fail the build if they drift, and
+   `ci/rust/run.sh` fails if the `tabnas-c` entry in `rs/Cargo.lock` lags
+   the manifest, so a version bump is five edits plus one cargo run
+   (`cd rs && cargo update --workspace`), not one edit.
 3. **The embedded grammar matches its source.** If you changed
    `ts/c-grammar.jsonic`, run `npm run embed` from `ts/` (or `npm run build`,
    which embeds first) — never hand-edit between the `BEGIN/END EMBEDDED`
    markers. The embed step also copies the grammar to `go/c-grammar.jsonic`
-   for `//go:embed`, so both runtimes pick the change up together.
+   for `//go:embed` and to `rs/c-grammar.jsonic` for `include_str!`, so all
+   three runtimes pick the change up together;
+   `the_embedded_grammar_matches_the_source` in `rs/tests/c_test.rs` fails
+   if the Rust copy lags its source.
 
 ## Releasing
 
@@ -208,9 +230,13 @@ accepts the publish. Pushing a tag by hand is the orchestrator's path
 
 The steps, in order:
 
-1. Bump all **three** version sites together — `ts/package.json`, `VERSION`
-   in `ts/src/c.ts` and `const VERSION` in `go/c.go`. Drift is caught by
-   `ts/test/version.test.ts` and `go/version_test.go`.
+1. Bump all **five** version sites together — `ts/package.json`, `VERSION`
+   in `ts/src/c.ts`, `const VERSION` in `go/c.go`, `version` in
+   `rs/Cargo.toml` and `VERSION` in `rs/src/lib.rs` — then run
+   `cd rs && cargo update --workspace` so `rs/Cargo.lock` records the new
+   crate version. Drift is caught by `ts/test/version.test.ts`,
+   `go/version_test.go`, `rs/tests/version_test.rs` and the lockfile check
+   in `ci/rust/run.sh`.
 2. Verify against the **published** dependencies rather than your checkout.
    The release runner installs fresh from the registry; a working tree
    usually does not, so reproduce that before believing anything:
@@ -393,16 +419,18 @@ known dependency: a fresh breakage hides inside the expected failure.
 
 ## Error codes
 
-This package declares **no error codes of its own** — neither runtime extends
+This package declares **no error codes of its own** — no runtime extends
 `options.error`/`options.hint` (there is no error catalogue in `ts/src/c.ts`,
-`ts/c-grammar.jsonic`, or the Go port). A document that fails to parse
-surfaces one of the base codes inherited from the engine and
+`ts/c-grammar.jsonic`, the Go port or the Rust crate). A document that fails
+to parse surfaces one of the base codes inherited from the engine and
 `@tabnas/jsonic`.
 
-Nothing pins a code today: the shared `test/spec/*.tsv` fixtures contain no
-error rows at all — every row asserts a successful parse. If you add
-rejection behaviour, pin it with an `ERROR:<code>` fixture row so both
-runtimes agree on the code, not merely on failing.
+No fixture pins a code today: the shared `test/spec/*.tsv` fixtures contain
+no error rows at all — every row asserts a successful parse. The one code a
+test does pin is the engine's own `cancel`, which the Rust port reports when
+its realize cap is hit (`test/divergent.tsv`, `rs/tests/limits_test.rs`). If
+you add rejection behaviour, pin it with an `ERROR:<code>` fixture row so
+all three runtimes agree on the code, not merely on failing.
 
 ## Untrusted input
 
@@ -431,9 +459,15 @@ to instead:
 
 1. **CSmith corpus, 100/100.** `ts/test/csmith-corpus/seed-*.c` are 100
    random C programs; `ts/test/csmith-fixtures/seed-*.json.gz` are the
-   golden CSTs. Both runtimes replay every seed and byte-compare. Zero
-   `declKind: 'unknown'` declarations is asserted separately.
-2. **Shared `test/spec/*.tsv` fixtures** run identically in both runtimes.
+   golden CSTs. All three runtimes replay every seed and compare; the
+   Rust grader's accepted exceptions are the seeds named in its
+   `KNOWN_DIVERGENT` list, recorded in `DIVERGENCE.md`. Zero
+   `declKind: 'unknown'` declarations is asserted separately in
+   TypeScript (`ts/test/csmith.test.ts`) and in Rust
+   (`rs/tests/csmith_test.rs`); the Go corpus test has no such
+   assertion and relies on the fixture comparison alone.
+2. **Shared `test/spec/*.tsv` fixtures** run identically in all three
+   runtimes.
 3. **The documented subset in README.md is what the code does.** The
    `extended` option gates GCC/Clang/MSVC syntax and the legacy fallback;
    plain C23 (including the whole preprocessor) is the default mode. Keep
