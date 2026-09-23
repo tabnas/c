@@ -185,8 +185,8 @@ var unsupportedBodyTokens = map[string]bool{
 }
 
 // fetchDeep returns the lexed token at lookahead index idx, lexing forward and
-// pushing onto ctx.T as needed. Port of fetchDeep in c.ts. The Go lexer's
-// Next() already skips IGNORE tokens internally.
+// pushing onto ctx.T as needed, skipping IGNORE tokens. Port of fetchDeep in
+// c.ts.
 func fetchDeep(ctx *tabnas.Context, idx int) *tabnas.Token {
 	if idx >= fetchDeepCap {
 		return nil
@@ -200,8 +200,17 @@ func fetchDeep(ctx *tabnas.Context, idx int) *tabnas.Token {
 	if ctx.Lex == nil {
 		return nil
 	}
+	// Lex.Next returns the raw token stream, IGNORE tokens included
+	// (tabnas/parser#152, matching TypeScript's lex.next), so skip them
+	// here as the TypeScript fetchDeep does.
+	ignored := func(t *tabnas.Token) bool {
+		return t != nil && ctx.Lex.Config != nil && ctx.Lex.Config.IgnoreSet[t.Tin]
+	}
 	for len(ctx.T) <= idx {
 		tkn := ctx.Lex.Next(ctx.Rule)
+		for ignored(tkn) {
+			tkn = ctx.Lex.Next(ctx.Rule)
+		}
 		if tkn == nil {
 			return nil
 		}
