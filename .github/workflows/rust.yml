@@ -1,6 +1,3 @@
-# PROPOSED workflow -- lives in ci/workflows/ for review; move to
-# .github/workflows/rust.yml to activate, per admin DECISIONS.md ADR-8.
-#
 # The Rust gate. Standalone rather than an arm of ci.yml, because ci.yml
 # calls the org-shared polyglot workflow and that takes no Rust input:
 # promoting this file needs no change in tabnas/.github.
@@ -30,6 +27,7 @@ on:
       - 'ts/package.json'
       - 'ts/test/csmith-corpus/**'
       - 'ts/test/csmith-fixtures/**'
+      - 'ts/test/spec/**'
       - 'go/c.go'
       - 'test/spec/**'
       - 'test/divergent.tsv'
@@ -44,6 +42,7 @@ on:
       - 'ts/package.json'
       - 'ts/test/csmith-corpus/**'
       - 'ts/test/csmith-fixtures/**'
+      - 'ts/test/spec/**'
       - 'go/c.go'
       - 'test/spec/**'
       - 'test/divergent.tsv'
