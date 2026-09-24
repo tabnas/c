@@ -1,6 +1,6 @@
 {
   "name": "@tabnas/c",
-  "version": "0.5.7",
+  "version": "0.5.8",
   "description": "This plugin allows the [Tabnas](https://github.com/tabnas/parser) parser to parse C source into a concrete syntax tree, preserving macros and compiler extensions.",
   "main": "dist/c.js",
   "type": "commonjs",
@@ -27,7 +27,7 @@
     "test-some": "node --enable-source-maps --test-name-pattern=\"$npm_config_pattern\" --test \"dist-test/*.test.js\"",
     "embed": "node embed-grammar.js",
     "watch": "tsc --build src test -w",
-    "build": "node embed-grammar.js && tsc --build src test",
+    "build": "node embed-grammar.js && tsc --build src && tsc --build test",
     "clean": "rm -rf dist dist-test node_modules yarn.lock package-lock.json",
     "reset": "npm run clean && npm i && npm run build && npm test",
     "repo-tag": "REPO_VERSION=`node -e \"console.log(require('./package').version)\"` && echo TAG: ts/v$REPO_VERSION && git commit -a -m v$REPO_VERSION && git push && git tag ts/v$REPO_VERSION && git push origin ts/v$REPO_VERSION;",
@@ -52,8 +52,8 @@
     "@tabnas/jsonic": "*",
     "@tabnas/parser": "*",
     "@tabnas/support": "*",
-    "@types/node": "25.6.0",
-    "typescript": "6.0.3"
+    "@types/node": "26.6.2",
+    "typescript": "7.0.2"
   },
   "peerDependencies": {
     "@tabnas/expr": ">=0",

@@ -14,7 +14,7 @@ use tabnas_c::{CMeta, COptions};
 
 #[test]
 fn version_and_name_are_what_the_package_says() {
-    assert_eq!(tabnas_c::VERSION, "0.5.7");
+    assert_eq!(tabnas_c::VERSION, "0.5.8");
     assert_eq!(tabnas_c::PLUGIN_NAME, "C");
 }
 

@@ -9,7 +9,7 @@
 // golden fixtures are committed. To regenerate after a deliberate
 // parser change:
 //
-//   npx tsc --build src test
+//   npx tsc --build src && npx tsc --build test
 //   node dist-test/csmith-gen.js fixtures
 //
 // To rebuild the corpus from scratch (only when csmith is installed):
