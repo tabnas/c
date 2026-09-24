@@ -100,11 +100,13 @@ tutorial, used in a guide, specified in the reference, argued in the
 explanation) but the normative statement lives in the reference and
 everything else links to it.
 
-**The two runtimes carry the same set.** A page present under `ts/doc/`
-and missing under `go/doc/` is a gap, and `gated-docs.cjs` filters to
-what is on disk so the gap shows up as a missing gate rather than a
-crash. A page only one port has is a deliberate exception and says so in
-its own opening lines.
+**No runtime here has a doc set of its own.** There is no `ts/doc/`,
+`go/doc/` or `rs/doc/`. The TypeScript and Rust packages document
+themselves in `ts/README.md` and `rs/README.md`, which are gated with the
+root README, and the Go port has no README: the root README's "Go port"
+section documents it. `gated-docs.cjs` throws on a declared page that is
+not on disk, so a gated page that is deleted or renamed fails the gate
+rather than dropping out of it.
 
 ## The published set cites nothing internal
 
@@ -136,8 +138,9 @@ The rule runs one way. Internal documents cite each other and cite the
 documentation freely. Only the direction out of the published set is
 closed. The **root `README.md`** is exempt, because it is the
 repository's front page and its job includes pointing at `AGENTS.md`.
-`ts/README.md` and `go/README.md` are not exempt: npm and pkg.go.dev
-render them to somebody who has the package and not the repository.
+`ts/README.md` and `rs/README.md` are not exempt: each ships in its
+package, so it reaches somebody who has the package and not the
+repository.
 
 ## The voice
 
@@ -163,9 +166,9 @@ phrases. Ten habits, with the register they apply in:
 7. **Talk to the reader as "you", and route them** ("If you already know
    ABNF, skip to the reference"). "We" appears only in tutorials, walking
    through code together. "I" appears nowhere.
-8. **Show that the code is real.** Every fenced example carrying a `// =>`
-   assertion is executed by `ts/test/doc-examples.test.js`; when a page
-   says the output is the engine's, that is what it means.
+8. **Show that the code is real.** rustdoc runs the `rust` fences in
+   `rs/README.md` as doctests; when a page says the output is the
+   engine's, that is what it means.
 9. **Jokes are self-directed or about the industry's mundanity, and the
    register goes fully serious the moment correctness or safety is on the
    table.** Never joke about the reader, other tools, or an error's
@@ -311,8 +314,9 @@ that names a thing.
 ## Code snippets
 
 A fenced JavaScript or Go example that states a result carries that
-result as a `// =>` comment, and `ts/test/doc-examples.test.js` executes
-it. A snippet that cannot be executed says why in one sentence rather
+result as a `// =>` comment. No harness here executes a JavaScript or Go
+fence; rustdoc runs the `rust` fences in `rs/README.md` as doctests. A
+snippet that cannot be executed says why in one sentence rather
 than being left to look executable.
 
 ## Terminology
