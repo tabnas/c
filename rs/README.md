@@ -2,7 +2,7 @@
 
 A C23 grammar plugin for the
 [`tabnas`](https://github.com/tabnas/parser) parsing engine, crate
-`tabnas_c`. It parses C source, plus the common GCC, Clang and MSVC
+`tabnas_c`. It parses C source, plus the common GCC, Clang, and MSVC
 extensions, into a CONCRETE syntax tree.
 
 Concrete means the tree keeps what it parsed. Every token carries its
@@ -24,7 +24,7 @@ This is the Rust port of the canonical TypeScript implementation,
 version is authoritative and this crate tracks it. The Go port,
 [`github.com/tabnas/c/go`](https://pkg.go.dev/github.com/tabnas/c/go),
 has the same shape. All three run the same shared fixtures, and the
-same 100-program CSmith corpus.
+same 100-program Csmith corpus.
 
 ## Use
 
@@ -60,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 A parser is `Send + Sync` and parses through `&self`, so one instance
 serves every thread.
 
-## Tokens, spans and trivia
+## Tokens, spans, and trivia
 
 A token node carries `tname` (the token identity), `src` (its text) and
 `span` (`start`, `end`, `line`, `col`). A comment is a token like any
@@ -85,7 +85,7 @@ canonical TypeScript counts UTF-16 code units and Go counts bytes, so
 the three agree on every ASCII input, this port and the canonical agree
 on anything inside the Basic Multilingual Plane, and all three drift
 apart past it: after a block comment holding one astral character, the
-`int` of `int x;` starts at 8 here, at 9 in the canonical and at 11 in
+`int` of `int x;` starts at 8 here, at 9 in the canonical, and at 11 in
 Go. The shared fixtures are ASCII for that reason.
 
 ## Extensions
@@ -160,7 +160,7 @@ instance a second copy of every alternate.
 ## What the tree keeps
 
 The tree keeps every token verbatim, at a span that names exactly the
-text the token carries, in source order and without overlaps. The
+text the token carries, in source order, and without overlaps. The
 crate's round-trip test, `tokens_are_verbatim_and_ordered` in
 `tests/roundtrip_test.rs`, reassembles every fixture input from its
 tree and holds the port to that.
@@ -208,7 +208,7 @@ spends a little under a kilobyte of stack per level, so a thread with
 the 1 MiB stack a small runtime hands out gives out somewhere past 300.
 The cap sits below that. How much room ordinary source leaves under it
 is a second measurement, taken 2026-09-22: the deepest of the shared
-fixtures realizes at 17, and the deepest of the 100 CSmith programs at
+fixtures realizes at 17, and the deepest of the 100 Csmith programs at
 146, which is over half the cap. Every one of those programs still
 returns a tree, and the corpus test would report `cancel` for any that
 stopped short.
@@ -226,7 +226,7 @@ stopped short.
 
 ## Install
 
-The engine, the jsonic base grammar, the expr operator plugin and the
+The engine, the jsonic base grammar, the expr operator plugin, and the
 fixture runner are unpublished, so each is a path dependency on a
 sibling checkout:
 
@@ -259,7 +259,7 @@ recorded, with the measurement behind it, in the repository's
   operator array `tabnas-expr` handed it. This port drops the array, so
   the item comes back with no children and the tokens of that expression
   are not in the tree. Every shared fixture passes either way; 37 of the
-  100 CSmith programs carry at least one such item, and the corpus test
+  100 Csmith programs carry at least one such item, and the corpus test
   names them.
 
 ## Build and test

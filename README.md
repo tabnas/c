@@ -318,7 +318,7 @@ for_controls
 
 ## Coverage and known limitations
 
-The parser handles every shape in the CSmith-generated regression
+The parser handles every shape in the Csmith-generated regression
 corpus (100 random C programs) plus a hand-curated stress sweep
 (GCC `__attribute__`, C23 `nullptr` / `[[nodiscard]]` / `_BitInt`,
 nested preprocessor `#if` chains, line-continuation in macro
@@ -470,7 +470,7 @@ assert_eq!(value.to_json()["kind"], "translation_unit");
 ```
 
 **Parity:** every shared `test/spec` fixture passes, and the Rust corpus
-test replays all 100 CSmith seeds: 63 match their golden fixture
+test replays all 100 Csmith seeds: 63 match their golden fixture
 exactly, and the other 37 differ in one recorded way, a prefix operator
 standing alone as a brace-initializer item, which the canonical leaves
 as a raw operator array and this port drops. That difference and the
