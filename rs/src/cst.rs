@@ -394,7 +394,7 @@ pub fn push_token_with_trivia(node: usize, token: usize) {
 /// The cap sits below the smallest of those with room to spare, so the
 /// bound holds wherever the parse runs rather than only on the main
 /// thread. It is still far past any C anyone writes: no fixture in
-/// `test/spec` and no program in the 100-program CSmith corpus reaches
+/// `test/spec` and no program in the 100-program Csmith corpus reaches
 /// a tenth of it.
 pub const REALIZE_DEPTH_CAP: usize = 256;
 
@@ -413,7 +413,7 @@ thread_local! {
     // callers both views of the same object. JavaScript shares the
     // reference, so building the value costs nothing extra there. A
     // straight port re-walks the node once per path, which is
-    // EXPONENTIAL in expression depth: a CSmith translation unit, whose
+    // EXPONENTIAL in expression depth: a Csmith translation unit, whose
     // expressions nest dozens deep, never finished. Realizing each node
     // once and handing out the same value restores the sharing, and an
     // engine container is behind an `Arc`, so the copy is a refcount.

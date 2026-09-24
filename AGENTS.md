@@ -42,7 +42,7 @@ sweep, an install or a fetch, a release, a wait on CI, a benchmark, a
 script or loop you write, and anything sent to the background.
 
 - **Minimal is enough.** One line with the step and a count, such as
-  `conformance: 412/1500 (27%)`, meets it. When no total is known, print
+  `conformance: 412 of 1500 (27%)`, meets it. When no total is known, print
   what is known (the step, the current item, the elapsed time) and say the
   percentage is unknown rather than inventing one.
 - **Build it into what you write.** A script or loop prints a line per
@@ -83,8 +83,8 @@ const cst = new Tabnas().use(jsonic).use(C).parse('typedef int T; T x = 1;')
 | Path | What it is |
 |---|---|
 | [`ts/`](ts/) | **Canonical** implementation — the `@tabnas/c` package. |
-| [`go/`](go/) | **Go port — COMPLETE & at parity.** Full hand-translation of the TypeScript: lexer (`tokens.go`/`symbols.go`/`matchers.go`), CST helpers (`cst.go`), `@tabnas/expr` wiring + C-atom expressions (`expr_grammar.go`), grammar parse/install + ref map (`grammar_install.go`/`refs.go`), `#if`-folding (`conditional_groups.go`), top-level chomp + preprocessor directives (`refs.go`), the new-path structured dispatch (`refs_newpath*.go`: declarations/declarators/specifiers, struct/union/enum, initializers, statements), the legacy structurer + hand-rolled Pratt expression parser (`structure.go`/`expr.go`), and the CSmith parity test (`csmith_test.go`). `tabnasc.Parse`/`MakeC`/`ParseMeta` produce structured CSTs. **`go test` is green and `TestCsmithCorpus` passes 100/100** against the TypeScript golden fixtures. The upstream `@jsonic/c` is TypeScript-only, so this is a from-scratch hand-translation. |
-| [`rs/`](rs/) | **Rust port** — crate `tabnas-c` (lib `tabnas_c`), a hand-translation of the TypeScript onto the Rust `tabnas` engine over `tabnas-jsonic` and `tabnas-expr`, all taken as path dependencies on sibling checkouts. `cargo test` runs the shared `test/spec/*.tsv` fixtures (`tests/parity_test.rs`), the CSmith corpus (`tests/csmith_test.rs`) and the path-dispatch catalogue (`tests/path_dispatch_test.rs`); the inputs where it answers differently from the canonical are recorded in [`DIVERGENCE.md`](DIVERGENCE.md) and pinned by `test/divergent.tsv` and named tests. See [`rs/AGENTS.md`](rs/AGENTS.md). |
+| [`go/`](go/) | **Go port — COMPLETE & at parity.** Full hand-translation of the TypeScript: lexer (`tokens.go`/`symbols.go`/`matchers.go`), CST helpers (`cst.go`), `@tabnas/expr` wiring + C-atom expressions (`expr_grammar.go`), grammar parse/install + ref map (`grammar_install.go`/`refs.go`), `#if`-folding (`conditional_groups.go`), top-level chomp + preprocessor directives (`refs.go`), the new-path structured dispatch (`refs_newpath*.go`: declarations/declarators/specifiers, struct/union/enum, initializers, statements), the legacy structurer + hand-rolled Pratt expression parser (`structure.go`/`expr.go`), and the Csmith parity test (`csmith_test.go`). `tabnasc.Parse`/`MakeC`/`ParseMeta` produce structured CSTs. **`go test` is green and `TestCsmithCorpus` passes 100/100** against the TypeScript golden fixtures. The upstream `@jsonic/c` is TypeScript-only, so this is a from-scratch hand-translation. |
+| [`rs/`](rs/) | **Rust port** — crate `tabnas-c` (lib `tabnas_c`), a hand-translation of the TypeScript onto the Rust `tabnas` engine over `tabnas-jsonic` and `tabnas-expr`, all taken as path dependencies on sibling checkouts. `cargo test` runs the shared `test/spec/*.tsv` fixtures (`tests/parity_test.rs`), the Csmith corpus (`tests/csmith_test.rs`) and the path-dispatch catalogue (`tests/path_dispatch_test.rs`); the inputs where it answers differently from the canonical are recorded in [`DIVERGENCE.md`](DIVERGENCE.md) and pinned by `test/divergent.tsv` and named tests. See [`rs/AGENTS.md`](rs/AGENTS.md). |
 | [`ts/c-grammar.jsonic`](ts/c-grammar.jsonic) | **Single source of truth** for the declarative grammar (rule shapes for the whole C surface), authored in jsonic-DSL syntax. |
 | [`ts/embed-grammar.js`](ts/embed-grammar.js) | Embeds `c-grammar.jsonic` into `src/c.ts` (between `BEGIN/END EMBEDDED` markers) as the `grammarText` string literal, **and** copies it verbatim to `go/c-grammar.jsonic` for `//go:embed`. The grammar contains backticks, so the Go side embeds from the file rather than inlining a raw string (unlike the smaller ports). Runs as the first half of `npm run build`. |
 | [`ts/src/c.ts`](ts/src/c.ts) | Plugin entry: token catalog wiring, lex matchers, grammar install, and the `@`-named ref map (conditions/actions bound by name from the grammar). |
@@ -94,7 +94,7 @@ const cst = new Tabnas().use(jsonic).use(C).parse('typedef int T; T x = 1;')
 | [`ts/src/expr.ts`](ts/src/expr.ts), [`ts/src/expr-grammar.ts`](ts/src/expr-grammar.ts) | C operator table + `evaluateCExpr` (converts `@tabnas/expr` S-expressions into the per-kind expression CST shapes); `installExpr` wires `@tabnas/expr` and the C val-atom alts. |
 | [`ts/src/structure.ts`](ts/src/structure.ts) | Recursive-descent post-processor for the legacy-fallback long-tail shapes (K&R params, complex compound declarators). |
 | [`ts/src/conditional-groups.ts`](ts/src/conditional-groups.ts) | Translation-unit post-pass that folds `#if`/`#elif`/`#else`/`#endif` runs into `conditional_group` nodes. |
-| [`ts/test/`](ts/test/) | TS tests (compiled to `dist-test/`): `c.test.ts` (parse cases), `csmith.test.ts` (replays the 100-program CSmith regression corpus against committed gzipped fixtures), `parity.test.ts` (runs the shared `test/spec/*.tsv` fixtures). |
+| [`ts/test/`](ts/test/) | TS tests (compiled to `dist-test/`): `c.test.ts` (parse cases), `csmith.test.ts` (replays the 100-program Csmith regression corpus against committed gzipped fixtures), `parity.test.ts` (runs the shared `test/spec/*.tsv` fixtures). |
 | [`test/spec/`](test/spec/) | **Shared cross-runtime fixtures** (`*.tsv`), auto-discovered and run by all three runners: `ts/test/parity.test.ts`, `go/parity_test.go` and `rs/tests/parity_test.rs`. See [`test/AGENTS.md`](test/AGENTS.md). Prefer a fixture here over a one-off in-language assertion. |
 
 ## The tabnas engine dependency
@@ -128,13 +128,13 @@ operator table as a Go map, so the standalone bare-expression precedence test
 (`TestExprBinaryPrecedence`, start=`val`) used to be **non-deterministic**
 unless the op names were sorted. That fix now ships upstream —
 `expr/go/expr.go` calls `sort.Strings(opNames)` before building the ops — so
-nothing is needed here. NOTE: the **CSmith corpus parity is 100/100 and
+nothing is needed here. NOTE: the **Csmith corpus parity is 100/100 and
 deterministic with or without that sort fix** (the C-side call/paren handling
 makes full-program parsing robust); the sort fix only affects the synthetic
 start=`val` precedence unit test. The `call`/`paren` ambiguity is resolved
 entirely C-side (no `@tabnas/expr` change required).
 
-## Go port: CSmith parity — DONE (100/100)
+## Go port: Csmith parity — DONE (100/100)
 
 `go test`'s `TestCsmithCorpus` is a **hard gate** and passes 100/100: every
 seed's serialized CST matches the TypeScript golden fixture. The grammar
@@ -202,14 +202,14 @@ wraps both halves: `make build` = `build-ts` + `build-go`, `make test` =
 The Go half builds against the published modules `go/go.mod` requires;
 a `go.work` over sibling checkouts (kept outside the repo) is only for
 testing unreleased ones. `cd go && go test ./...` runs the unit tests, the
-shared `test/spec/*.tsv` fixtures (`TestSpec`) and the CSmith parity gate
+shared `test/spec/*.tsv` fixtures (`TestSpec`) and the Csmith parity gate
 (`TestCsmithCorpus`).
 
 The Rust half takes the engine, `jsonic` and `expr` as path dependencies
 on sibling checkouts, with `support` as a path dev-dependency and `json`
 arriving through `jsonic` (`rs/Cargo.toml`), so nothing has to be
 published; `cd rs && cargo test --all-targets && cargo test --doc` runs
-the unit tests, the shared fixtures (`tests/parity_test.rs`), the CSmith
+the unit tests, the shared fixtures (`tests/parity_test.rs`), the Csmith
 gate (`tests/csmith_test.rs`), the path-dispatch catalogue and the README's
 examples. `ci/rust/run.sh` is the full gate, clippy and the lockfile check
 included. See [`rs/AGENTS.md`](rs/AGENTS.md).
@@ -227,7 +227,7 @@ Narrower, when iterating:
 
 ```bash
 (cd ts && npm test)                    # `pretest` builds first
-(cd go && go test ./...)               # unit tests + shared spec fixtures + the CSmith gate
+(cd go && go test ./...)               # unit tests + shared spec fixtures + the Csmith gate
 bash ci/rust/run.sh                    # the Rust gate: fmt, build, tests, doctests, clippy, lockfile
 ```
 
@@ -246,7 +246,7 @@ around it; the wiring is fixed instead, and
 
 What "correct" means here, in order of authority:
 
-1. **The shared fixtures pass in ALL THREE runtimes, and the CSmith gate
+1. **The shared fixtures pass in ALL THREE runtimes, and the Csmith gate
    stays 100/100.** `test/spec/*.tsv` is the parity contract (run by
    `ts/test/parity.test.ts`, `go/parity_test.go` and
    `rs/tests/parity_test.rs`), and `ts/test/csmith.test.ts` /
@@ -529,7 +529,7 @@ There is no external C conformance suite for a CST parser (the ISO suites
 test compiled behaviour, not parse shape). The bar this repo holds itself
 to instead:
 
-1. **CSmith corpus, 100/100.** `ts/test/csmith-corpus/seed-*.c` are 100
+1. **Csmith corpus, 100/100.** `ts/test/csmith-corpus/seed-*.c` are 100
    random C programs; `ts/test/csmith-fixtures/seed-*.json.gz` are the
    golden CSTs. All three runtimes replay every seed and compare; the
    Rust grader's accepted exceptions are the seeds named in its
@@ -553,7 +553,7 @@ to instead:
    ---` markers in `src/c.ts` — edit `c-grammar.jsonic` and re-run
    `npm run embed` (or `npm run build`, which embeds first).
 2. **Both parse paths must agree.** The grammar path and the legacy
-   `structure.ts` fallback must emit identical CST shapes; the CSmith
+   `structure.ts` fallback must emit identical CST shapes; the Csmith
    corpus + fixtures (`ts/test/csmith-*`) are the parity contract.
 
 ## Agent tooling

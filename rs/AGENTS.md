@@ -86,7 +86,7 @@ grammar path where the canonical routes them through the legacy one.
 |---|---|
 | `tests/parity_test.rs` | the shared `test/spec/*.tsv` fixtures, through `tabnas-support` |
 | `tests/roundtrip_test.rs` | the concreteness contract: tokens verbatim, in order, at the spans they claim |
-| `tests/csmith_test.rs` | the 100-program CSmith corpus against the golden fixtures under `ts/test`; `KNOWN_DIVERGENT` names the seeds that differ only by DIVERGENCE.md section 3 |
+| `tests/csmith_test.rs` | the 100-program Csmith corpus against the golden fixtures under `ts/test`; `KNOWN_DIVERGENT` names the seeds that differ only by DIVERGENCE.md section 3 |
 | `tests/path_dispatch_test.rs` | the path-dispatch catalogue `ts/test/spec/path-dispatch.tsv`: which of the two declaration paths each shape takes, read from where the canonical reads it |
 | `tests/c_test.rs` | behaviour that a fixture row cannot express: the plugin API, the options, the symbol table |
 | `tests/limits_test.rs` | untrusted input: deep nesting, long input, unterminated constructs, odd Unicode |

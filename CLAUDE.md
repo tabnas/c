@@ -1,6 +1,6 @@
 See [AGENTS.md](AGENTS.md) for the full guide to working in this
 repository: layout, the TypeScript-canonical / Go-port contract and the
-CSmith parity gate, the embedded-grammar workflow, build and test
+Csmith parity gate, the embedded-grammar workflow, build and test
 commands, the conformance bar, and how to treat untrusted input.
 
 ## Core principle: dependencies change only on explicit instruction
@@ -45,7 +45,7 @@ sweep, an install or a fetch, a release, a wait on CI, a benchmark, a
 script or loop you write, and anything sent to the background.
 
 - **Minimal is enough.** One line with the step and a count, such as
-  `conformance: 412/1500 (27%)`, meets it. When no total is known, print
+  `conformance: 412 of 1500 (27%)`, meets it. When no total is known, print
   what is known (the step, the current item, the elapsed time) and say the
   percentage is unknown rather than inventing one.
 - **Build it into what you write.** A script or loop prints a line per
