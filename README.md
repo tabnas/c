@@ -123,7 +123,7 @@ work in both modes.
 - **Pratt-style expressions** via [`@tabnas/expr`](https://github.com/tabnas/expr):
   the `val` rule absorbs C atoms (`LIT_INT` / `LIT_FLOAT` / `LIT_CHAR`
   / `LIT_STRING` / `ID` / `MACRO_NAME` / `TYPEDEF_NAME` / `KW_NULLPTR`
-  / `KW_TRUE` / `KW_FALSE`), then `@tabnas/expr`'s pratt logic
+  / `KW_TRUE` / `KW_FALSE`), then `@tabnas/expr`'s Pratt logic
   drives infix / prefix / suffix operator precedence. Custom val
   open-alts handle the C-only constructs that aren't simple
   operators: `sizeof ( type )` / cast / compound literal / `_Generic`
@@ -158,7 +158,7 @@ work in both modes.
   `viaPath: 'legacy'` on the `external_declaration`, so you can tell
   which path produced a node):
   - K&R parameter lists (`int f(a, b) int a; long b; { … }`).
-    Rare in modern code; csmith never generates them. These are the
+    Rare in modern code; Csmith never generates them. These are the
     one case that also gets `declKind: 'unknown'`
     (`viaPath: 'legacy-unknown'`).
   - pointer-to-function-pointer declarators, for example
@@ -213,7 +213,7 @@ translation_unit
 
 ### Expression shapes (Pratt-parsed via @tabnas/expr)
 
-Operator precedence is driven by `@tabnas/expr`'s pratt machinery.
+Operator precedence is driven by `@tabnas/expr`'s Pratt machinery.
 The full C operator catalog (11 binary precedence levels, prefix /
 suffix unary, ternary, assignment, comma, member access, and the
 sizeof / _Alignof prefix forms) is registered as a single
@@ -396,7 +396,7 @@ hybrid:
 - **D** cutover gates: deep-lookahead body validation
   (`fetchDeep()` drives `ctx.lex` directly so the body-supportedness
   check walks past the closing `}` of any function body), all
-  unit tests passing on the new path, csmith fixtures regenerated.
+  unit tests passing on the new path, Csmith fixtures regenerated.
   See `ts/package.json` for the current version.
 - **F** struct / union / enum specifiers + members + bitfields +
   enumerators, dispatched from `simple_declaration` / `spec_loop`.
