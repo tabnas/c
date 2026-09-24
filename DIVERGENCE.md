@@ -114,7 +114,7 @@ spare, so the bound holds wherever the parse runs rather than only on
 the main thread.
 
 **How much room real source leaves, measured 2026-09-22.** The deepest
-row in `test/spec` realizes at 17. The deepest of the 100 CSmith
+row in `test/spec` realizes at 17. The deepest of the 100 Csmith
 programs realizes at 146, which is over half the cap, so the headroom
 on generated C is real but not large. Every seed still returns a tree:
 a walk that stopped short reports `cancel`, and the corpus test would
@@ -149,7 +149,7 @@ the item comes back with no children at all, and the tokens of that
 expression are absent from the tree.
 
 **How far it reaches.** It is invisible to the shared fixtures: every
-row of `test/spec` passes. It shows up in the CSmith corpus: 37 of the
+row of `test/spec` passes. It shows up in the Csmith corpus: 37 of the
 100 seeds carry at least one such item, and `KNOWN_DIVERGENT` in
 `rs/tests/csmith_test.rs` names them. Measured 2026-09-22 over the 100
 golden fixtures: those 37 carry between 1 and 222 of them each, and one

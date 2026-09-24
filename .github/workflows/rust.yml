@@ -103,7 +103,7 @@ jobs:
       # Everything lives in the script so this file and a contributor's
       # local run cannot say different things.
       #
-      # The CSmith corpus grader reads ts/test/csmith-corpus and
+      # The Csmith corpus grader reads ts/test/csmith-corpus and
       # ts/test/csmith-fixtures, about 20 MB committed to this
       # repository, and FAILS rather than skips when they are missing, so
       # no extra fetch step is needed and a shallow checkout is enough.

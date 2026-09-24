@@ -2,7 +2,7 @@
 #
 # ts/ is the canonical implementation. go/ is a COMPLETE hand-translation at
 # parity with it: `go test` runs the same shared test/spec/*.tsv fixtures and
-# the 100-program CSmith corpus against the TypeScript golden fixtures.
+# the 100-program Csmith corpus against the TypeScript golden fixtures.
 # rs/ is the Rust port, which runs the same shared fixtures.
 #
 # Local builds resolve the unpublished @tabnas siblings via the file:

@@ -1,9 +1,9 @@
 // Copyright (c) 2026 Richard Rodger and contributors, MIT License
 //
-// The CSmith corpus grader, the widest conformance measurement this
+// The Csmith corpus grader, the widest conformance measurement this
 // repository has.
 //
-// `ts/test/csmith-corpus` holds 100 CSmith-generated translation units,
+// `ts/test/csmith-corpus` holds 100 Csmith-generated translation units,
 // about 12 MB of GCC-flavoured C, and `ts/test/csmith-fixtures` holds
 // the gzipped JSON the canonical parser produced for each. The corpus
 // and the golden files are single-sourced there and read from here, as
@@ -88,7 +88,7 @@ const SCALAR_KEYS: &[&str] = &[
     "branchKind",
 ];
 
-/// Comments and line continuations are dropped from a fixture: CSmith
+/// Comments and line continuations are dropped from a fixture: Csmith
 /// puts a kilobyte of block comment in every file and none of it is
 /// structural. Mirrors `TRIVIA_TOKENS` in `ts/test/csmith-fixture.ts`.
 fn is_trivia(tname: &str) -> bool {
@@ -107,7 +107,7 @@ fn is_trivia(tname: &str) -> bool {
 /// in its parent's `children` and again under the parent's `left`,
 /// `right`, `cond`, `then` or `else`. `Value::to_json` expands every
 /// path, as `JSON.stringify` does in the canonical, so rendering a
-/// CSmith translation unit whose expressions nest dozens deep needs
+/// Csmith translation unit whose expressions nest dozens deep needs
 /// more memory than the machine has. `toFixture` never follows those
 /// fields, which is exactly why the canonical can serialize the corpus
 /// at all, and following it here means the corpus can be graded.
@@ -328,12 +328,12 @@ fn csmith_corpus_matches_the_golden_fixtures() {
         // Deliberately fatal rather than skipped. The corpus is
         // committed; a runner that cannot see it is a broken checkout,
         // and a green run that graded nothing says less than a red one.
-        Err(error) => panic!("the CSmith corpus is not readable at {corpus:?}: {error}"),
+        Err(error) => panic!("the Csmith corpus is not readable at {corpus:?}: {error}"),
     };
     seeds.sort();
     assert!(
         !seeds.is_empty(),
-        "the CSmith corpus at {corpus:?} is empty, so nothing was graded"
+        "the Csmith corpus at {corpus:?} is empty, so nothing was graded"
     );
 
     let parser = tabnas_c::make_with(&tabnas_c::COptions::new().with_extended(true));
@@ -420,7 +420,7 @@ fn csmith_corpus_matches_the_golden_fixtures() {
 
     assert!(
         failures.is_empty(),
-        "{passed} of {} CSmith fixtures match and {} differ only by the recorded \
+        "{passed} of {} Csmith fixtures match and {} differ only by the recorded \
          divergence; these differ some OTHER way:\n{}",
         seeds.len(),
         divergent.len(),
