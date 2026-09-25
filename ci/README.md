@@ -14,13 +14,13 @@ Sessions still cannot push tags. Releases therefore go through
 `workflow_dispatch`, and a workflow that runs only on a tag push needs a
 maintainer to push that tag.
 
-Five of this repository's workflows also have a template in admin
-`rollout/workflows/`: `ci.yml`, `crates-release.yml`, `notify-status.yml`,
-`release.yml` and `scorecard.yml`. ADR-8 as amended says a workflow
-changed here is mirrored in its template, so change the template too, in
-admin. Otherwise admin `scripts/verify.sh` reports the drift, and the
-next `rollout/apply-workflows.sh --apply` pushes the old text back.
-`clib.yml` and `clib-release.yml` are stamped (each carries a
+Six of this repository's workflows also have a template in admin
+`rollout/workflows/`: `ci.yml`, `crates-release.yml`, `deps-gate.yml`,
+`notify-status.yml`, `release.yml` and `scorecard.yml`. ADR-8 as amended
+says a workflow changed here is mirrored in its template, so change the
+template too, in admin. Otherwise admin `scripts/verify.sh` reports the
+drift, and the next `rollout/apply-workflows.sh --apply` pushes the old
+text back. `clib.yml` and `clib-release.yml` are stamped (each carries a
 `tabnas-clib-template` marker): they change only through admin
 `tasks/clib-template/` and a re-stamp with `tasks/adopt-clib.sh`, never
 by hand. The others have no template and change here alone.
