@@ -85,7 +85,11 @@ var _ = &sharedMu // referenced only by opt-in constructs
 // ignore it; a row that defines options must validate it here, since
 // nothing upstream does.
 func newParser(opts string) (parseFn, error) {
-	j, err := plug.MakeC(); if err != nil { return nil, err }; return j.Parse, nil
+	j, err := plug.MakeC()
+	if err != nil {
+		return nil, err
+	}
+	return j.Parse, nil
 }
 
 // reply marshals a result document. Marshalling cannot fail for the
