@@ -14,7 +14,10 @@ use tabnas_c::{CMeta, COptions};
 
 #[test]
 fn version_and_name_are_what_the_package_says() {
-    assert_eq!(tabnas_c::VERSION, "0.5.8");
+    // Compared with the crate's own manifest rather than a literal, which
+    // would go stale at every release; tests/version_test.rs checks that
+    // the manifest agrees with ts/package.json.
+    assert_eq!(tabnas_c::VERSION, env!("CARGO_PKG_VERSION"));
     assert_eq!(tabnas_c::PLUGIN_NAME, "C");
 }
 
