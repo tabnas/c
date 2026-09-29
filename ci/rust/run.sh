@@ -5,7 +5,7 @@
 #
 # The engine, the jsonic base (and the JSON core it needs), the expr
 # operator plugin and the fixture runner are PATH DEPENDENCIES on sibling
-# checkouts (rs/Cargo.toml: `tabnas = { path = "../../parser/rs" }`,
+# checkouts (rs/Cargo.toml: `tabnas = { package = "tabnas-parser", path = "../../parser/rs" }`,
 # `tabnas-jsonic = { path = "../../jsonic/rs" }`, which itself takes
 # `tabnas-json = { path = "../../json/rs" }`,
 # `tabnas-expr = { path = "../../expr/rs" }`, and as a dev-dependency
@@ -84,7 +84,7 @@ fi
 lock_without_sibling_versions() {
   awk '
     /^\[\[package\]\]$/                { sib = 0 }
-    /^name = "tabnas"$/                { sib = 1 }
+    /^name = "tabnas-parser"$/                { sib = 1 }
     /^name = "tabnas-json"$/           { sib = 1 }
     /^name = "tabnas-jsonic"$/         { sib = 1 }
     /^name = "tabnas-expr"$/           { sib = 1 }
