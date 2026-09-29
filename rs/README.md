@@ -233,7 +233,7 @@ sibling checkout:
 ```toml
 [dependencies]
 tabnas-c = { path = "../c/rs" }
-tabnas = { path = "../parser/rs" }
+tabnas = { package = "tabnas-parser", path = "../parser/rs" }
 tabnas-jsonic = { path = "../jsonic/rs" }
 tabnas-expr = { path = "../expr/rs" }
 ```

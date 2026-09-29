@@ -18,7 +18,7 @@ path = "src/lib.rs"
 # and https://github.com/tabnas/expr next to this repository. None is
 # published, so there is no registry version to fall back on. jsonic in
 # turn takes https://github.com/tabnas/json the same way.
-tabnas = { path = "../../parser/rs" }
+tabnas = { package = "tabnas-parser", path = "../../parser/rs" }
 tabnas-jsonic = { path = "../../jsonic/rs" }
 tabnas-expr = { path = "../../expr/rs" }
 indexmap = "2"
