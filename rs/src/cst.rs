@@ -269,6 +269,14 @@ pub fn push_child(node: usize, item: Item) {
     });
 }
 
+pub fn push_trailing(node: usize, item: Item) {
+    with_state(|state| {
+        if let Some(data) = state.nodes.get_mut(node) {
+            data.trailing.push(item);
+        }
+    });
+}
+
 pub fn set_children(node: usize, items: Vec<Item>) {
     with_state(|state| {
         if let Some(data) = state.nodes.get_mut(node) {

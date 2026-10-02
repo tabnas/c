@@ -368,3 +368,30 @@ func TestTopLevelCallReturns(t *testing.T) {
 		t.Fatalf("viaPath = %v, want legacy", declaration["viaPath"])
 	}
 }
+
+func TestLegacyExpressionChildrenAreOperandsOnly(t *testing.T) {
+	tu := parseTU(t, `int f(){ __asm__("x"); a /*keep*/ = b + c; }`)
+	ext := tuChildren(t, tu)[0].(CNode)
+	if ext["viaPath"] != "legacy" {
+		t.Fatalf("viaPath = %v, want legacy", ext["viaPath"])
+	}
+	assignment := findKindByValue(ext, "assignment_expression")
+	children, _ := assignment["children"].([]any)
+	if len(children) != 2 {
+		t.Fatalf("assignment children = %v, want two operands", children)
+	}
+	left, _ := children[0].(map[string]any)
+	right, _ := children[1].(map[string]any)
+	if left["kind"] != "identifier_expression" || right["kind"] != "binary_expression" {
+		t.Fatalf("assignment children = %v, want identifier and binary operands", children)
+	}
+	trivia, _ := left["trivia"].(map[string]any)
+	trailing, _ := trivia["trailing"].([]any)
+	if len(trailing) != 1 || trailing[0].(map[string]any)["src"] != "/*keep*/" {
+		t.Fatalf("left trailing trivia = %v, want preserved operator trivia", trailing)
+	}
+	binaryChildren, _ := right["children"].([]any)
+	if len(binaryChildren) != 2 {
+		t.Fatalf("binary children = %v, want two operands", binaryChildren)
+	}
+}

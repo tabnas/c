@@ -210,6 +210,15 @@ function appendTerm(node: any[], term: any): void {
   node.push(term)
 }
 
+// Trivia immediately ahead of an infix operator belongs after the left
+// operand. Keep it without putting the operator token between the semantic
+// operand children.
+function appendOperatorTrivia(node: any, trivia: CTokenRef[]): void {
+  let cur = node
+  while (isExprTree(cur)) cur = cur[cur.length - 1]
+  cur.trivia.trailing.push(...trivia)
+}
+
 // ---- Stoppers helpers ----------------------------------------------
 
 function isStop(name: string | null, stoppers: Set<string>): boolean {
@@ -270,7 +279,8 @@ export function parseAssignmentExpression(
   if (!op) return left
   const node = makeNode('assignment_expression', left.span)
   node.children.push(left)
-  takeTokenInto(ts, node) // '=' / '+=' / etc.
+  const operator = ts.take()! // '=' / '+=' / etc.
+  appendOperatorTrivia(left, operator.trivia)
   node.op = op.src
   const right = parseAssignmentExpression(ts, stoppers) // right-assoc
   if (right) {
@@ -324,22 +334,17 @@ function parseBinaryExpression(
     const op = INFIX_BY_TOKEN[n!]
     if (!op) break
 
-    const opTokenInfo = ts.take()!
-    const opCarry = {
-      trivia: opTokenInfo.trivia,
-      ref: opTokenInfo.ref,
-    }
+    const operator = ts.take()!
+    appendOperatorTrivia(expr, operator.trivia)
 
     const right = parseUnary(ts, stoppers)
     if (right === null) break
 
     if (!isExprTree(expr)) {
       const tree: any[] = [op, expr, right]
-      ;(tree as any).__op_token__ = opCarry
       expr = tree
     } else {
       const result = prattify(expr, op, 'c-pratt-infix') as any[]
-      ;(result as any).__op_token__ = opCarry
       appendTerm(result, right)
     }
   }
@@ -350,25 +355,17 @@ function parseBinaryExpression(
 //
 // prattify produces [op, left, right] arrays for binary infix
 // operators. toCST walks the tree depth-first and emits a
-// binary_expression node whose children list preserves source order
-// (left, opTokenWithTrivia, right). Non-tree leaves pass through
-// untouched.
+// binary_expression node whose children are the two operands. The
+// operator is represented once by `op`, matching the grammar path.
+// Non-tree leaves pass through untouched.
 
 function toCST(node: any): CNode {
   if (!isExprTree(node)) return node as CNode
   const op = node[0] as Op
   const left = toCST(node[1])
   const right = node[2] !== undefined ? toCST(node[2]) : undefined
-  const carried = (node as any).__op_token__ as
-    | { trivia: CTokenRef[]; ref: CTokenRef }
-    | undefined
-
   const out = makeNode('binary_expression', left.span)
   out.children.push(left)
-  if (carried) {
-    for (const tr of carried.trivia) out.children.push(tr)
-    out.children.push(carried.ref)
-  }
   if (right) {
     out.children.push(right)
   }

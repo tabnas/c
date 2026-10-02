@@ -108,6 +108,23 @@ describe('c parser smoke', () => {
     assert.equal(out.children[0].viaPath, 'legacy')
   })
 
+  test('legacy expressions expose operands only through children', () => {
+    const out = j.parse('int f(){ __asm__("x"); a /*keep*/ = b + c; }')
+    assert.equal(out.children[0].viaPath, 'legacy')
+    const assignment = findKind(out, 'assignment_expression')
+    assert.deepEqual(
+      assignment.children.map((child: any) => child.kind),
+      ['identifier_expression', 'binary_expression'],
+    )
+    assert.equal('left' in assignment, false)
+    assert.equal('right' in assignment, false)
+    assert.equal(assignment.children[0].trivia.trailing[0].src, '/*keep*/')
+    assert.deepEqual(
+      assignment.children[1].children.map((child: any) => child.kind),
+      ['identifier_expression', 'identifier_expression'],
+    )
+  })
+
   test('lex: tokenises a simple typedef declaration', () => {
     const src = 'typedef int T;'
     const out = j.parse(src)

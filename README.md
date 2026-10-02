@@ -234,9 +234,9 @@ member_expression { object, op ('.'|'->'), memberName }
 postfix_unary_expression { target, op }
 unary_expression { op, operand }              // ++/--/+/-/!/~/*/&/sizeof/_Alignof/...
 cast_expression { typeName, operand }
-binary_expression { op, left, right }         // 11 precedence levels
+binary_expression { op }                      // children: left, right
 conditional_expression { cond, then, else }
-assignment_expression { left, op, right }     // right-assoc
+assignment_expression { op }                  // children: left, right; right-assoc
 comma_expression
 generic_selection
   generic_controlling_expression { expression }
