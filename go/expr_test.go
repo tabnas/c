@@ -49,8 +49,9 @@ func TestExprBinaryPrecedence(t *testing.T) {
 	if n["kind"] != "binary_expression" || n["op"] != "+" {
 		t.Fatalf("root => %v", n)
 	}
-	left, _ := n["left"].(map[string]any)
-	right, _ := n["right"].(map[string]any)
+	children := n["children"].([]any)
+	left, _ := children[0].(map[string]any)
+	right, _ := children[len(children)-1].(map[string]any)
 	if left["kind"] != "literal_expression" || left["value"] != "1" {
 		t.Errorf("left => %v", left)
 	}
@@ -65,7 +66,7 @@ func TestExprLeftAssoc(t *testing.T) {
 	if n["kind"] != "binary_expression" || n["op"] != "-" {
 		t.Fatalf("root => %v", n)
 	}
-	left, _ := n["left"].(map[string]any)
+	left, _ := n["children"].([]any)[0].(map[string]any)
 	if left["kind"] != "binary_expression" || left["op"] != "-" {
 		t.Errorf("left should be (a-b): %v", left)
 	}

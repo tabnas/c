@@ -22,7 +22,8 @@ func TestExprPostfixSubscriptAndMember(t *testing.T) {
 		t.Fatal("no assignment_expression")
 	}
 	// RHS: member_expression (->) → member_expression (.) → subscript.
-	rhs := field(asn, "right")
+	asnChildren := kidsOf(asn)
+	rhs, _ := asnChildren[len(asnChildren)-1].(CNode)
 	if rhs == nil || rhs["kind"] != "member_expression" {
 		t.Fatalf("rhs kind = %v, want member_expression", rhs["kind"])
 	}

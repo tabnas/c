@@ -208,12 +208,10 @@ fn assignment_tail(stream: &mut TokenStream, stoppers: &[&str], left: usize) -> 
     };
     let node = cst::new_node("assignment_expression", Some(cst::span_of(left)));
     cst::push_child(node, Item::Node(left));
-    cst::set_extra(node, "left", Item::Node(left));
     stream.take_into(node);
     cst::set_extra(node, "op", Item::str(source));
     if let Some(right) = parse_assignment_expression(stream, stoppers) {
         cst::push_child(node, Item::Node(right));
-        cst::set_extra(node, "right", Item::Node(right));
     }
     Some(node)
 }
@@ -280,7 +278,6 @@ fn binary_tail(
         }
         let node = cst::new_node("binary_expression", Some(cst::span_of(left)));
         cst::push_child(node, Item::Node(left));
-        cst::set_extra(node, "left", Item::Node(left));
         stream.take_into(node);
         let Some(right) = parse_binary_expression(stream, stoppers, right_power) else {
             // The canonical loop breaks without the operator when the
@@ -289,7 +286,6 @@ fn binary_tail(
             return Some(left);
         };
         cst::push_child(node, Item::Node(right));
-        cst::set_extra(node, "right", Item::Node(right));
         cst::set_extra(node, "op", Item::str(source));
         left = node;
     }

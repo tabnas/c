@@ -351,8 +351,20 @@ func TestStructureInitializerExpression(t *testing.T) {
 		t.Fatalf("top-level op = %v, want + (precedence: 2*3 binds tighter)", bin["op"])
 	}
 	// The left operand of '+' is itself a '*' binary_expression.
-	left, _ := bin["left"].(map[string]any)
+	left, _ := bin["children"].([]any)[0].(map[string]any)
 	if left == nil || left["op"] != "*" {
 		t.Fatalf("left operand op = %v, want *", left["op"])
+	}
+}
+
+func TestTopLevelCallReturns(t *testing.T) {
+	tu := parseTU(t, "f(1);")
+	children := tuChildren(t, tu)
+	if len(children) != 1 {
+		t.Fatalf("translation unit has %d children, want 1", len(children))
+	}
+	declaration, _ := children[0].(CNode)
+	if declaration["viaPath"] != "legacy" {
+		t.Fatalf("viaPath = %v, want legacy", declaration["viaPath"])
 	}
 }

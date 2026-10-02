@@ -84,24 +84,29 @@ describe('phase A: @jsonic/expr standalone', () => {
     const out = exprParser().parse('1 + 2 * 3')
     assert.equal(out.kind, 'binary_expression')
     assert.equal(out.op, '+')
-    assert.equal(out.left.kind, 'literal_expression')
-    assert.equal(out.left.value, '1')
-    assert.equal(out.right.kind, 'binary_expression')
-    assert.equal(out.right.op, '*')
+    assert.equal(out.children[0].kind, 'literal_expression')
+    assert.equal(out.children[0].value, '1')
+    assert.equal(out.children[1].kind, 'binary_expression')
+    assert.equal(out.children[1].op, '*')
   })
 
   test('left-assoc: a - b - c parses as ((a-b)-c)', () => {
     const out = exprParser().parse('a - b - c')
     assert.equal(out.kind, 'binary_expression')
     assert.equal(out.op, '-')
-    assert.equal(out.left.kind, 'binary_expression')
-    assert.equal(out.left.op, '-')
-    assert.equal(out.right.kind, 'identifier_expression')
-    assert.equal(out.right.name, 'c')
+    assert.equal(out.children[0].kind, 'binary_expression')
+    assert.equal(out.children[0].op, '-')
+    assert.equal(out.children[1].kind, 'identifier_expression')
+    assert.equal(out.children[1].name, 'c')
   })
 })
 
 describe('c parser smoke', () => {
+
+  test('hostile fallback: a top-level call returns', () => {
+    const out = j.parse('f(1);')
+    assert.equal(out.children[0].viaPath, 'legacy')
+  })
 
   test('lex: tokenises a simple typedef declaration', () => {
     const src = 'typedef int T;'
@@ -573,12 +578,13 @@ describe('c parser smoke', () => {
     assert.equal(out.children.length, 1)
     const grp = out.children[0]
     assert.equal(grp.kind, 'conditional_group')
-    assert.equal(grp.branches.length, 1)
-    const b = grp.branches[0]
+    const branches = grp.children.filter((c: any) => c.kind === 'conditional_branch')
+    assert.equal(branches.length, 1)
+    const b = branches[0]
     assert.equal(b.branchKind, 'if')
-    // The branch's body view contains exactly the body declaration.
-    assert.equal(b.body.length, 1)
-    assert.equal(b.body[0].kind, 'external_declaration')
+    const body = b.children.slice(1)
+    assert.equal(body.length, 1)
+    assert.equal(body[0].kind, 'external_declaration')
     assert.ok(grp.endif)
   })
 
@@ -748,12 +754,14 @@ describe('c parser smoke', () => {
     const grp = out.children[0]
     assert.equal(grp.kind, 'conditional_group')
     assert.deepEqual(
-      grp.branches.map((b: any) => b.branchKind),
+      grp.children.filter((c: any) => c.kind === 'conditional_branch')
+        .map((b: any) => b.branchKind),
       ['if', 'elif', 'else'],
     )
     // Each branch's body has exactly one external declaration.
     assert.deepEqual(
-      grp.branches.map((b: any) => b.body.length),
+      grp.children.filter((c: any) => c.kind === 'conditional_branch')
+        .map((b: any) => b.children.length - 1),
       [1, 1, 1],
     )
   })
@@ -771,12 +779,16 @@ describe('c parser smoke', () => {
     const out = j.parse(src)
     const outer = out.children[0]
     assert.equal(outer.kind, 'conditional_group')
-    const inner = outer.branches[0].body.find(
+    const outerBranch = outer.children.find(
+      (c: any) => c.kind === 'conditional_branch',
+    )
+    const inner = outerBranch.children.slice(1).find(
       (c: any) => c.kind === 'conditional_group',
     )
     assert.ok(inner, 'expected nested conditional_group')
     assert.deepEqual(
-      inner.branches.map((b: any) => b.branchKind),
+      inner.children.filter((c: any) => c.kind === 'conditional_branch')
+        .map((b: any) => b.branchKind),
       ['ifdef'],
     )
   })
@@ -805,8 +817,8 @@ describe('c parser smoke', () => {
     const top = init.children.find((c: any) => c.kind === 'binary_expression')
     assert.equal(top.op, '+')
     // The right-hand side of + should be `2 * 3`, also a binary_expression.
-    assert.equal(top.right.kind, 'binary_expression')
-    assert.equal(top.right.op, '*')
+    assert.equal(top.children[1].kind, 'binary_expression')
+    assert.equal(top.children[1].op, '*')
   })
 
   test('expr: assignment is right-associative', () => {
@@ -816,8 +828,8 @@ describe('c parser smoke', () => {
     const ax = stmt.children.find((c: any) => c.kind === 'assignment_expression')
     assert.equal(ax.op, '=')
     // RHS is itself an assignment_expression (right-assoc).
-    assert.equal(ax.right.kind, 'assignment_expression')
-    assert.equal(ax.right.op, '=')
+    assert.equal(ax.children[1].kind, 'assignment_expression')
+    assert.equal(ax.children[1].op, '=')
   })
 
   test('expr: ternary expression structured as conditional_expression', () => {
@@ -837,7 +849,7 @@ describe('c parser smoke', () => {
     const asn = stmt.children.find((c: any) => c.kind === 'assignment_expression')
     // RHS is a member_expression (->) whose object is another
     // member_expression (.) whose object is a subscript_expression.
-    const rhs = asn.right
+    const rhs = asn.children[1]
     assert.equal(rhs.kind, 'member_expression')
     assert.equal(rhs.op, '->')
     assert.equal(rhs.memberName, 'next')
@@ -945,10 +957,11 @@ describe('c parser smoke', () => {
     assert.equal(out.children.length, 1)
     const grp = out.children[0]
     assert.equal(grp.kind, 'conditional_group')
-    assert.equal(grp.branches.length, 1)
-    assert.equal(grp.branches[0].branchKind, 'ifndef')
+    const branches = grp.children.filter((c: any) => c.kind === 'conditional_branch')
+    assert.equal(branches.length, 1)
+    assert.equal(branches[0].branchKind, 'ifndef')
 
-    const body = grp.branches[0].body
+    const body = branches[0].children.slice(1)
     // Inside the branch we expect: define, include, 8 typedefs, 3
     // defines, struct typedef, two function prototypes, enum.
     const decls = body.filter((c: any) => c.kind === 'external_declaration')

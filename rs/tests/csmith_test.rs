@@ -103,9 +103,9 @@ fn is_trivia(tname: &str) -> bool {
 /// golden files.
 ///
 /// This walks the ENGINE value rather than its JSON rendering, and that
-/// is not an optimisation. The tree is a DAG: an expression node sits
-/// in its parent's `children` and again under the parent's `left`,
-/// `right`, `cond`, `then` or `else`. `Value::to_json` expands every
+/// is not an optimisation. The tree can be a DAG: a conditional expression
+/// sits in its parent's `children` and again under `cond`, `then` or `else`.
+/// `Value::to_json` expands every
 /// path, as `JSON.stringify` does in the canonical, so rendering a
 /// Csmith translation unit whose expressions nest dozens deep needs
 /// more memory than the machine has. `toFixture` never follows those

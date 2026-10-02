@@ -94,86 +94,121 @@ fn structure_from(root: usize, seen: &mut std::collections::HashSet<usize>) {
 /// the children it keeps.
 fn fold_children(parent: usize) -> Vec<Item> {
     let children = children_of(parent);
-    let mut out: Vec<Item> = Vec::new();
-    let mut index = 0;
-    while index < children.len() {
-        let child = &children[index];
-        let directive = leading_conditional_directive(child);
-        if let Some((_, word)) = directive.as_ref() {
-            if is_opener(word) {
-                if let Some((node, next)) = try_build_conditional_group(&children, index) {
-                    out.push(Item::Node(node));
-                    index = next;
-                    continue;
-                }
-            }
-        }
-        out.push(child.clone());
-        index += 1;
-    }
+    let matches = index_conditional_groups(&children);
+    let out = fold_range(&children, 0, children.len(), &matches);
     set_children(parent, out.clone());
     out
 }
 
-/// Build a `conditional_group` starting at `from`, returning the new
-/// node and the index after the closing `#endif`, or `None` when no
-/// matching `#endif` sits at the same nesting level.
-fn try_build_conditional_group(children: &[Item], from: usize) -> Option<(usize, usize)> {
-    let mut depth = 0i32;
-    let mut end_index: Option<usize> = None;
-    for (index, child) in children.iter().enumerate().skip(from) {
+#[derive(Debug)]
+struct ConditionalMatch {
+    end: usize,
+    branches: Vec<usize>,
+}
+
+#[derive(Debug)]
+struct ConditionalFrame {
+    open: usize,
+    branches: Vec<usize>,
+}
+
+/// Resolve every matching delimiter and top-level branch marker in one
+/// pass. Nested and unmatched openers therefore never rescan a suffix.
+fn index_conditional_groups(
+    children: &[Item],
+) -> std::collections::HashMap<usize, ConditionalMatch> {
+    let mut matches = std::collections::HashMap::new();
+    let mut stack: Vec<ConditionalFrame> = Vec::new();
+    for (index, child) in children.iter().enumerate() {
         let Some((_, word)) = leading_conditional_directive(child) else {
             continue;
         };
         if is_opener(&word) {
-            depth += 1;
+            stack.push(ConditionalFrame {
+                open: index,
+                branches: Vec::new(),
+            });
+        } else if is_branch(&word) {
+            if let Some(frame) = stack.last_mut() {
+                frame.branches.push(index);
+            }
         } else if word == "endif" {
-            depth -= 1;
-            if depth == 0 {
-                end_index = Some(index);
-                break;
+            if let Some(frame) = stack.pop() {
+                matches.insert(
+                    frame.open,
+                    ConditionalMatch {
+                        end: index,
+                        branches: frame.branches,
+                    },
+                );
             }
         }
     }
-    let end_index = end_index?;
+    matches
+}
 
-    let group = new_node(
-        "conditional_group",
-        Some(span_of(children[from].as_node()?)),
-    );
-    let mut branches: Vec<Item> = Vec::new();
-    let mut branch_start = from;
-    let mut inner_depth = 0i32;
-    for (index, child) in children.iter().enumerate().take(end_index).skip(from + 1) {
-        let Some((_, word)) = leading_conditional_directive(child) else {
-            continue;
-        };
-        if is_opener(&word) {
-            inner_depth += 1;
-        } else if word == "endif" {
-            inner_depth -= 1;
-        } else if inner_depth == 0 && is_branch(&word) {
-            branches.push(Item::Node(push_branch(children, branch_start, index)));
-            branch_start = index;
+fn fold_range(
+    children: &[Item],
+    from: usize,
+    to: usize,
+    matches: &std::collections::HashMap<usize, ConditionalMatch>,
+) -> Vec<Item> {
+    let mut out = Vec::with_capacity(to - from);
+    let mut index = from;
+    while index < to {
+        if let Some(group_match) = matches
+            .get(&index)
+            .filter(|group_match| group_match.end < to)
+        {
+            out.push(Item::Node(build_conditional_group(
+                children,
+                index,
+                group_match,
+                matches,
+            )));
+            index = group_match.end + 1;
+        } else {
+            out.push(children[index].clone());
+            index += 1;
         }
     }
-    branches.push(Item::Node(push_branch(children, branch_start, end_index)));
+    out
+}
 
-    set_extra(group, "branches", Item::List(branches.clone()));
-    // The `#endif` directive is kept verbatim on its own field, and
-    // appended to the children too, so a depth-first walk still emits
-    // the raw tokens in order.
-    set_extra(group, "endif", children[end_index].clone());
-    for branch in branches {
-        push_child(group, branch);
+fn build_conditional_group(
+    children: &[Item],
+    from: usize,
+    group_match: &ConditionalMatch,
+    matches: &std::collections::HashMap<usize, ConditionalMatch>,
+) -> usize {
+    let group_span = children[from]
+        .as_node()
+        .map(span_of)
+        .unwrap_or_else(crate::cst::Span::zero);
+    let group = new_node("conditional_group", Some(group_span));
+    let mut starts = Vec::with_capacity(group_match.branches.len() + 1);
+    starts.push(from);
+    starts.extend(group_match.branches.iter().copied());
+    for (index, start) in starts.iter().copied().enumerate() {
+        let end = starts.get(index + 1).copied().unwrap_or(group_match.end);
+        push_child(
+            group,
+            Item::Node(build_branch(children, start, end, matches)),
+        );
     }
-    push_child(group, children[end_index].clone());
+    set_extra(group, "endif", children[group_match.end].clone());
+    push_child(group, children[group_match.end].clone());
 
-    Some((group, end_index + 1))
+    group
 }
 
 /// Build one branch of a conditional group, covering `[from, to)`.
-fn push_branch(children: &[Item], from: usize, to: usize) -> usize {
+fn build_branch(
+    children: &[Item],
+    from: usize,
+    to: usize,
+    matches: &std::collections::HashMap<usize, ConditionalMatch>,
+) -> usize {
     let head = children[from].clone();
     let head_span = head
         .as_node()
@@ -189,18 +224,8 @@ fn push_branch(children: &[Item], from: usize, to: usize) -> usize {
     // without filtering.
     set_extra(branch, "directive", head.clone());
 
-    // Recurse into the body, so a nested run inside a branch is grouped
-    // too.
-    let inner = new_node("__branch_body__", Some(head_span));
-    for child in children.iter().take(to).skip(from + 1) {
-        push_child(inner, child.clone());
-    }
-    structure_conditional_groups(inner);
-    let body = children_of(inner);
-
     let mut final_children = vec![head];
-    final_children.extend(body.iter().cloned());
+    final_children.extend(fold_range(children, from + 1, to, matches));
     set_children(branch, final_children);
-    set_extra(branch, "body", Item::List(body));
     branch
 }

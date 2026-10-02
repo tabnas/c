@@ -270,13 +270,11 @@ export function parseAssignmentExpression(
   if (!op) return left
   const node = makeNode('assignment_expression', left.span)
   node.children.push(left)
-  node.left = left
   takeTokenInto(ts, node) // '=' / '+=' / etc.
   node.op = op.src
   const right = parseAssignmentExpression(ts, stoppers) // right-assoc
   if (right) {
     node.children.push(right)
-    node.right = right
   }
   return node
 }
@@ -367,14 +365,12 @@ function toCST(node: any): CNode {
 
   const out = makeNode('binary_expression', left.span)
   out.children.push(left)
-  out.left = left
   if (carried) {
     for (const tr of carried.trivia) out.children.push(tr)
     out.children.push(carried.ref)
   }
   if (right) {
     out.children.push(right)
-    out.right = right
   }
   out.op = op.src
   return out

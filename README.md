@@ -179,7 +179,8 @@ fields. Highlights:
 ```
 translation_unit
   conditional_group              (#if … #elif … #else … #endif folded)
-    branches: conditional_branch { branchKind, directive, body }
+    conditional_branch { branchKind, directive }
+      children: opening directive, then branch body
     endif
   external_declaration { declKind: 'declaration'|'function_definition' }
     declaration_specifiers
@@ -279,6 +280,11 @@ single `conditional_group` containing typed branches. Best-effort:
 unmatched `#endif` or unterminated `#if` leaves the surrounding
 sequence flat. Nested `#if … #endif` inside a branch is recursively
 grouped.
+
+Structural relationships use `children` as their single representation.
+In particular, binary and assignment operands are `children[0]` and
+`children[1]`, and conditional branches and their bodies are nested only in
+`children`; they are not repeated under `left`/`right`, `branches` or `body`.
 
 `#define` directives populate `ctx.meta.cmeta.macros`; `#undef`
 removes. The macro table is the single source of truth used by lex-time

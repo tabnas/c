@@ -218,13 +218,11 @@ func parseAssignmentExpression(ts *TokenStream, stoppers map[string]bool) CNode 
 	}
 	node := makeNode("assignment_expression", spanFromNode(left))
 	appendChild(node, left)
-	node["left"] = left
 	ts.takeInto(node) // '=' / '+=' / etc.
 	node["op"] = op.src
 	right := parseAssignmentExpression(ts, stoppers) // right-assoc
 	if right != nil {
 		appendChild(node, right)
-		node["right"] = right
 	}
 	return node
 }
@@ -315,7 +313,6 @@ func cExprTreeToCST(node any) CNode {
 	out := makeNode("binary_expression", spanFromNode(left))
 	if left != nil {
 		appendChild(out, left)
-		out["left"] = left
 	}
 	if tree.carry != nil {
 		for _, tr := range tree.carry.trivia {
@@ -325,7 +322,6 @@ func cExprTreeToCST(node any) CNode {
 	}
 	if right != nil {
 		appendChild(out, right)
-		out["right"] = right
 	}
 	out["op"] = op.src
 	return out

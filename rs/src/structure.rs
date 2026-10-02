@@ -260,10 +260,7 @@ fn parse_declaration_specifiers_here(stream: &mut TokenStream) -> Option<usize> 
     // further identifier belongs to the declarator.
     let mut saw_typedef_name = false;
 
-    loop {
-        let Some(_) = stream.peek(0) else {
-            break;
-        };
+    while stream.peek(0).is_some() {
         let name = stream.peek_name(0);
 
         if name == "TYPEDEF_NAME" {
@@ -1104,11 +1101,19 @@ fn parse_parameter_type_list(stream: &mut TokenStream, node: usize) -> Option<()
             }
             break;
         }
+        let before = stream.mark();
         match parse_parameter_declaration(stream) {
             Some(parameter) => cst::push_child(list, Item::Node(parameter)),
             None => {
                 stream.take_into(list);
             }
+        }
+        // An abstract-declarator attempt can legally return an empty
+        // node. On hostile input such as a top-level `f(1);`, that must
+        // not count as a parsed parameter while leaving the token in
+        // place, or this loop allocates forever.
+        if stream.mark() == before {
+            stream.take_into(list);
         }
         if stream.peek_name(0) == "PUNC_COMMA" {
             stream.take_into(list);
@@ -1171,14 +1176,23 @@ pub fn parse_parameter_declaration(stream: &mut TokenStream) -> Option<usize> {
         };
     }
 
+    // Parse once in the permissive abstract form. Trying concrete first
+    // and rewinding doubles the work at every nested unnamed function
+    // pointer.
     let mark = stream.mark();
-    let mut declarator = parse_declarator(stream, false);
+    let mut declarator = parse_declarator(stream, true);
     let named = declarator.is_some_and(|declarator| {
         cst::has_extra(declarator, "declaredName") || find_declared(declarator)
     });
-    if !named {
-        stream.restore(mark);
-        declarator = parse_declarator(stream, true);
+    if named {
+        if let Some(declarator) = declarator {
+            concretize_declarator(declarator);
+        }
+    }
+    // An empty abstract declarator is not progress. The parameter-list
+    // loop consumes one token through its defensive recovery path.
+    if stream.mark() == mark {
+        declarator = None;
     }
     if let Some(declarator) = declarator {
         cst::push_child(node, Item::Node(declarator));
@@ -1190,6 +1204,25 @@ pub fn parse_parameter_declaration(stream: &mut TokenStream) -> Option<usize> {
         Some(node)
     } else {
         None
+    }
+}
+
+/// Change only the declarator spine from abstract to concrete. A function
+/// postfix's parameter declarations make their own decision and are not
+/// part of that spine.
+fn concretize_declarator(node: usize) {
+    match cst::kind_of(node).as_str() {
+        "abstract_declarator" => cst::set_kind(node, "declarator"),
+        "direct_abstract_declarator" => cst::set_kind(node, "direct_declarator"),
+        _ => {}
+    }
+    for child in cst::children_of(node).iter().filter_map(Item::as_node) {
+        if matches!(
+            cst::kind_of(child).as_str(),
+            "abstract_declarator" | "direct_abstract_declarator"
+        ) {
+            concretize_declarator(child);
+        }
     }
 }
 
