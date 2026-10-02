@@ -272,6 +272,39 @@ fn comments_survive_as_tokens() {
     assert_eq!(comments, vec!["/* a */", "/* b */", "// c"]);
 }
 
+#[test]
+fn legacy_expression_children_are_operands_only() {
+    let parser = tabnas_c::make_with(&COptions::new().with_extended(true));
+    let value = tabnas_c::parse_with(&parser, "int f(){ __asm__(\"x\"); a /*keep*/ = b + c; }")
+        .expect("the legacy function parses");
+    let json = value.to_json();
+    assert_eq!(json["children"][0]["viaPath"], "legacy");
+
+    fn find<'a>(node: &'a serde_json::Value, kind: &str) -> Option<&'a serde_json::Value> {
+        if node.get("kind").and_then(serde_json::Value::as_str) == Some(kind) {
+            return Some(node);
+        }
+        node.get("children")?
+            .as_array()?
+            .iter()
+            .find_map(|child| find(child, kind))
+    }
+
+    let assignment = find(&json, "assignment_expression").expect("assignment expression");
+    let children = assignment["children"].as_array().expect("operand children");
+    assert_eq!(children.len(), 2);
+    assert_eq!(children[0]["kind"], "identifier_expression");
+    assert_eq!(children[1]["kind"], "binary_expression");
+    assert_eq!(children[0]["trivia"]["trailing"][0]["src"], "/*keep*/");
+    assert_eq!(
+        children[1]["children"]
+            .as_array()
+            .expect("binary operand children")
+            .len(),
+        2
+    );
+}
+
 /// A macro definition keeps its body, and a use of the name is tagged.
 #[test]
 fn macros_are_kept_and_uses_are_tagged() {

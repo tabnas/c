@@ -193,9 +193,9 @@ fn evaluate_c_expr(site: &mut EvalSite<'_>, op: &Op, terms: &[Value]) -> Value {
 
     if ASSIGN_NAMES.contains(&op.name.as_str()) {
         let out = cst::new_node("assignment_expression", Some(span));
-        for (index, field) in ["left", "right"].iter().enumerate() {
+        for index in 0..2 {
             if let Some(term) = terms.get(index).filter(|term| !term.is_undefined()) {
-                push_term(out, term, field);
+                cst::push_child(out, Item::from_value(term));
             }
         }
         cst::set_extra(out, "op", Item::str(op.src.clone()));
@@ -301,9 +301,9 @@ fn evaluate_c_expr(site: &mut EvalSite<'_>, op: &Op, terms: &[Value]) -> Value {
     if op.infix {
         let out = cst::new_node("binary_expression", Some(span));
         cst::set_extra(out, "op", Item::str(op.src.clone()));
-        for (index, field) in ["left", "right"].iter().enumerate() {
+        for index in 0..2 {
             if let Some(term) = terms.get(index).filter(|term| !term.is_undefined()) {
-                push_term(out, term, field);
+                cst::push_child(out, Item::from_value(term));
             }
         }
         return crate::state::node_handle(out);

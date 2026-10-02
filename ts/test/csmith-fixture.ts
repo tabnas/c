@@ -3,7 +3,7 @@
 // Fixture-friendly serialization of a C-CST node. Walks `kind`,
 // `children`, and a stable whitelist of scalar metadata fields so the
 // resulting JSON has no cross-reference duplication (which the parser
-// uses internally for ergonomic .left/.right/.target etc accessors).
+// uses internally for ergonomic semantic accessors such as `.target`).
 //
 // The same function is used to (a) write fixtures and (b) re-serialize
 // a fresh parse for assertion, so tests compare structurally-equivalent

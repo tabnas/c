@@ -573,16 +573,25 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
         if !specs.is_some_and(|specs| node_flag(specs, "isTypedef")) {
             return;
         }
-        let names: Vec<String> = match child_rule.u.get("declaredNames") {
-            Some(Value::Array(items)) => items
-                .iter()
-                .filter_map(|item| match item {
-                    Value::String(text) => Some(text.clone()),
+        // The declarator-list node already owns every declaration. Read
+        // the names from it once at finalization instead of rebuilding a
+        // Value array in the rule bag after each comma. Rebuilding that
+        // array copied the full prefix for every declarator (O(n^2)).
+        let names: Vec<String> = child_rule
+            .u
+            .get("idl")
+            .and_then(handle_node)
+            .map(cst::children_of)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(Item::as_node)
+            .filter_map(
+                |declarator| match cst::extra_of(declarator, "declaredName") {
+                    Some(Item::Val(Value::String(name))) => Some(name),
                     _ => None,
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
+                },
+            )
+            .collect();
         for name in names {
             with_state(|state| state.symbols.bind_typedef(&name));
             crate::refs::reclassify(context, &name, "ID", "TYPEDEF_NAME");
@@ -1161,21 +1170,6 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
             if let Some(child) = child.filter(|child| cst::kind_of(*child) == "init_declarator") {
                 if let Some(idl) = u_node(rule, "idl") {
                     cst::push_child(idl, Item::Node(child));
-                }
-                if let Some(Item::Val(Value::String(declared))) =
-                    cst::extra_of(child, "declaredName")
-                {
-                    let mut names: Vec<Value> = match rule.u.get("declaredNames") {
-                        Some(Value::Array(items)) => items.as_ref().clone(),
-                        _ => Vec::new(),
-                    };
-                    names.push(Value::String(declared.clone()));
-                    rule.u_mut()
-                        .insert("declaredNames".to_string(), Value::array(names));
-                    if rule.u.get("declaredName").is_none() {
-                        rule.u_mut()
-                            .insert("declaredName".to_string(), Value::String(declared));
-                    }
                 }
             }
         }

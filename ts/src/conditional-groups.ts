@@ -12,26 +12,18 @@
 // external_declaration — so it has zero dependency on the token
 // stream or the rest of the grammar.
 
-// Output shape:
-//   conditional_group
-//     branches: [
-//       { kind: 'conditional_branch', branchKind: 'if'|'ifdef'|'ifndef'|
-//                                                   'elif'|'elifdef'|
-//                                                   'elifndef'|'else',
-//         children: [<the directive node>, <body external_declarations>] }
-//       ...
-//     ]
-//     endif: <the conditional_directive node, kept verbatim>
+// Output shape uses `children` as the one structural interface. A
+// conditional_group contains conditional_branch nodes followed by the
+// closing directive; each branch contains its opening directive followed by
+// its body. `branchKind` and `endif` remain scalar/leaf conveniences.
 
 interface AnyNode {
   kind?: string
   span?: any
   children?: any[]
-  branches?: any[]
   endif?: any
   branchKind?: string
   directive?: any
-  body?: any[]
   [extra: string]: any
 }
 
@@ -47,22 +39,7 @@ function makeNode(kind: string, span?: any): AnyNode {
 export function structureConditionalGroups(parent: AnyNode): void {
   if (!Array.isArray(parent.children)) return
   const ch = parent.children
-  const out: any[] = []
-  let i = 0
-  while (i < ch.length) {
-    const c = ch[i] as any
-    const dir = leadingConditionalDirective(c)
-    if (dir && /^(if|ifdef|ifndef)$/.test(dir.directive)) {
-      const consumed = tryBuildConditionalGroup(ch, i)
-      if (consumed) {
-        out.push(consumed.node)
-        i = consumed.next
-        continue
-      }
-    }
-    out.push(c)
-    i++
-  }
+  const out = foldRange(ch, 0, ch.length, indexConditionalGroups(ch))
   parent.children = out
   // Recurse into preserved children (e.g. function bodies).
   for (const c of out) {
@@ -70,6 +47,50 @@ export function structureConditionalGroups(parent: AnyNode): void {
       structureConditionalGroups(c)
     }
   }
+}
+
+interface ConditionalMatch {
+  end: number
+  branches: number[]
+}
+
+// Index every matched run and its top-level branch markers in one pass. This
+// prevents each nested or unmatched opener from scanning the suffix again.
+function indexConditionalGroups(children: any[]): Map<number, ConditionalMatch> {
+  const matches = new Map<number, ConditionalMatch>()
+  const stack: Array<{ open: number; branches: number[] }> = []
+  for (let i = 0; i < children.length; i++) {
+    const dir = leadingConditionalDirective(children[i])
+    if (!dir) continue
+    if (/^(if|ifdef|ifndef)$/.test(dir.directive)) {
+      stack.push({ open: i, branches: [] })
+    } else if (/^(elif|elifdef|elifndef|else)$/.test(dir.directive)) {
+      if (stack.length > 0) stack[stack.length - 1].branches.push(i)
+    } else if (dir.directive === 'endif' && stack.length > 0) {
+      const frame = stack.pop()!
+      matches.set(frame.open, { end: i, branches: frame.branches })
+    }
+  }
+  return matches
+}
+
+function foldRange(
+  children: any[], from: number, to: number,
+  matches: Map<number, ConditionalMatch>,
+): any[] {
+  const out: any[] = []
+  let i = from
+  while (i < to) {
+    const match = matches.get(i)
+    if (match && match.end < to) {
+      out.push(buildConditionalGroup(children, i, match, matches))
+      i = match.end + 1
+    } else {
+      out.push(children[i])
+      i++
+    }
+  }
+  return out
 }
 
 // Return the conditional_directive node embedded as the first child of
@@ -82,75 +103,33 @@ function leadingConditionalDirective(node: any): any | null {
   return first || null
 }
 
-// Attempt to build a conditional_group starting at index `from`. Returns
-// the new node and the index after the closing #endif, or null if no
-// matching #endif was found at the same nesting level.
-function tryBuildConditionalGroup(
-  children: any[], from: number,
-): { node: AnyNode; next: number } | null {
-  // First pass: scan ahead with a depth counter to find the matching
-  // #endif. If none, bail.
-  let depth = 0
-  let endIdx = -1
-  for (let i = from; i < children.length; i++) {
-    const dir = leadingConditionalDirective(children[i])
-    if (!dir) continue
-    if (/^(if|ifdef|ifndef)$/.test(dir.directive)) depth++
-    else if (dir.directive === 'endif') {
-      depth--
-      if (depth === 0) { endIdx = i; break }
-    }
-  }
-  if (endIdx < 0) return null
-
-  // Second pass: split [from … endIdx-1] into branches at top-level
-  // #elif/#else.
+function buildConditionalGroup(
+  children: any[], from: number, match: ConditionalMatch,
+  matches: Map<number, ConditionalMatch>,
+): AnyNode {
   const startCh = children[from] as AnyNode
   const groupNode = makeNode('conditional_group', startCh.span)
-  groupNode.branches = [] as any[]
-  let branchStart = from
-  let innerDepth = 0
-  for (let i = from + 1; i < endIdx; i++) {
-    const dir = leadingConditionalDirective(children[i])
-    if (!dir) continue
-    if (/^(if|ifdef|ifndef)$/.test(dir.directive)) innerDepth++
-    else if (dir.directive === 'endif') innerDepth--
-    else if (innerDepth === 0 &&
-             /^(elif|elifdef|elifndef|else)$/.test(dir.directive)) {
-      pushBranch(groupNode, children, branchStart, i)
-      branchStart = i
-    }
+  const starts = [from, ...match.branches]
+  for (let i = 0; i < starts.length; i++) {
+    const end = i + 1 < starts.length ? starts[i + 1] : match.end
+    groupNode.children!.push(buildBranch(children, starts[i], end, matches))
   }
-  pushBranch(groupNode, children, branchStart, endIdx)
-
-  // Endif as a separate field (the directive itself, for full fidelity).
-  groupNode.endif = children[endIdx]
-  // Also append it to children so a depth-first walk still emits the
-  // raw tokens in order.
-  groupNode.children!.push(...groupNode.branches!)
-  groupNode.children!.push(children[endIdx])
-
-  return { node: groupNode, next: endIdx + 1 }
+  groupNode.endif = children[match.end]
+  groupNode.children!.push(children[match.end])
+  return groupNode
 }
 
-function pushBranch(group: AnyNode, children: any[], from: number, to: number): void {
+function buildBranch(
+  children: any[], from: number, to: number,
+  matches: Map<number, ConditionalMatch>,
+): AnyNode {
   const head = children[from]
   const dir = leadingConditionalDirective(head)
   const branch = makeNode('conditional_branch', head.span)
   branch.branchKind = dir ? dir.directive : 'unknown'
-  // The directive itself is preserved on a side field; the branch's
-  // `children` list holds just the body items so consumers can iterate
-  // them without filtering.
+  // The directive stays available by name, but structural traversal uses
+  // children exclusively.
   branch.directive = head
-  // Recurse into body so nested #if … #endif inside a branch also get
-  // grouped.
-  const inner = makeNode('__branch_body__', head.span)
-  for (let k = from + 1; k < to; k++) inner.children!.push(children[k])
-  structureConditionalGroups(inner)
-  // Final children: the directive followed by the (possibly grouped)
-  // body, so a depth-first walk still yields original tokens.
-  branch.children = [head, ...inner.children!]
-  // Body-only view for consumers.
-  branch.body = inner.children!
-  group.branches!.push(branch)
+  branch.children = [head, ...foldRange(children, from + 1, to, matches)]
+  return branch
 }

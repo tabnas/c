@@ -86,13 +86,102 @@ fn statement_cost_is_linear_in_input_size() {
     );
 }
 
+/// Appending one declarator must not copy the whole accumulated name list.
+#[test]
+fn init_declarator_list_cost_is_linear() {
+    let parser = tabnas_c::make();
+    let declaration = |count: usize| {
+        let names = (0..count)
+            .map(|index| format!("v{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("int {names};")
+    };
+
+    let _ = milliseconds(&parser, &declaration(50));
+    let small = declaration(250);
+    let large = declaration(1_000);
+    let small_ms = milliseconds(&parser, &small);
+    let large_ms = milliseconds(&parser, &large);
+    let ratio = large_ms / small_ms.max(0.001);
+
+    assert!(
+        ratio < 9.0,
+        "declarator-list cost is growing faster than the input: {small_ms:.1} ms then \
+         {large_ms:.1} ms, a ratio of {ratio:.1} for 4x the input"
+    );
+}
+
+#[test]
+fn unmatched_conditionals_cost_is_linear() {
+    let parser = tabnas_c::make();
+    let source = |count: usize| "#if 1\n".repeat(count);
+
+    let _ = milliseconds(&parser, &source(50));
+    let small = source(500);
+    let large = source(2_000);
+    let small_ms = milliseconds(&parser, &small);
+    let large_ms = milliseconds(&parser, &large);
+    let ratio = large_ms / small_ms.max(0.001);
+
+    assert!(
+        ratio < 9.0,
+        "conditional folding is growing faster than the input: {small_ms:.1} ms then \
+         {large_ms:.1} ms, a ratio of {ratio:.1} for 4x the input"
+    );
+}
+
+#[test]
+fn rendered_expression_size_is_linear() {
+    let parser = tabnas_c::make();
+    let rendered = |terms: usize| {
+        let expression = vec!["1"; terms].join("+");
+        let source = format!("void f(void) {{ x = {expression}; }}");
+        tabnas_c::parse_with(&parser, &source)
+            .expect("expression parses")
+            .to_json()
+            .to_string()
+            .len()
+    };
+
+    let small = rendered(8);
+    let large = rendered(16);
+    assert!(
+        large < small * 3,
+        "doubling the expression produced {large} bytes after {small} bytes"
+    );
+}
+
+#[test]
+fn rendered_conditional_size_is_linear() {
+    let parser = tabnas_c::make();
+    let rendered = |depth: usize| {
+        let source = format!(
+            "{}int x;\n{}",
+            "#if 1\n".repeat(depth),
+            "#endif\n".repeat(depth)
+        );
+        tabnas_c::parse_with(&parser, &source)
+            .expect("conditional group parses")
+            .to_json()
+            .to_string()
+            .len()
+    };
+
+    let small = rendered(4);
+    let large = rendered(8);
+    assert!(
+        large < small * 3,
+        "doubling conditional depth produced {large} bytes after {small} bytes"
+    );
+}
+
 /// A subtree that stops at the realize cap costs that subtree, and
 /// nothing else.
 ///
-/// The realized tree is a DAG: an expression node sits in its parent's
-/// `children` and again under the parent's `left` or `right`, so the
-/// walk memoizes what each node realized to and hands the same value
-/// back on the second path. A node whose own walk stopped at the cap is
+/// The realized tree can still be a DAG through semantic aliases such as a
+/// ternary's `cond`, so the walk memoizes what each node realized to and
+/// hands the same value back on the second path. A node whose own walk stopped at the cap is
 /// the one thing it must NOT keep, because the value has a hole in it.
 /// A walk that went on past that point with the memo off would be
 /// exponential in expression depth, so the walk stops at the first
