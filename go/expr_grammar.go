@@ -216,11 +216,9 @@ func evaluateCExpr(rule *tabnas.Rule, _ *tabnas.Context, op *tabnasexpr.Op, term
 		out := makeNode("assignment_expression", span)
 		if len(terms) > 0 && terms[0] != nil {
 			appendChild(out, terms[0])
-			out["left"] = terms[0]
 		}
 		if len(terms) > 1 && terms[1] != nil {
 			appendChild(out, terms[1])
-			out["right"] = terms[1]
 		}
 		out["op"] = op.Src
 		return out
@@ -326,11 +324,9 @@ func evaluateCExpr(rule *tabnas.Rule, _ *tabnas.Context, op *tabnasexpr.Op, term
 		out["op"] = op.Src
 		if len(terms) > 0 && terms[0] != nil {
 			appendChild(out, terms[0])
-			out["left"] = terms[0]
 		}
 		if len(terms) > 1 && terms[1] != nil {
 			appendChild(out, terms[1])
-			out["right"] = terms[1]
 		}
 		return out
 	}

@@ -269,6 +269,14 @@ pub fn push_child(node: usize, item: Item) {
     });
 }
 
+pub fn push_trailing(node: usize, item: Item) {
+    with_state(|state| {
+        if let Some(data) = state.nodes.get_mut(node) {
+            data.trailing.push(item);
+        }
+    });
+}
+
 pub fn set_children(node: usize, items: Vec<Item>) {
     with_state(|state| {
         if let Some(data) = state.nodes.get_mut(node) {
@@ -407,9 +415,8 @@ thread_local! {
 
     // What each node realized to, for the length of one walk.
     //
-    // The tree is a DAG, not a tree: an expression node sits in its
-    // parent's `children` AND under the parent's `left`, `right`,
-    // `cond`, `then` or `else`, which is how the canonical hands
+    // The tree can be a DAG: a conditional expression sits in its
+    // parent's `children` AND under `cond`, `then` or `else`, which is how the canonical hands
     // callers both views of the same object. JavaScript shares the
     // reference, so building the value costs nothing extra there. A
     // straight port re-walks the node once per path, which is
@@ -455,8 +462,8 @@ pub fn realize(value: &Value) -> Value {
 /// exponential: a subtree with a hole in it cannot be memoized, and the
 /// tree is a DAG (see `REALIZED`), so every node above the hole would be
 /// walked once per path that reaches it. An expression chain two hundred
-/// levels past the cap, each level reachable through `children` and
-/// through `left` or `operand`, is two to the two hundred paths.
+/// levels past the cap, each level reachable through `children` and a
+/// semantic alias such as `operand`, is two to the two hundred paths.
 fn past_the_cap(depth: usize) -> bool {
     REALIZE_TRUNCATED.with(|cell| {
         if !cell.get() && depth >= REALIZE_DEPTH_CAP {

@@ -101,27 +101,17 @@ var cPostfixOps = map[string]bool{
 // ---- self-contained Pratt loop --------------------------------------
 //
 // An expression tree is a *cExprTree wrapping a []any of the form
-// [*cExprOp, left, right]. The op token (with its trivia) is carried alongside
-// in the cExprTree.carry field — Go slices can't have arbitrary extra fields
-// the way the TS JS arrays can.
-//
+// [*cExprOp, left, right].
 // cPrattify integrates a new op into an existing tree by precedence, returning
 // the (possibly new) root tree. cAppendTerm fills the slot left open by the
 // integration with the freshly-parsed right operand. This replicates the TS
 // appendTerm + prattify pair.
 
-// opCarry holds the op-token ref and its leading trivia for a tree node.
-type opCarry struct {
-	trivia []any
-	ref    map[string]any
-}
-
-// cExprTree wraps the op-array slice plus the per-node op-token carry. Using a
-// pointer wrapper means re-pointing the slice in one place is visible to all
-// holders (mirrors the TS in-place array mutation / the Go expr ListRef trick).
+// cExprTree wraps the op-array slice. Using a pointer wrapper means re-pointing
+// the slice in one place is visible to all holders (mirrors the TS in-place
+// array mutation / the Go expr ListRef trick).
 type cExprTree struct {
-	val   []any    // [*cExprOp, left, right...]
-	carry *opCarry // op-token + trivia for THIS node
+	val []any // [*cExprOp, left, right...]
 }
 
 func (t *cExprTree) op() *cExprOp { return t.val[0].(*cExprOp) }
@@ -146,14 +136,34 @@ func cAppendTerm(node *cExprTree, term any) {
 	node.val = append(node.val, term)
 }
 
+// appendOperatorTrivia keeps comments immediately ahead of an infix
+// operator after the left operand, without putting the operator token between
+// the semantic operand children.
+func appendOperatorTrivia(node any, trivia []any) {
+	for {
+		tree, ok := node.(*cExprTree)
+		if !ok {
+			break
+		}
+		node = tree.val[len(tree.val)-1]
+	}
+	leaf, ok := node.(CNode)
+	if !ok {
+		return
+	}
+	meta, _ := leaf["trivia"].(map[string]any)
+	trailing, _ := meta["trailing"].([]any)
+	meta["trailing"] = append(trailing, trivia...)
+}
+
 // cPrattify integrates op into the existing tree by precedence and returns the
 // outermost tree. The new op's right operand slot is left open for
-// cAppendTerm. carry is the op-token carry for the new op.
-func cPrattify(node *cExprTree, op *cExprOp, carry *opCarry) *cExprTree {
+// cAppendTerm.
+func cPrattify(node *cExprTree, op *cExprOp) *cExprTree {
 	exprOp := node.op()
 	// op lower-or-equal precedence: wrap the whole tree.
 	if op.left <= exprOp.right {
-		wrapped := &cExprTree{val: []any{op, node}, carry: carry}
+		wrapped := &cExprTree{val: []any{op, node}}
 		return wrapped
 	}
 	// op higher precedence: drill into the rightmost term.
@@ -162,11 +172,11 @@ func cPrattify(node *cExprTree, op *cExprOp, carry *opCarry) *cExprTree {
 		if sub, ok := node.val[end].(*cExprTree); ok {
 			subOp := sub.op()
 			if subOp.right < op.left {
-				node.val[end] = cPrattify(sub, op, carry)
+				node.val[end] = cPrattify(sub, op)
 				return node
 			}
 		}
-		node.val[end] = &cExprTree{val: []any{op, node.val[end]}, carry: carry}
+		node.val[end] = &cExprTree{val: []any{op, node.val[end]}}
 		return node
 	}
 	return node
@@ -218,13 +228,12 @@ func parseAssignmentExpression(ts *TokenStream, stoppers map[string]bool) CNode 
 	}
 	node := makeNode("assignment_expression", spanFromNode(left))
 	appendChild(node, left)
-	node["left"] = left
-	ts.takeInto(node) // '=' / '+=' / etc.
+	operator := ts.take() // '=' / '+=' / etc.
+	appendOperatorTrivia(left, operator.trivia)
 	node["op"] = op.src
 	right := parseAssignmentExpression(ts, stoppers) // right-assoc
 	if right != nil {
 		appendChild(node, right)
-		node["right"] = right
 	}
 	return node
 }
@@ -274,19 +283,23 @@ func parseBinaryExpression(ts *TokenStream, stoppers map[string]bool) CNode {
 		if op == nil {
 			break
 		}
-		taken := ts.take()
-		if taken == nil {
+		operator := ts.take()
+		if operator == nil {
 			break
 		}
-		carry := &opCarry{trivia: taken.trivia, ref: taken.ref}
+		if tree == nil {
+			appendOperatorTrivia(leaf, operator.trivia)
+		} else {
+			appendOperatorTrivia(tree, operator.trivia)
+		}
 		right := parseUnary(ts, stoppers)
 		if right == nil {
 			break
 		}
 		if tree == nil {
-			tree = &cExprTree{val: []any{op, leaf, right}, carry: carry}
+			tree = &cExprTree{val: []any{op, leaf, right}}
 		} else {
-			tree = cPrattify(tree, op, carry)
+			tree = cPrattify(tree, op)
 			cAppendTerm(tree, right)
 		}
 	}
@@ -297,7 +310,8 @@ func parseBinaryExpression(ts *TokenStream, stoppers map[string]bool) CNode {
 }
 
 // cExprTreeToCST walks the Pratt tree depth-first and emits binary_expression
-// nodes whose children preserve source order (left, opToken, right).
+// nodes whose children are the two operands. op represents the operator once,
+// matching the grammar path.
 func cExprTreeToCST(node any) CNode {
 	tree, ok := node.(*cExprTree)
 	if !ok {
@@ -315,17 +329,9 @@ func cExprTreeToCST(node any) CNode {
 	out := makeNode("binary_expression", spanFromNode(left))
 	if left != nil {
 		appendChild(out, left)
-		out["left"] = left
-	}
-	if tree.carry != nil {
-		for _, tr := range tree.carry.trivia {
-			appendChild(out, tr)
-		}
-		appendChild(out, tree.carry.ref)
 	}
 	if right != nil {
 		appendChild(out, right)
-		out["right"] = right
 	}
 	out["op"] = op.src
 	return out

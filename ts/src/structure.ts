@@ -871,18 +871,41 @@ export function parseParameterDeclaration(ts: TokenStream): CNode | null {
     return node.children.length > 0 ? node : null
   }
 
+  // Parse once in the more permissive abstract form. Trying a concrete
+  // declarator first and then rewinding doubles the work at every nested
+  // unnamed function-pointer parameter.
   const m = ts.mark()
-  let d = parseDeclarator(ts, false)
-  if (!d || (!d.declaredName && !findKind(d, 'declaredName'))) {
-    // No identifier — fall back to abstract declarator.
-    ts.restore(m)
-    d = parseDeclarator(ts, true)
+  let d = parseDeclarator(ts, true)
+  if (d && (d.declaredName || findKind(d, 'declaredName'))) {
+    concretizeDeclarator(d)
   }
+  // An empty abstract declarator is not progress. Leave the token for the
+  // parameter-list loop's defensive one-token recovery.
+  if (ts.mark() === m) d = null
   if (d) {
     node.children.push(d)
     if (d.declaredName) node.declaredName = d.declaredName
   }
   return node.children.length > 0 ? node : null
+}
+
+// A named declarator parsed through the permissive path has the same shape
+// as a concrete parse except for the two kind names along its declarator
+// spine. Do not descend into postfix parameter lists: their declarators make
+// their own concrete/abstract decision.
+function concretizeDeclarator(node: any): void {
+  if (!node) return
+  if (node.kind === 'abstract_declarator') node.kind = 'declarator'
+  else if (node.kind === 'direct_abstract_declarator') {
+    node.kind = 'direct_declarator'
+  }
+  for (const child of node.children || []) {
+    if (child &&
+        (child.kind === 'abstract_declarator' ||
+         child.kind === 'direct_abstract_declarator')) {
+      concretizeDeclarator(child)
+    }
+  }
 }
 
 // Tiny helper used above to detect whether a (possibly-abstract)

@@ -156,8 +156,8 @@ export function evaluateCExpr(
 
   if (isAssignName(op.name)) {
     const out = makeNode('assignment_expression', span)
-    if (terms[0] !== undefined) { out.children.push(terms[0]); out.left = terms[0] }
-    if (terms[1] !== undefined) { out.children.push(terms[1]); out.right = terms[1] }
+    if (terms[0] !== undefined) out.children.push(terms[0])
+    if (terms[1] !== undefined) out.children.push(terms[1])
     out.op = op.src
     return out
   }
@@ -232,8 +232,8 @@ export function evaluateCExpr(
   if (op.infix) {
     const out = makeNode('binary_expression', span)
     out.op = op.src
-    if (terms[0] !== undefined) { out.children.push(terms[0]); out.left = terms[0] }
-    if (terms[1] !== undefined) { out.children.push(terms[1]); out.right = terms[1] }
+    if (terms[0] !== undefined) out.children.push(terms[0])
+    if (terms[1] !== undefined) out.children.push(terms[1])
     return out
   }
 

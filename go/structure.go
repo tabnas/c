@@ -992,11 +992,17 @@ func parseParameterDeclaration(ts *TokenStream) CNode {
 		return nil
 	}
 
+	// Parse once in the permissive abstract form. Trying concrete first and
+	// rewinding doubles the work at every nested unnamed function pointer.
 	m := ts.mark()
-	d := parseDeclarator(ts, false)
-	if d == nil || (d["declaredName"] == nil && findKind(d, "declaredName") == nil) {
-		ts.restore(m)
-		d = parseDeclarator(ts, true)
+	d := parseDeclarator(ts, true)
+	if d != nil && (d["declaredName"] != nil || findKind(d, "declaredName") != nil) {
+		concretizeDeclarator(d)
+	}
+	// An empty abstract declarator is not progress. The parameter-list loop
+	// will consume one token through its defensive recovery path.
+	if ts.mark() == m {
+		d = nil
 	}
 	if d != nil {
 		appendChild(node, d)
@@ -1008,6 +1014,30 @@ func parseParameterDeclaration(ts *TokenStream) CNode {
 		return node
 	}
 	return nil
+}
+
+// concretizeDeclarator changes only the declarator spine. Declarators inside
+// a function postfix make their own concrete/abstract decision.
+func concretizeDeclarator(node CNode) {
+	if node == nil {
+		return
+	}
+	if node["kind"] == "abstract_declarator" {
+		node["kind"] = "declarator"
+	} else if node["kind"] == "direct_abstract_declarator" {
+		node["kind"] = "direct_declarator"
+	}
+	children, _ := node["children"].([]any)
+	for _, child := range children {
+		childNode, _ := child.(CNode)
+		if childNode == nil {
+			continue
+		}
+		kind, _ := childNode["kind"].(string)
+		if kind == "abstract_declarator" || kind == "direct_abstract_declarator" {
+			concretizeDeclarator(childNode)
+		}
+	}
 }
 
 // findKind searches node (recursively) for the first node having the given key.

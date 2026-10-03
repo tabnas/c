@@ -39,6 +39,26 @@ fn empty_and_tiny_inputs() {
 }
 
 #[test]
+fn top_level_call_returns() {
+    let parser = tabnas_c::make();
+    let value = tabnas_c::parse_with(&parser, "f(1);").expect("a top-level call must return");
+    let json = value.to_json();
+    assert_eq!(json["children"][0]["viaPath"], "legacy");
+}
+
+#[test]
+fn nested_abstract_parameters_return() {
+    let parser = tabnas_c::make_with(&tabnas_c::COptions::new().with_extended(true));
+    let depth = 48;
+    let source = format!(
+        "void f({}int{});",
+        "void (*)(".repeat(depth),
+        ")".repeat(depth)
+    );
+    assert!(survives(&parser, &source));
+}
+
+#[test]
 fn unterminated_constructs() {
     let parser = tabnas_c::make_with(&tabnas_c::COptions::new().with_extended(true));
     for source in [

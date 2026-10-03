@@ -704,7 +704,7 @@ fn sorted_punctuators() -> Vec<(&'static str, &'static str)> {
     let mut sorted: Vec<(&str, &str)> = crate::tokens::PUNCTUATORS.to_vec();
     // A stable sort by descending source length, as the canonical
     // `[...PUNCTUATORS].sort((a, b) => b[1].length - a[1].length)` is.
-    sorted.sort_by(|left, right| right.1.len().cmp(&left.1.len()));
+    sorted.sort_by_key(|entry| std::cmp::Reverse(entry.1.len()));
     sorted
 }
 

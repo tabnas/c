@@ -41,7 +41,7 @@ func TestConditionalGroupBasic(t *testing.T) {
 	if !ok || grp["kind"] != "conditional_group" {
 		t.Fatalf("first child not a conditional_group: %v", kids[0])
 	}
-	branches := grp["branches"].([]any)
+	branches := conditionalBranches(grp)
 	if len(branches) != 2 {
 		t.Fatalf("expected 2 branches (if, else), got %d", len(branches))
 	}
@@ -75,8 +75,8 @@ func TestConditionalGroupNested(t *testing.T) {
 		t.Fatalf("not a group: %v", grp)
 	}
 	// The single branch's body should contain a nested conditional_group.
-	branch := grp["branches"].([]any)[0].(CNode)
-	body := branch["body"].([]any)
+	branch := conditionalBranches(grp)[0].(CNode)
+	body := branch["children"].([]any)[1:]
 	foundNested := false
 	for _, b := range body {
 		if bm, ok := b.(CNode); ok && bm["kind"] == "conditional_group" {
@@ -86,6 +86,16 @@ func TestConditionalGroupNested(t *testing.T) {
 	if !foundNested {
 		t.Errorf("nested #if not grouped inside branch body: %v", body)
 	}
+}
+
+func conditionalBranches(group CNode) []any {
+	branches := []any{}
+	for _, child := range group["children"].([]any) {
+		if node, ok := child.(CNode); ok && node["kind"] == "conditional_branch" {
+			branches = append(branches, node)
+		}
+	}
+	return branches
 }
 
 func TestConditionalGroupUnterminated(t *testing.T) {
