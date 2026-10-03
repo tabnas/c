@@ -199,7 +199,7 @@ dependencies = [
 
 [[package]]
 name = "tabnas-c"
-version = "0.5.9"
+version = "0.5.10"
 dependencies = [
  "flate2",
  "indexmap",
@@ -212,7 +212,7 @@ dependencies = [
 
 [[package]]
 name = "tabnas-expr"
-version = "0.5.11"
+version = "0.5.12"
 dependencies = [
  "indexmap",
  "tabnas-jsonic",
@@ -221,7 +221,7 @@ dependencies = [
 
 [[package]]
 name = "tabnas-json"
-version = "0.5.12"
+version = "0.5.13"
 dependencies = [
  "regex",
  "serde_json",
@@ -230,7 +230,7 @@ dependencies = [
 
 [[package]]
 name = "tabnas-jsonic"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "indexmap",
  "regex",
@@ -241,7 +241,7 @@ dependencies = [
 
 [[package]]
 name = "tabnas-parser"
-version = "0.12.8"
+version = "0.12.9"
 dependencies = [
  "indexmap",
  "regex",
@@ -251,7 +251,7 @@ dependencies = [
 
 [[package]]
 name = "tabnas-support"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "serde_json",
 ]
