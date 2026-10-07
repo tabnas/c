@@ -15,8 +15,10 @@ path = "src/lib.rs"
 # The engine, the jsonic base grammar and the expr operator plugin are
 # consumed as SIBLING CHECKOUTS, the standard tabnas development model:
 # clone https://github.com/tabnas/parser, https://github.com/tabnas/jsonic
-# and https://github.com/tabnas/expr next to this repository. None is
-# published, so there is no registry version to fall back on. jsonic in
+# and https://github.com/tabnas/expr next to this repository. All are on
+# crates.io, but this committed manifest stays path-only, so there is no
+# registry version to fall back on here; crates-release.yml rewrites the
+# paths into crates.io requirements when it publishes this crate. jsonic in
 # turn takes https://github.com/tabnas/json the same way.
 tabnas = { package = "tabnas-parser", path = "../../parser/rs" }
 tabnas-jsonic = { path = "../../jsonic/rs" }

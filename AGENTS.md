@@ -196,8 +196,9 @@ npm test               # node --enable-source-maps --test "dist-test/*.test.js"
 
 `npm run build` **embeds the grammar first** (into `src/c.ts`), then
 `tsc --build`s both `src` and `test`. The repo-root [`Makefile`](Makefile)
-wraps both halves: `make build` = `build-ts` + `build-go`, `make test` =
-`test-ts` + `test-go`, plus `clean|reset`.
+wraps all three runtimes: `make build` = `build-ts` + `build-go` +
+`build-rs`, `make test` = `test-ts` + `test-go` + `test-rs`, plus
+`clean|reset`.
 
 The Go half builds against the published modules `go/go.mod` requires;
 a `go.work` over sibling checkouts (kept outside the repo) is only for
@@ -335,13 +336,17 @@ The steps, in order:
    ```bash
    (
      cd go
-     go mod edit -json | grep -q '"Replace": null' || { echo 'go.mod has a replace'; exit 1; }
+     go mod edit -json | jq -e '.Replace == null' >/dev/null || { echo 'go.mod has a replace'; exit 1; }
      GOWORK=off go test -count=1 ./...
    )
    ```
 
    `-count=1` because shared fixtures live outside the Go module, so a
-   changed corpus does not invalidate the test cache.
+   changed corpus does not invalidate the test cache. The check asks `jq`,
+   not `grep`: current Go leaves the `Replace` key out when there is no
+   replace, where older Go printed `"Replace": null`, and `jq` reads a
+   missing key as null, so the check passes on a clean `go.mod` and fails
+   on a replace either way.
 3. **Merge the bump through a reviewed PR.** That is the house convention —
    `CONTRIBUTING.md` squash-merges PRs and takes the title as the commit
    message — and what `release.yml`'s own header describes. A direct push to

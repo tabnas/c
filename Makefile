@@ -5,9 +5,10 @@
 # the 100-program Csmith corpus against the TypeScript golden fixtures.
 # rs/ is the Rust port, which runs the same shared fixtures.
 #
-# Local builds resolve the unpublished @tabnas siblings via the file:
-# devDependencies in ts/package.json and, for Go, a go.work over sibling
-# checkouts of parser/jsonic/expr (and their deps).
+# TypeScript and Go build against the published @tabnas siblings (npm, the
+# Go proxy); admin/scripts/link.sh can point them at local checkouts instead
+# (node_modules symlinks + a go.work one level up). rs/ takes its tabnas
+# crates by path from sibling checkouts of parser/json/jsonic/expr/support.
 
 .PHONY: all build test clean reset build-ts test-ts clean-ts build-go test-go \
         build-rs test-rs clean-rs embed prose prose-counts
@@ -32,7 +33,8 @@ reset:
 	cd ts && npm run reset
 
 # --- Go (port, at parity) ---
-# Requires a go.work covering the sibling parser/jsonic/expr Go modules.
+# Builds against the published modules go/go.mod requires; a go.work over
+# sibling checkouts (admin/scripts/link.sh) is only for unreleased ones.
 build-go:
 	cd go && go build ./...
 
