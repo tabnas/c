@@ -39,8 +39,9 @@ Both of these were staged here and now run from `.github/workflows/`:
   inside `ci/rust/run.sh` so a contributor's local run and the hosted one
   cannot say different things.
 
-  It clones five sibling repositories, because none of the crates it
-  depends on is published and `rs/Cargo.toml` takes each by path. It
+  It clones five sibling repositories, because `rs/Cargo.toml` takes each
+  crate it depends on by path (they are on crates.io, but the committed
+  manifest stays path-only). It
   needs no secrets. The `paths:` lists name everything the gate reads,
   the grammar and its embedder included; a change there that skipped the
   gate would be a grammar change nothing measured.

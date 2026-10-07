@@ -10,7 +10,7 @@ shapes and architecture notes.
 ## Build & test
 
 ```bash
-npm install   # resolves the @tabnas/parser, @tabnas/jsonic, @tabnas/expr siblings
+npm install   # installs @tabnas/parser, jsonic, expr and support from the registry
 npm run build # node embed-grammar.js && tsc --build src test
 npm test      # node --enable-source-maps --test "dist-test/*.test.js"
 ```

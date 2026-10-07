@@ -68,8 +68,9 @@ jobs:
         with:
           path: c
 
-      # Sibling main branches, not releases: none of these crates is
-      # published, so this is the only resolution there is. It is also
+      # Sibling main branches, not releases: rs/Cargo.toml names these
+      # crates by path (they are on crates.io, but the committed manifest
+      # stays path-only), so this is the only resolution there is. It is also
       # the resolution CI already uses for Go, so both ports are measured
       # against the same engine. `json` is what `jsonic` takes in turn,
       # and `support` carries the shared fixture runner as a

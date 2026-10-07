@@ -457,18 +457,20 @@ cst, _ := tabnasc.Parse(`int f(int a){ return a + 1; }`, map[string]any{"extende
 
 **Parity:** `go test`'s `TestCsmithCorpus` is a hard gate and passes **100/100**
 against the TypeScript golden fixtures (the same `.json.gz` set the TS suite
-uses). Build/test the Go port with a `go.work` over the sibling `@tabnas`
-modules (see the CI note in [`AGENTS.md`](AGENTS.md)); one optional upstream
-`@tabnas/expr` sort fix makes the synthetic start=`val` precedence unit test
-deterministic (corpus parity holds without it).
+uses). The Go port builds against the published modules `go/go.mod`
+requires; a `go.work` over sibling `@tabnas` checkouts (see the CI note in
+[`AGENTS.md`](AGENTS.md)) is only for testing unreleased ones. One optional
+upstream `@tabnas/expr` sort fix makes the synthetic start=`val` precedence
+unit test deterministic (corpus parity holds without it).
 
 ## Rust port
 
 A Rust port lives under [`rs/`](rs/): crate `tabnas-c`, library
 `tabnas_c`, a hand-translation of the TypeScript onto the Rust `tabnas`
 engine over `tabnas-jsonic` and `tabnas-expr`. The engine and the two
-plugins are sibling checkouts rather than published crates, so
-`rs/Cargo.toml` takes each by path.
+plugins are on crates.io as well, but this repository's `rs/Cargo.toml`
+takes each by path from a sibling checkout, and the release workflow swaps
+in crates.io versions when it publishes `tabnas-c`.
 
 ```rust
 let value = tabnas_c::parse("int f(int a) { return a + 1; }")?;

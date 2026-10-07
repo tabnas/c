@@ -226,20 +226,20 @@ stopped short.
 
 ## Install
 
-The engine, the jsonic base grammar, the expr operator plugin, and the
-fixture runner are unpublished, so each is a path dependency on a
-sibling checkout:
+The examples on this page name the engine and the jsonic base grammar
+as well as this crate, and all three are on crates.io. The engine's
+package is `tabnas-parser`, whose library is named `tabnas` in code:
 
-```toml
-[dependencies]
-tabnas-c = { path = "../c/rs" }
-tabnas = { package = "tabnas-parser", path = "../parser/rs" }
-tabnas-jsonic = { path = "../jsonic/rs" }
-tabnas-expr = { path = "../expr/rs" }
+```bash
+cargo add tabnas-c tabnas-parser tabnas-jsonic
 ```
 
-Clone `parser`, `json`, `jsonic`, `expr` and `support` next to this
-repository before building.
+In this repository, `rs/Cargo.toml` takes the engine, the jsonic base
+grammar, and the expr operator plugin by path, with the fixture runner as
+a test-only path dependency, so clone `parser`, `json`, `jsonic`, `expr`
+and `support` next to this repository before building. The release
+workflow swaps the three runtime paths for crates.io versions, and drops
+the test-only one, when it publishes this crate.
 
 ## Differences from the canonical TypeScript
 
