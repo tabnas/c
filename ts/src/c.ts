@@ -6515,4 +6515,6 @@ function reclassifyAsTypedef(ctx: Context, name: string): void {
 const VERSION = '0.5.13'
 
 export { C, VERSION }
+export { translate } from './translate.js'
+export type { TranslationPart, TranslationParts } from './translate.js'
 export default C
