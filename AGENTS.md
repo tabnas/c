@@ -95,7 +95,75 @@ const cst = new Tabnas().use(jsonic).use(C).parse('typedef int T; T x = 1;')
 | [`ts/src/structure.ts`](ts/src/structure.ts) | Recursive-descent post-processor for the legacy-fallback long-tail shapes (K&R params, complex compound declarators). |
 | [`ts/src/conditional-groups.ts`](ts/src/conditional-groups.ts) | Translation-unit post-pass that folds `#if`/`#elif`/`#else`/`#endif` runs into `conditional_group` nodes. |
 | [`ts/test/`](ts/test/) | TS tests (compiled to `dist-test/`): `c.test.ts` (parse cases), `csmith.test.ts` (replays the 100-program Csmith regression corpus against committed gzipped fixtures), `parity.test.ts` (runs the shared `test/spec/*.tsv` fixtures). |
+| [`alchemy/render.alc`](alchemy/render.alc) | The **render**: the reader's tree written back as C source (entry `c-render`), an [alchemy](https://github.com/tabnas/alchemy) library a translating host links. See "Translation". |
+| [`ts/embed-translate.js`](ts/embed-translate.js) | Copies `tabnas.plugin.json` and `alchemy/render.alc` into `ts/src/translate.ts` (GENERATED: `translate()`, exported from the package), `go/translate/` (`Translate()` in `go/translate.go`) and `rs/translate/` (`translate()`, `manifest_text()` and `render_text()` in `rs/src/lib.rs`). Runs in `npm run embed` and in the build, after `embed-grammar.js`. |
 | [`test/spec/`](test/spec/) | **Shared cross-runtime fixtures** (`*.tsv`), auto-discovered and run by all three runners: `ts/test/parity.test.ts`, `go/parity_test.go` and `rs/tests/parity_test.rs`. See [`test/AGENTS.md`](test/AGENTS.md). Prefer a fixture here over a one-off in-language assertion. |
+
+## Translation
+
+A host that translates between formats (aless, `alchemy translate`, the
+design in tabnas/transduce `docs/translation.md`) reads this format's
+parts from the `translate` object of
+[`tabnas.plugin.json`](tabnas.plugin.json): C source is read as a tree
+and written from one (`reads`, `writes`), the concrete syntax tree this
+package builds, with a node, an object, at the root (`root`), whose
+shape is the format's own, the schema `c` (`schema`). There is no embed,
+so the target is schema-only: a host composes into the render only from
+a source of the same schema, or from a program that builds a C syntax
+tree, and refuses any other source before reading it.
+
+[`alchemy/render.alc`](alchemy/render.alc) is the render, an
+[alchemy](https://github.com/tabnas/alchemy) library whose entry point
+`c-render` writes the tree back as C source. Its contract is the round
+trip: the text reads back, through this package's reader with the
+options the tree was read with, as the tree it was given, spans
+included. The tree keeps every token with its span, comments, line
+continuations and directives among them (the reader expands no macro and
+follows no `#include`), so the render writes each token where its span
+puts it, and what the tree keeps outside tokens (an expression's
+operator as `op`, the parentheses and commas some of the reader's paths
+drop) from the node that keeps it; a comment the legacy expression path
+moves into a node's `trivia` is written too. The render reads a node's
+`kind`, `children`, `trivia`, `op` and `macroKind`, a token's name, text
+and span, and a raw operator's text and position (`c-keep-key`), and a
+pass before the tree is captured drops every other member: the
+members that repeat a subtree `children` holds (`operand`, `target`,
+`value` and the like) make the tree's events grow fast with the nesting
+of its expressions (for half the Csmith programs, to more than 400 times
+the source's size), and 32 of the 92 that nest within a host's default
+256 levels exceed its default 64 MiB capture as they are. A prefix
+operator the reader keeps raw is read as the TypeScript reader holds it
+and as the Go reader wraps it (`Val`). The manifest's `loss` list says,
+a sentence each, what a written file does not keep: the kind of white
+space, a comment after the last token, where an operator sat in the
+white space around it, which of `(f)` and `f()` a call of no arguments
+was, a `_BitInt`'s width, a parameter list after a parenthesised
+declarator, and a brace-initializer item whose expression the Rust
+reader drops. The file's header comment says how each part is written
+and why.
+
+`npm run embed` in `ts/` (the build runs it) copies the manifest and the
+render into every runtime: `ts/src/translate.ts`, `go/translate/` and
+`rs/translate/`, served as `translate()` in TypeScript, `Translate()` in
+Go and `translate()`, `manifest_text()` and `render_text()` in Rust. The
+translation tests (`ts/test/translate.test.ts`, `go/translate_test.go`,
+`rs/tests/translate_test.rs`) hold the copies to the files, so change the
+files at the root and run the embed. Running the render needs alchemy,
+which this repository does not depend on; the round trip that runs it is
+the hosts' (alchemy-cli's and aless's suites). It was measured on
+2026-10-10 over every input of the repository's fixtures and corpus, all
+of which the TypeScript reader accepts: the 117 `test/spec` rows, the 38
+sources of `ts/test/spec/path-dispatch.tsv` and the 100 Csmith programs.
+The alchemy command ran the render on every tree that nests within the
+128 levels its JSON reader takes: the rows, the sources and 22 of the
+programs. The other 78 programs' trees nest deeper, up to 296 levels, so
+alchemy's TypeScript runtime ran the render on them, with their events
+handed to the program directly. Each of the 255 texts read back, through
+the TypeScript reader, as the tree it was written from, spans included.
+The Go and Rust readers' trees of the rows and the sources, written by
+the alchemy command, read back the same through the reader that built
+them, 155 of 155 each; the Rust reader's tree spells every number as a
+float (`4.0`), which the render reads as the whole number it is.
 
 ## The tabnas engine dependency
 
@@ -190,12 +258,13 @@ From `ts/`:
 
 ```bash
 npm install            # resolves @tabnas/parser, jsonic, expr and support from the registry
-npm run build          # node embed-grammar.js && tsc --build src test
+npm run build          # node embed-grammar.js && node embed-translate.js && tsc --build src test
 npm test               # node --enable-source-maps --test "dist-test/*.test.js"
 ```
 
 `npm run build` **embeds the grammar first** (into `src/c.ts`), then
-`tsc --build`s both `src` and `test`. The repo-root [`Makefile`](Makefile)
+the translation parts (see "Translation"), then `tsc --build`s both
+`src` and `test`. The repo-root [`Makefile`](Makefile)
 wraps all three runtimes: `make build` = `build-ts` + `build-go` +
 `build-rs`, `make test` = `test-ts` + `test-go` + `test-rs`, plus
 `clean|reset`.
@@ -272,7 +341,11 @@ What "correct" means here, in order of authority:
    for `//go:embed` and to `rs/c-grammar.jsonic` for `include_str!`, so all
    three runtimes pick the change up together;
    `the_embedded_grammar_matches_the_source` in `rs/tests/c_test.rs` fails
-   if the Rust copy lags its source.
+   if the Rust copy lags its source. The same holds for the translation
+   parts: edit `tabnas.plugin.json` or `alchemy/render.alc` and run
+   `npm run embed`, never the copies in `ts/src/translate.ts`,
+   `go/translate/` or `rs/translate/`; the translation tests in all three
+   runtimes fail while a copy lags its source.
 
 ## Releasing
 
