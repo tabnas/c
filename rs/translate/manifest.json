@@ -43,6 +43,7 @@
       "A _BitInt's width is not in the tree, since the reader drops the parenthesised width, so the type is written _BitInt() with nothing between the parentheses, which reads back as the same tree and which a compiler refuses.",
       "The parameter list after a parenthesised declarator (the (int) of int (*fp)(int), or of an abstract int (*)(int)) is not in the tree, so it is not written, and the declarator reads back as the same tree, a pointer rather than a pointer to a function.",
       "A prefix operator standing alone as a brace-initializer item ({-1L, &x}) is kept as a raw operator array: the TypeScript reader keeps the operator's position, so it is written in place, and the Go reader, which wraps the array in a Val member, keeps none, so it is written as other operators are. Where the Rust reader drops such an item's expression (DIVERGENCE.md), the item is written empty, and the text does not read back as the same tree."
-    ]
+    ],
+    "whole": "A conditional group, from its #if, #ifdef or #ifndef to its #endif, is folded into one node with the code between its directives only once the whole translation unit is parsed, so a document's tree is complete only at its end: it is read whole before anything is written."
   }
 }
