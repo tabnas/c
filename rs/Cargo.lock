@@ -199,7 +199,7 @@ dependencies = [
 
 [[package]]
 name = "tabnas-c"
-version = "0.5.14"
+version = "0.5.15"
 dependencies = [
  "flate2",
  "indexmap",
@@ -212,7 +212,7 @@ dependencies = [
 
 [[package]]
 name = "tabnas-expr"
-version = "0.5.16"
+version = "0.5.18"
 dependencies = [
  "indexmap",
  "tabnas-jsonic",
