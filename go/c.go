@@ -276,11 +276,23 @@ func MakeC(opts ...map[string]any) (*jsonic.Jsonic, error) {
 	if len(opts) > 0 {
 		pluginOpts = opts[0]
 	}
-	j := jsonic.Make()
-	if err := j.Use(C, pluginOpts); err != nil {
-		return j, err
+	return makeCOn(jsonic.Make(), pluginOpts)
+}
+
+// makeCOn installs the C plugin on base, jsonic's grammar, and declares
+// this parser's own window setting: lex.window false, so that ParseReader
+// reads a reader whole (admin ADR-30). The plugin's matchers are not yet
+// verified at the window's edge, and C's own window comes with its
+// streaming work; a base that declares the window must not carry it to
+// them, so the setting comes last, after everything the base and the
+// plugin set.
+func makeCOn(base *jsonic.Jsonic, pluginOpts map[string]any) (*jsonic.Jsonic, error) {
+	if err := base.Use(C, pluginOpts); err != nil {
+		return base, err
 	}
-	return j, nil
+	no := false
+	base.SetOptions(tabnas.Options{Lex: &tabnas.LexOptions{Window: &no}})
+	return base, nil
 }
 
 // Parse is the one-call entry point: build a C-enabled engine and parse src.
