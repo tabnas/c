@@ -190,7 +190,7 @@ translation_unit
 
 A node's other members are scalars. The named members that repeat one
 of its children up to 0.5 (`operand`, `typeName`, `cond`, `value`,
-`items` and the rest) come from `member(node, name)` instead, exported
+`items`, and the rest) come from `member(node, name)` instead, exported
 with the plugin; [`docs/rules.md`](docs/rules.md) has the table.
 
 ```ts
