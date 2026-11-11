@@ -605,12 +605,13 @@ This package declares **no error codes of its own** — no runtime extends
 to parse surfaces one of the base codes inherited from the engine and
 `@tabnas/jsonic`.
 
-No fixture pins a code today: the shared `test/spec/*.tsv` fixtures contain
-no error rows at all — every row asserts a successful parse. The one code a
-test does pin is the engine's own `cancel`, which the Rust port reports when
-its realize cap is hit (`test/divergent.tsv`, `rs/tests/limits_test.rs`). If
-you add rejection behaviour, pin it with an `ERROR:<code>` fixture row so
-all three runtimes agree on the code, not merely on failing.
+One fixture file pins a code: `test/spec/unfinished.tsv` holds the
+engine's `unexpected` for a construct whose closing token never comes, in
+both modes. Every other row asserts a successful parse. The engine's own
+`cancel` is what the Rust port reports when its realize cap is hit
+(`rs/tests/limits_test.rs`). If you add rejection behaviour, pin it with
+an `ERROR:<code>` fixture row so all three runtimes agree on the code, not
+merely on failing.
 
 ## Untrusted input
 
