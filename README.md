@@ -202,7 +202,7 @@ member(castNode, 'operand')    // the expression cast
 ### Expression shapes
 
 C's eleven binary precedence levels, the prefix and postfix operators,
-the conditional, assignment and comma operators, member access, and the
+the conditional, assignment, and comma operators, member access, and the
 `sizeof` and `_Alignof` forms. An operator is the node's `op`, not a
 token; a call's parentheses and commas, a parenthesised expression's
 parentheses and a member access's `.` or `->` are not kept as tokens,
