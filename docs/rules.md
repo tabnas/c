@@ -372,7 +372,9 @@ With the Rust reader of this change:
   flat and returned a tree. No compiler accepts them.
 - **Speed**: in an optimized build the first ten Csmith programs, 1.4 MB,
   parse in 7.0 s, where 0.5's reader takes 4.3 s: C's expressions are
-  rules, each operand a stack of them. In the crate's
+  rules, each operand a stack of them. Over the same programs the
+  TypeScript reader takes 6.4 s, where 0.5's took 2.0 s, and the Go
+  reader 10.7 s with its process's start, where 0.5's took 27.6 s. In the crate's
   test builds the engine is optimized and its debug assertion over the
   rule stack is off (`rs/Cargo.toml`): that check compares every frame on
   every step, and over stacks that deep it took the Csmith grader past an
