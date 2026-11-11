@@ -148,9 +148,9 @@ export function evaluateCExpr(
 
   if (op.ternary) {
     const out = makeNode('conditional_expression', span)
-    if (terms[0] !== undefined) { out.children.push(terms[0]); out.cond = terms[0] }
-    if (terms[1] !== undefined) { out.children.push(terms[1]); out.then = terms[1] }
-    if (terms[2] !== undefined) { out.children.push(terms[2]); out.else = terms[2] }
+    if (terms[0] !== undefined) out.children.push(terms[0])
+    if (terms[1] !== undefined) out.children.push(terms[1])
+    if (terms[2] !== undefined) out.children.push(terms[2])
     return out
   }
 
@@ -164,7 +164,7 @@ export function evaluateCExpr(
 
   if (op.name === 'dot-infix' || op.name === 'arrow-infix') {
     const out = makeNode('member_expression', span)
-    if (terms[0] !== undefined) { out.children.push(terms[0]); out.object = terms[0] }
+    if (terms[0] !== undefined) out.children.push(terms[0])
     if (terms[1] !== undefined) {
       out.children.push(terms[1])
       if (terms[1].name) out.memberName = terms[1].name
@@ -204,7 +204,7 @@ export function evaluateCExpr(
 
   if (op.name === 'subscript-paren') {
     const out = makeNode('subscript_expression', span)
-    if (terms[0] !== undefined) { out.children.push(terms[0]); out.target = terms[0] }
+    if (terms[0] !== undefined) out.children.push(terms[0])
     const idx = makeNode('index_list', span)
     if (terms[1] !== undefined) idx.children.push(terms[1])
     out.children.push(idx)
@@ -220,13 +220,13 @@ export function evaluateCExpr(
   if (op.prefix) {
     const out = makeNode('unary_expression', span)
     out.op = op.src
-    if (terms[0] !== undefined) { out.children.push(terms[0]); out.operand = terms[0] }
+    if (terms[0] !== undefined) out.children.push(terms[0])
     return out
   }
   if (op.suffix) {
     const out = makeNode('postfix_unary_expression', span)
     out.op = op.src
-    if (terms[0] !== undefined) { out.children.push(terms[0]); out.target = terms[0] }
+    if (terms[0] !== undefined) out.children.push(terms[0])
     return out
   }
   if (op.infix) {

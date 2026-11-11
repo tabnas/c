@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { Tabnas } from '@tabnas/parser'
 import { jsonic } from '@tabnas/jsonic'
 import { loadSpec } from '@tabnas/support'
-import { C } from '../dist/c.js'
+import { C, member } from '../dist/c.js'
 
 // Most tests in this file exercise extension constructs (preprocessor,
 // GCC __attribute__, MSVC __declspec, inline asm, etc.), so the shared
@@ -105,12 +105,11 @@ describe('c parser smoke', () => {
 
   test('hostile fallback: a top-level call returns', () => {
     const out = j.parse('f(1);')
-    assert.equal(out.children[0].viaPath, 'legacy')
+    assert.equal(out.children[0].kind, 'external_declaration')
   })
 
   test('legacy expressions expose operands only through children', () => {
     const out = j.parse('int f(){ __asm__("x"); a /*keep*/ = b + c; }')
-    assert.equal(out.children[0].viaPath, 'legacy')
     const assignment = findKind(out, 'assignment_expression')
     assert.deepEqual(
       assignment.children.map((child: any) => child.kind),
@@ -602,7 +601,7 @@ describe('c parser smoke', () => {
     const body = b.children.slice(1)
     assert.equal(body.length, 1)
     assert.equal(body[0].kind, 'external_declaration')
-    assert.ok(grp.endif)
+    assert.ok(member(grp, 'endif'))
   })
 
   test('preprocessor: #pragma / #error', () => {
@@ -855,8 +854,8 @@ describe('c parser smoke', () => {
     const init = findKind(out.children[0], 'initializer')
     const cond = init.children.find((c: any) => c.kind === 'conditional_expression')
     assert.ok(cond)
-    assert.equal(cond.cond.kind, 'binary_expression')
-    assert.equal(cond.cond.op, '>')
+    assert.equal(member(cond, 'cond').kind, 'binary_expression')
+    assert.equal(member(cond, 'cond').op, '>')
   })
 
   test('expr: postfix subscript and member access', () => {
@@ -870,10 +869,11 @@ describe('c parser smoke', () => {
     assert.equal(rhs.kind, 'member_expression')
     assert.equal(rhs.op, '->')
     assert.equal(rhs.memberName, 'next')
-    assert.equal(rhs.object.kind, 'member_expression')
-    assert.equal(rhs.object.op, '.')
-    assert.equal(rhs.object.memberName, 'field')
-    assert.equal(rhs.object.object.kind, 'subscript_expression')
+    const object = member(rhs, 'object')
+    assert.equal(object.kind, 'member_expression')
+    assert.equal(object.op, '.')
+    assert.equal(object.memberName, 'field')
+    assert.equal(member(object, 'object').kind, 'subscript_expression')
   })
 
   test('expr: prefix unary -x and !y and *p', () => {
@@ -895,9 +895,9 @@ describe('c parser smoke', () => {
     const fn = out.children.find((c: any) => c.declKind === 'function_definition')
     const cast = findKind(fn, 'cast_expression')
     assert.ok(cast, 'expected a cast_expression')
-    assert.ok(cast.typeName)
-    assert.equal(cast.operand.kind, 'identifier_expression')
-    assert.equal(cast.operand.name, 'y')
+    assert.ok(member(cast, 'typeName'))
+    assert.equal(member(cast, 'operand').kind, 'identifier_expression')
+    assert.equal(member(cast, 'operand').name, 'y')
   })
 
   test('expr: sizeof on an expression', () => {
@@ -905,7 +905,7 @@ describe('c parser smoke', () => {
     const out = j.parse(src)
     const u = findKind(out.children[0], 'unary_expression')
     assert.equal(u.op, 'sizeof')
-    assert.equal(u.operand.kind, 'identifier_expression')
+    assert.equal(member(u, 'operand').kind, 'identifier_expression')
   })
 
   test('expr: sizeof on a type-name', () => {
@@ -914,7 +914,7 @@ describe('c parser smoke', () => {
     const u = findKind(out.children[0], 'unary_expression')
     assert.equal(u.op, 'sizeof')
     // operand is a type_name node.
-    assert.equal(u.operand.kind, 'type_name')
+    assert.equal(member(u, 'operand').kind, 'type_name')
   })
 
   test('expr: adjacent string literals concatenate into one literal_expression', () => {
@@ -1063,7 +1063,7 @@ describe('c parser smoke', () => {
     assert.equal(items.length, 2)
     // Each item's value is an initializer that contains a sub-list.
     for (const it of items) {
-      assert.ok(findKind(it.value, 'initializer_list'))
+      assert.ok(findKind(member(it, 'value'), 'initializer_list'))
     }
   })
 
@@ -1071,20 +1071,20 @@ describe('c parser smoke', () => {
     const src = 'static_assert(sizeof(int) == 4, "expected 32-bit int");'
     const out = j.parse(src)
     const sa = findKind(out.children[0], 'static_assert_declaration')
-    assert.ok(sa.condition)
-    assert.equal(sa.condition.kind, 'binary_expression')
-    assert.equal(sa.condition.op, '==')
-    assert.ok(sa.message)
-    assert.equal(sa.message.kind, 'literal_expression')
-    assert.equal(sa.message.literalKind, 'LIT_STRING')
+    assert.ok(member(sa, 'condition'))
+    assert.equal(member(sa, 'condition').kind, 'binary_expression')
+    assert.equal(member(sa, 'condition').op, '==')
+    assert.ok(member(sa, 'message'))
+    assert.equal(member(sa, 'message').kind, 'literal_expression')
+    assert.equal(member(sa, 'message').literalKind, 'LIT_STRING')
   })
 
   test('static_assert: condition only (no message)', () => {
     const src = '_Static_assert(1 + 1 == 2);'
     const out = j.parse(src)
     const sa = findKind(out.children[0], 'static_assert_declaration')
-    assert.ok(sa.condition)
-    assert.equal(sa.message, undefined)
+    assert.ok(member(sa, 'condition'))
+    assert.equal(member(sa, 'message'), undefined)
   })
 
   test('phase O: top-level static_assert with comma in cond expression', () => {
@@ -1095,9 +1095,9 @@ describe('c parser smoke', () => {
     const src = 'static_assert(sizeof(int[2]) == 8, "size");'
     const out = j.parse(src)
     const sa = findKind(out.children[0], 'static_assert_declaration')
-    assert.ok(sa.condition)
-    assert.equal(sa.condition.kind, 'binary_expression')
-    assert.equal(sa.message?.kind, 'literal_expression')
+    assert.ok(member(sa, 'condition'))
+    assert.equal(member(sa, 'condition').kind, 'binary_expression')
+    assert.equal(member(sa, 'message')?.kind, 'literal_expression')
   })
 
   // ---- Attribute spec contents (slice 16) -----------------------------
@@ -1108,15 +1108,16 @@ describe('c parser smoke', () => {
     const at = findKind(out.children[0], 'attribute_spec')
     assert.ok(at)
     assert.equal(at.attributeForm, 'gcc')
-    assert.equal(at.items.length, 3)
+    const items = member(at, 'items')
+    assert.equal(items.length, 3)
     assert.deepEqual(
-      at.items.map((i: any) => i.attributeName),
+      items.map((i: any) => i.attributeName),
       ['noreturn', 'format', 'nonnull'],
     )
     // noreturn has no argument list.
-    assert.equal(at.items[0].argumentList, undefined)
+    assert.equal(member(items[0], 'argumentList'), undefined)
     // format(printf, 1, 2): three arguments.
-    const fmtArgs = at.items[1].argumentList
+    const fmtArgs = member(items[1], 'argumentList')
     assert.ok(fmtArgs)
     const fmtArgChildren = fmtArgs.children.filter(
       (c: any) => c.kind === 'identifier_expression' || c.kind === 'literal_expression',
@@ -1129,8 +1130,8 @@ describe('c parser smoke', () => {
     const out = j.parse(src)
     const at = findKind(out.children[0], 'attribute_spec')
     assert.equal(at.attributeForm, 'msvc')
-    assert.equal(at.items.length, 1)
-    assert.equal(at.items[0].attributeName, 'dllexport')
+    assert.equal(member(at, 'items').length, 1)
+    assert.equal(member(at, 'items')[0].attributeName, 'dllexport')
   })
 
   // ---- GCC __asm__ statement structuring (slice 17) -------------------
@@ -1141,12 +1142,12 @@ describe('c parser smoke', () => {
     const a = findKind(out.children[0], 'asm_statement')
     assert.ok(a)
     assert.deepEqual(a.qualifiers, [])
-    assert.ok(a.template)
+    assert.ok(member(a, 'template'))
     // template's wrapped expression is a literal_expression (string).
-    assert.equal(a.template.expression.kind, 'literal_expression')
-    assert.equal(a.template.expression.literalKind, 'LIT_STRING')
+    assert.equal(member(member(a, 'template'), 'expression').kind, 'literal_expression')
+    assert.equal(member(member(a, 'template'), 'expression').literalKind, 'LIT_STRING')
     // No operand sections.
-    assert.equal(a.asm_outputs, undefined)
+    assert.equal(member(a, 'asm_outputs'), undefined)
   })
 
   test('asm: full extended form with outputs/inputs/clobbers', () => {
@@ -1166,22 +1167,22 @@ describe('c parser smoke', () => {
     const a = findKind(out.children[0], 'asm_statement')
     assert.ok(a)
     assert.deepEqual(a.qualifiers, ['volatile'])
-    assert.ok(a.template)
+    assert.ok(member(a, 'template'))
     // outputs
-    const outputs = a.asm_outputs
+    const outputs = member(a, 'asm_outputs')
     assert.ok(outputs)
     const outOps = outputs.children.filter((c: any) => c.kind === 'asm_operand')
     assert.equal(outOps.length, 1)
-    assert.equal(outOps[0].constraint.value, '"=r"')
-    assert.equal(outOps[0].value.expression.kind, 'identifier_expression')
-    assert.equal(outOps[0].value.expression.name, 'r')
+    assert.equal(member(outOps[0], 'constraint').value, '"=r"')
+    assert.equal(member(member(outOps[0], 'value'), 'expression').kind, 'identifier_expression')
+    assert.equal(member(member(outOps[0], 'value'), 'expression').name, 'r')
     // inputs (two operands)
-    const inputs = a.asm_inputs
+    const inputs = member(a, 'asm_inputs')
     assert.ok(inputs)
     const inOps = inputs.children.filter((c: any) => c.kind === 'asm_operand')
     assert.equal(inOps.length, 2)
     // clobbers
-    const clobbers = a.asm_clobbers
+    const clobbers = member(a, 'asm_clobbers')
     assert.ok(clobbers)
     const cl = clobbers.children.filter((c: any) => c.kind === 'asm_clobber')
     assert.equal(cl.length, 1)
@@ -1199,8 +1200,8 @@ describe('c parser smoke', () => {
     const out = j.parse(src)
     const a = findKind(out.children[0], 'asm_statement')
     assert.deepEqual(a.qualifiers, ['goto'])
-    assert.ok(a.asm_labels)
-    const labels = a.asm_labels.children.filter((c: any) => c.kind === 'asm_label_ref')
+    assert.ok(member(a, 'asm_labels'))
+    const labels = member(a, 'asm_labels').children.filter((c: any) => c.kind === 'asm_label_ref')
     assert.equal(labels.length, 1)
     assert.equal(labels[0].labelName, 'done')
   })
@@ -1214,17 +1215,20 @@ describe('c parser smoke', () => {
     const ctl = findKind(fs, 'for_controls')
     assert.ok(ctl)
     // init slot has a declaration with declared name 'i'.
-    assert.ok(ctl.init)
-    assert.equal(ctl.init.value.kind, 'declaration')
-    assert.equal(findKind(ctl.init, 'init_declarator').declaredName, 'i')
+    const init = member(ctl, 'init')
+    assert.ok(init)
+    assert.equal(member(init, 'value').kind, 'declaration')
+    assert.equal(findKind(init, 'init_declarator').declaredName, 'i')
     // cond slot has a binary_expression i < 10.
-    assert.ok(ctl.cond.value)
-    assert.equal(ctl.cond.value.kind, 'binary_expression')
-    assert.equal(ctl.cond.value.op, '<')
+    const cond = member(member(ctl, 'cond'), 'value')
+    assert.ok(cond)
+    assert.equal(cond.kind, 'binary_expression')
+    assert.equal(cond.op, '<')
     // iter slot has a postfix_unary_expression i++.
-    assert.ok(ctl.iter.value)
-    assert.equal(ctl.iter.value.kind, 'postfix_unary_expression')
-    assert.equal(ctl.iter.value.op, '++')
+    const iter = member(member(ctl, 'iter'), 'value')
+    assert.ok(iter)
+    assert.equal(iter.kind, 'postfix_unary_expression')
+    assert.equal(iter.op, '++')
   })
 
   test('for: init expression form', () => {
@@ -1233,9 +1237,10 @@ describe('c parser smoke', () => {
     const fs = findKind(out.children[0], 'for_statement')
     const ctl = findKind(fs, 'for_controls')
     // init is an expression (assignment_expression), not a declaration.
-    assert.ok(ctl.init.value)
-    assert.equal(ctl.init.value.kind, 'assignment_expression')
-    assert.equal(ctl.init.value.op, '=')
+    const init = member(member(ctl, 'init'), 'value')
+    assert.ok(init)
+    assert.equal(init.kind, 'assignment_expression')
+    assert.equal(init.op, '=')
   })
 
   test('for: empty controls (for(;;))', () => {
@@ -1244,12 +1249,12 @@ describe('c parser smoke', () => {
     const fs = findKind(out.children[0], 'for_statement')
     const ctl = findKind(fs, 'for_controls')
     // All three slots present but each has no value.
-    assert.ok(ctl.init)
-    assert.equal(ctl.init.value, undefined)
-    assert.ok(ctl.cond)
-    assert.equal(ctl.cond.value, undefined)
-    assert.ok(ctl.iter)
-    assert.equal(ctl.iter.value, undefined)
+    assert.ok(member(ctl, 'init'))
+    assert.equal(member(member(ctl, 'init'), 'value'), undefined)
+    assert.ok(member(ctl, 'cond'))
+    assert.equal(member(member(ctl, 'cond'), 'value'), undefined)
+    assert.ok(member(ctl, 'iter'))
+    assert.equal(member(member(ctl, 'iter'), 'value'), undefined)
   })
 
   test('asm: operand with [asm-name] prefix', () => {
@@ -1263,9 +1268,9 @@ describe('c parser smoke', () => {
     `
     const out = j.parse(src)
     const a = findKind(out.children[0], 'asm_statement')
-    const outOps = a.asm_outputs.children.filter((c: any) => c.kind === 'asm_operand')
-    assert.ok(outOps[0].asmName)
-    assert.equal(outOps[0].constraint.value, '"=r"')
+    const outOps = member(a, 'asm_outputs').children.filter((c: any) => c.kind === 'asm_operand')
+    assert.ok(member(outOps[0], 'asmName'))
+    assert.equal(member(outOps[0], 'constraint').value, '"=r"')
   })
 
   test('attributes: C23 [[nodiscard]] on a function declaration', () => {
@@ -1274,8 +1279,8 @@ describe('c parser smoke', () => {
     const at = findKind(out.children[0], 'attribute_spec')
     assert.ok(at)
     assert.equal(at.attributeForm, 'c23')
-    assert.equal(at.items.length, 1)
-    assert.equal(at.items[0].attributeName, 'nodiscard')
+    assert.equal(member(at, 'items').length, 1)
+    assert.equal(member(at, 'items')[0].attributeName, 'nodiscard')
   })
 
   test('attributes: C23 namespaced [[gnu::pure]]', () => {
@@ -1283,19 +1288,19 @@ describe('c parser smoke', () => {
     const out = j.parse(src)
     const at = findKind(out.children[0], 'attribute_spec')
     assert.equal(at.attributeForm, 'c23')
-    assert.equal(at.items.length, 1)
-    assert.equal(at.items[0].attributePrefix, 'gnu')
-    assert.equal(at.items[0].attributeName, 'pure')
+    assert.equal(member(at, 'items').length, 1)
+    assert.equal(member(at, 'items')[0].attributePrefix, 'gnu')
+    assert.equal(member(at, 'items')[0].attributeName, 'pure')
   })
 
   test('attributes: C23 [[deprecated("reason")]] with argument list', () => {
     const src = '[[deprecated("use g instead")]] int old(void);'
     const out = j.parse(src)
     const at = findKind(out.children[0], 'attribute_spec')
-    assert.equal(at.items.length, 1)
-    assert.equal(at.items[0].attributeName, 'deprecated')
-    assert.ok(at.items[0].argumentList)
-    const argLits = at.items[0].argumentList.children.filter(
+    assert.equal(member(at, 'items').length, 1)
+    assert.equal(member(at, 'items')[0].attributeName, 'deprecated')
+    assert.ok(member(member(at, 'items')[0], 'argumentList'))
+    const argLits = member(member(at, 'items')[0], 'argumentList').children.filter(
       (c: any) => c.kind === 'literal_expression',
     )
     assert.equal(argLits.length, 1)
@@ -1312,15 +1317,15 @@ describe('c parser smoke', () => {
     const at = findKind(a, 'attribute_spec')
     assert.ok(at)
     assert.equal(at.attributeForm, 'c23')
-    assert.equal(at.items[0].attributeName, 'deprecated')
+    assert.equal(member(at, 'items')[0].attributeName, 'deprecated')
   })
 
   test('attributes: const-keyword name accepted (e.g. __attribute__((const)))', () => {
     const src = '__attribute__((const)) int f(int);'
     const out = j.parse(src)
     const at = findKind(out.children[0], 'attribute_spec')
-    assert.equal(at.items.length, 1)
-    assert.equal(at.items[0].attributeName, 'const')
+    assert.equal(member(at, 'items').length, 1)
+    assert.equal(member(at, 'items')[0].attributeName, 'const')
   })
 
   test('_Generic: controlling expression and three associations', () => {
@@ -1336,18 +1341,18 @@ describe('c parser smoke', () => {
     const out = j.parse(src)
     const gs = findKind(out.children[0], 'generic_selection')
     assert.ok(gs)
-    assert.ok(gs.controlling)
-    assert.equal(gs.controlling.expression.kind, 'identifier_expression')
-    assert.equal(gs.controlling.expression.name, 'x')
-    assert.equal(gs.associations.length, 3)
+    assert.ok(member(gs, 'controlling'))
+    assert.equal(member(member(gs, 'controlling'), 'expression').kind, 'identifier_expression')
+    assert.equal(member(member(gs, 'controlling'), 'expression').name, 'x')
+    assert.equal(member(gs, 'associations').length, 3)
     assert.deepEqual(
-      gs.associations.map((a: any) => a.associationKind),
+      member(gs, 'associations').map((a: any) => a.associationKind),
       ['type', 'type', 'default'],
     )
     // Each value is structured (not opaque tokens).
-    for (const a of gs.associations) {
-      assert.ok(a.value)
-      assert.equal(a.value.kind, 'literal_expression')
+    for (const a of member(gs, 'associations')) {
+      assert.ok(member(a, 'value'))
+      assert.equal(member(a, 'value').kind, 'literal_expression')
     }
   })
 
@@ -1480,11 +1485,6 @@ describe('path-dispatch spec', () => {
         `path-dispatch.tsv:${row.line}: source produced ${decls.length} external_declaration(s), declIdx=${row.declIdx} out of range`,
       )
       const decl = decls[row.declIdx]
-      assert.equal(
-        decl.viaPath,
-        row.path,
-        `path-dispatch.tsv:${row.line}: viaPath mismatch for ${JSON.stringify(row.src)}`,
-      )
       assert.equal(
         decl.declKind,
         row.declKind,

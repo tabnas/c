@@ -2958,7 +2958,6 @@ return {
       // Tests in test/spec/path-dispatch.tsv assert against this so
       // changes to @looks-simple-decl that silently route shapes from
       // one path to the other are caught.
-      ;(rule.node as any).viaPath = 'grammar'
       // Register every declared name as a typedef when the child
       // declaration's specifier list contained KW_TYPEDEF.
       const u = rule.child.u || {}
@@ -4006,19 +4005,16 @@ return {
     if (!rule.child || !rule.child.node) return
     if (rule.child.name === 'for_init' && !rule.k.tookInit) {
       rule.node.children.push(rule.child.node)
-      rule.node.init = rule.child.node
       rule.k.tookInit = true
       return
     }
     if (rule.child.name === 'for_cond' && !rule.k.tookCond) {
       rule.node.children.push(rule.child.node)
-      rule.node.cond = rule.child.node
       rule.k.tookCond = true
       return
     }
     if (rule.child.name === 'for_iter' && !rule.k.tookIter) {
       rule.node.children.push(rule.child.node)
-      rule.node.iter = rule.child.node
       rule.k.tookIter = true
     }
   },
@@ -4046,13 +4042,11 @@ return {
         rule.child.name === 'simple_declaration' &&
         !rule.node.value) {
       rule.node.children.push(rule.child.node)
-      rule.node.value = rule.child.node
     } else if (rule.k.took === 'expr' &&
                rule.child.name === 'val' &&
                rule.child.node !== rule.node &&
                !rule.node.value) {
       rule.node.children.push(rule.child.node)
-      rule.node.value = rule.child.node
     }
   },
 
@@ -4079,7 +4073,6 @@ return {
         rule.child.node !== rule.node &&
         !rule.node.value) {
       rule.node.children.push(rule.child.node)
-      rule.node.value = rule.child.node
     }
   },
 
@@ -4097,7 +4090,6 @@ return {
         rule.child.node !== rule.node &&
         !rule.node.value) {
       rule.node.children.push(rule.child.node)
-      rule.node.value = rule.child.node
     }
   },
 
@@ -4224,7 +4216,6 @@ return {
     if (!rule.child || !rule.child.node) return
     if (rule.child.name === 'asm_template' && !rule.k.templateTaken) {
       rule.node.children.push(rule.child.node)
-      rule.node.template = rule.child.node
       rule.k.templateTaken = true
       return
     }
@@ -4238,7 +4229,6 @@ return {
         rule.child.node.kind = kind
       }
       rule.node.children.push(rule.child.node)
-      if (kind) (rule.node as any)[kind] = rule.child.node
       rule.k.sectionIdx = idx + 1
       rule.k.lastWasColon = false
       if (!rule.k.takenSecs) rule.k.takenSecs = new Set()
@@ -4254,7 +4244,6 @@ return {
     if (rule.child && rule.child.name === 'val' && rule.child.node &&
         rule.child.node !== rule.node && !rule.k.exprAttached) {
       rule.node.children.push(rule.child.node)
-      rule.node.expression = rule.child.node
       rule.k.exprAttached = true
     }
   },
@@ -4439,7 +4428,6 @@ return {
     if (rule.child && rule.child.name === 'type_name' &&
         rule.child.node && !rule.k.typeNameAttached) {
       rule.node.children.push(rule.child.node)
-      rule.node.operand = rule.child.node
       rule.k.typeNameAttached = true
     }
   },
@@ -4493,17 +4481,16 @@ return {
     if (decided === 'compound_literal') {
       node = makeNode('compound_literal')
       if (rule.k.lparenTkn) pushTokenWithTrivia(node, rule.k.lparenTkn)
-      if (tn) { node.children.push(tn); node.typeName = tn }
+      if (tn) node.children.push(tn)
       if (rule.k.rparenTkn) pushTokenWithTrivia(node, rule.k.rparenTkn)
       if (rule.k.compoundBody) node.children.push(rule.k.compoundBody)
     } else {
       node = makeNode('cast_expression')
       if (rule.k.lparenTkn) pushTokenWithTrivia(node, rule.k.lparenTkn)
-      if (tn) { node.children.push(tn); node.typeName = tn }
+      if (tn) node.children.push(tn)
       if (rule.k.rparenTkn) pushTokenWithTrivia(node, rule.k.rparenTkn)
       if (rule.k.castOperand) {
         node.children.push(rule.k.castOperand)
-        node.operand = rule.k.castOperand
       }
     }
     rule.node = node
@@ -4605,7 +4592,6 @@ return {
     if (!rule.child || !rule.child.node) return
     if (rule.child.name === 'designation' && !rule.k.desigAttached) {
       rule.node.children.push(rule.child.node)
-      rule.node.designation = rule.child.node
       rule.k.desigAttached = true
       return
     }
@@ -4614,14 +4600,12 @@ return {
       const init = makeNode('initializer')
       init.children.push(rule.child.node)
       rule.node.children.push(init)
-      rule.node.value = init
       rule.k.gotValue = true
       return
     }
     if (rule.child.name === 'val' && !rule.k.gotValue &&
         rule.child.node !== rule.node) {
       rule.node.children.push(rule.child.node)
-      rule.node.value = rule.child.node
       rule.k.gotValue = true
     }
   },
@@ -4734,7 +4718,6 @@ return {
       return
     }
     const node = makeNode('generic_selection')
-    node.associations = []
     rule.k.gsNode = node
     rule.node = node
   },
@@ -4773,14 +4756,12 @@ return {
     if (rule.child.name === 'generic_controlling_expression' &&
         !rule.k.ctrlTaken) {
       rule.node.children.push(rule.child.node)
-      rule.node.controlling = rule.child.node
       rule.k.ctrlTaken = true
       return
     }
     if (rule.child.name === 'generic_association' &&
         !rule.k.takenAssocs?.has(rule.child)) {
       rule.node.children.push(rule.child.node)
-      rule.node.associations.push(rule.child.node)
       if (!rule.k.takenAssocs) rule.k.takenAssocs = new Set()
       rule.k.takenAssocs.add(rule.child)
       rule.k.lastWasAssoc = true
@@ -4795,7 +4776,6 @@ return {
     if (rule.child && rule.child.name === 'val' && rule.child.node &&
         rule.child.node !== rule.node && !rule.k.exprAttached) {
       rule.node.children.push(rule.child.node)
-      rule.node.expression = rule.child.node
       rule.k.exprAttached = true
     }
   },
@@ -4838,14 +4818,12 @@ return {
     if (!rule.child || !rule.child.node) return
     if (rule.child.name === 'type_name_assoc' && !rule.k.gaTypeAttached) {
       rule.node.children.push(rule.child.node)
-      rule.node.typeName = rule.child.node
       rule.k.gaTypeAttached = true
       return
     }
     if (rule.child.name === 'val' && rule.child.node !== rule.node &&
         !rule.k.gaValueTaken) {
       rule.node.children.push(rule.child.node)
-      rule.node.value = rule.child.node
       rule.k.gaValueTaken = true
     }
   },
@@ -5309,7 +5287,6 @@ return {
     }
     const node = makeNode('attribute_spec')
     node.attributeForm = 'gcc'
-    node.items = []
     rule.k.asgNode = node
     rule.node = node
   },
@@ -5356,7 +5333,6 @@ return {
     if (rule.child && rule.child.name === 'attribute_item' &&
         rule.child.node && !rule.k.takenItems?.has(rule.child)) {
       rule.node.children.push(rule.child.node)
-      rule.node.items.push(rule.child.node)
       rule.k.asgLastWasItem = true
       if (!rule.k.takenItems) rule.k.takenItems = new Set()
       rule.k.takenItems.add(rule.child)
@@ -5373,7 +5349,6 @@ return {
     }
     const node = makeNode('attribute_spec')
     node.attributeForm = 'msvc'
-    node.items = []
     rule.k.asm2Node = node
     rule.node = node
   },
@@ -5408,7 +5383,6 @@ return {
     if (rule.child && rule.child.name === 'attribute_item' &&
         rule.child.node && !rule.k.takenItems?.has(rule.child)) {
       rule.node.children.push(rule.child.node)
-      rule.node.items.push(rule.child.node)
       rule.k.asm2LastWasItem = true
       if (!rule.k.takenItems) rule.k.takenItems = new Set()
       rule.k.takenItems.add(rule.child)
@@ -5437,7 +5411,6 @@ return {
     }
     const node = makeNode('attribute_spec')
     node.attributeForm = 'c23'
-    node.items = []
     rule.k.as23Node = node
     rule.node = node
   },
@@ -5468,7 +5441,6 @@ return {
     if (rule.child && rule.child.name === 'attribute_item' &&
         rule.child.node && !rule.k.takenItems?.has(rule.child)) {
       rule.node.children.push(rule.child.node)
-      rule.node.items.push(rule.child.node)
       rule.k.as23LastWasItem = true
       if (!rule.k.takenItems) rule.k.takenItems = new Set()
       rule.k.takenItems.add(rule.child)
@@ -5524,7 +5496,6 @@ return {
     if (rule.child && rule.child.name === 'attribute_argument_list' &&
         rule.child.node && !rule.k.aiArgsTaken) {
       rule.node.children.push(rule.child.node)
-      rule.node.argumentList = rule.child.node
       rule.k.aiArgsTaken = true
     }
   },
@@ -5997,11 +5968,9 @@ return {
     if (rule.child.name === 'val' && rule.child.node !== rule.node) {
       if (!rule.k.saCondTaken) {
         rule.node.children.push(rule.child.node)
-        rule.node.condition = rule.child.node
         rule.k.saCondTaken = true
       } else if (rule.k.saComma && !rule.k.saMsgTaken) {
         rule.node.children.push(rule.child.node)
-        rule.node.message = rule.child.node
         rule.k.saMsgTaken = true
       }
     }
@@ -6378,11 +6347,9 @@ function finalizeExternalDeclaration(rule: Rule, ctx: Context): void {
   if (structured) {
     rule.node.children = structured.children
     rule.node.declKind = structured.declKind
-    ;(rule.node as any).viaPath = 'legacy'
     registerMacrosFromTree(rule.node, ctx)
   } else {
     rule.node.declKind = 'unknown'
-    ;(rule.node as any).viaPath = 'legacy-unknown'
   }
 }
 
@@ -6516,5 +6483,6 @@ const VERSION = '0.5.16'
 
 export { C, VERSION }
 export { translate } from './translate.js'
+export { member, memberNames } from './members.js'
 export type { TranslationPart, TranslationParts } from './translate.js'
 export default C

@@ -16,6 +16,7 @@ package tabnasc
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"testing"
 
 	tabnas "github.com/tabnas/parser/go"
@@ -25,11 +26,17 @@ import (
 // TestSpec runs every fixture in the spec directory. FindSpecDir walks up
 // from the package directory, and Dir discovers the files by listing, so
 // adding a .tsv runs it in every runtime without touching any runner.
+//
+// While the TypeScript reader builds the 0.6 tree and this port still
+// builds 0.5's, this runner reads test/spec-0.5, the shared fixtures as
+// 0.5 pinned them; the port's move to the 0.6 tree moves it back to
+// test/spec and deletes the copy (docs/rules.md, "Order").
 func TestSpec(t *testing.T) {
-	dir, err := support.FindSpecDir("")
+	specDir, err := support.FindSpecDir("")
 	if err != nil {
 		t.Fatal(err)
 	}
+	dir := filepath.Join(filepath.Dir(specDir), "spec-0.5")
 
 	support.Runner{
 		ParseRow: func(input string, row *support.Row) (any, error) {

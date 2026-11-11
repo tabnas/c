@@ -30,7 +30,7 @@ fn every_catalogued_shape_takes_the_recorded_path() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("rs/ has a parent")
-        .join("ts/test/spec/path-dispatch.tsv");
+        .join("ts/test/spec-0.5/path-dispatch.tsv");
     let spec = load_spec(
         &path,
         &SpecOptions {

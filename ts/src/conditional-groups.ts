@@ -114,7 +114,6 @@ function buildConditionalGroup(
     const end = i + 1 < starts.length ? starts[i + 1] : match.end
     groupNode.children!.push(buildBranch(children, starts[i], end, matches))
   }
-  groupNode.endif = children[match.end]
   groupNode.children!.push(children[match.end])
   return groupNode
 }
@@ -127,9 +126,6 @@ function buildBranch(
   const dir = leadingConditionalDirective(head)
   const branch = makeNode('conditional_branch', head.span)
   branch.branchKind = dir ? dir.directive : 'unknown'
-  // The directive stays available by name, but structural traversal uses
-  // children exclusively.
-  branch.directive = head
   branch.children = [head, ...foldRange(children, from + 1, to, matches)]
   return branch
 }

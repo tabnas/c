@@ -299,12 +299,10 @@ function parseConditionalExpression(
   if (ts.peekName() !== 'PUNC_QUESTION') return cond
   const node = makeNode('conditional_expression', cond.span)
   node.children.push(cond)
-  node.cond = cond
   takeTokenInto(ts, node) // '?'
   const then = parseExpression(ts, new Set([...stoppers, 'PUNC_COLON']))
   if (then) {
     node.children.push(then)
-    node.then = then
   }
   if (ts.peekName() === 'PUNC_COLON') takeTokenInto(ts, node)
   // Right-assoc: the alternative is itself a conditional-expression.
@@ -313,7 +311,6 @@ function parseConditionalExpression(
   const els = parseAssignmentExpression(ts, stoppers)
   if (els) {
     node.children.push(els)
-    node.else = els
   }
   return node
 }
@@ -392,13 +389,11 @@ function parseUnary(ts: TokenStream, stoppers: Set<string>): CNode | null {
       const tn = makeNode('type_name', spanOf(ts.peek()!))
       consumeBalanced(ts, tn, 'PUNC_LPAREN', 'PUNC_RPAREN')
       node.children.push(tn)
-      node.operand = tn
       return node
     }
     const operand = parseUnary(ts, stoppers)
     if (operand) {
       node.children.push(operand)
-      node.operand = operand
     }
     return node
   }
@@ -415,7 +410,6 @@ function parsePostfix(ts: TokenStream, stoppers: Set<string>): CNode | null {
     if (n === 'PUNC_LBRACKET') {
       const node = makeNode('subscript_expression', target.span)
       node.children.push(target)
-      node.target = target
       const idx = makeNode('index_list', spanOf(ts.peek()!))
       consumeBalanced(ts, idx, 'PUNC_LBRACKET', 'PUNC_RBRACKET')
       node.children.push(idx)
@@ -452,7 +446,6 @@ function parsePostfix(ts: TokenStream, stoppers: Set<string>): CNode | null {
     if (n === 'PUNC_DOT' || n === 'PUNC_ARROW') {
       const node = makeNode('member_expression', target.span)
       node.children.push(target)
-      node.object = target
       const opTkn = takeTokenInto(ts, node)!
       node.op = opTkn.src
       // The member name is the next ID (or possibly a TYPEDEF_NAME, in
@@ -471,7 +464,6 @@ function parsePostfix(ts: TokenStream, stoppers: Set<string>): CNode | null {
     if (POSTFIX_OPS.has(n)) {
       const node = makeNode('postfix_unary_expression', target.span)
       node.children.push(target)
-      node.target = target
       const opTkn = takeTokenInto(ts, node)!
       node.op = opTkn.src
       target = node
@@ -571,7 +563,6 @@ function parsePrimary(ts: TokenStream, stoppers: Set<string>): CNode | null {
       if (ts.peekName() === 'PUNC_LBRACE') {
         const cl = makeNode('compound_literal', tn.span)
         cl.children.push(tn)
-        cl.typeName = tn
         const init = makeNode('initializer_list', spanOf(ts.peek()!))
         consumeBalanced(ts, init, 'PUNC_LBRACE', 'PUNC_RBRACE')
         cl.children.push(init)
@@ -583,8 +574,6 @@ function parsePrimary(ts: TokenStream, stoppers: Set<string>): CNode | null {
         const cast = makeNode('cast_expression', tn.span)
         cast.children.push(tn)
         cast.children.push(operand)
-        cast.typeName = tn
-        cast.operand = operand
         return cast
       }
       // Couldn't parse as cast — restore and fall through to plain
@@ -629,18 +618,14 @@ function parseGenericSelection(ts: TokenStream): CNode {
   if (ctrl) {
     const wrap = makeNode('generic_controlling_expression', ctrl.span)
     wrap.children.push(ctrl)
-    wrap.expression = ctrl
     node.children.push(wrap)
-    node.controlling = wrap
   }
 
-  node.associations = [] as any[]
   while (ts.peekName() === 'PUNC_COMMA') {
     takeTokenInto(ts, node) // ','
     const ga = parseGenericAssociation(ts)
     if (ga) {
       node.children.push(ga)
-      node.associations.push(ga)
     } else break
   }
   if (ts.peekName() === 'PUNC_RPAREN') takeTokenInto(ts, node)
@@ -679,14 +664,12 @@ function parseGenericAssociation(ts: TokenStream): CNode | null {
       takeTokenInto(ts, tn)
     }
     node.children.push(tn)
-    node.typeName = tn
     node.associationKind = 'type'
   }
   if (ts.peekName() === 'PUNC_COLON') takeTokenInto(ts, node)
   const expr = parseExpression(ts, new Set(['PUNC_COMMA', 'PUNC_RPAREN']))
   if (expr) {
     node.children.push(expr)
-    node.value = expr
   }
   return node
 }

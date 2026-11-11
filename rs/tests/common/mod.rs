@@ -20,10 +20,16 @@ use std::path::PathBuf;
 use tabnas::{Options, Tabnas};
 use tabnas_support::{find_spec_dir, Failure, Row, Value};
 
-/// The shared `test/spec` directory. The search starts ABOVE `rs/`,
-/// which is where the TypeScript runner starts it too.
+/// The shared fixtures this port runs. The search starts ABOVE `rs/`,
+/// which is where the TypeScript runner starts it too. While the
+/// TypeScript reader builds the 0.6 tree and this port still builds
+/// 0.5's, it reads `test/spec-0.5`, the shared fixtures as 0.5 pinned
+/// them; the port's move to the 0.6 tree moves it back to `test/spec` and
+/// deletes the copy (`docs/rules.md`, "Order").
 pub fn spec_dir() -> PathBuf {
-    find_spec_dir(Some(&PathBuf::from(env!("CARGO_MANIFEST_DIR")))).expect("test/spec directory")
+    find_spec_dir(Some(&PathBuf::from(env!("CARGO_MANIFEST_DIR"))))
+        .expect("test/spec directory")
+        .with_file_name("spec-0.5")
 }
 
 /// The `opts` column is `{plugin?, start?}`: `plugin` is the C plugin's

@@ -292,7 +292,6 @@ export function parseC23AttributeSpec(ts: TokenStream): CNode | null {
   const startTkn = ts.peek()!
   const node = makeNode('attribute_spec', spanOf(startTkn))
   node.attributeForm = 'c23'
-  node.items = [] as any[]
   ts.takeInto(node) // first '['
   ts.takeInto(node) // second '['
 
@@ -309,7 +308,6 @@ export function parseC23AttributeSpec(ts: TokenStream): CNode | null {
     const item = parseAttributeItem(ts)
     if (item) {
       node.children.push(item)
-      node.items.push(item)
     } else {
       ts.takeInto(node)
     }
@@ -351,7 +349,6 @@ export function parseAttributeSpec(ts: TokenStream): CNode | null {
   }
 
   // Attribute item list inside the (innermost) parentheses.
-  node.items = [] as any[]
   while (!ts.done() && ts.peekName() !== 'PUNC_RPAREN') {
     if (ts.peekName() === 'PUNC_COMMA') {
       ts.takeInto(node)
@@ -360,7 +357,6 @@ export function parseAttributeSpec(ts: TokenStream): CNode | null {
     const item = parseAttributeItem(ts)
     if (item) {
       node.children.push(item)
-      node.items.push(item)
     } else {
       // Defensive: avoid infinite loop on unrecognised tokens.
       ts.takeInto(node)
@@ -421,7 +417,6 @@ function parseAttributeItem(ts: TokenStream): CNode | null {
     }
     if (ts.peekName() === 'PUNC_RPAREN') ts.takeInto(args)
     node.children.push(args)
-    node.argumentList = args
   }
 
   return node
@@ -1110,7 +1105,6 @@ function parseInitializerItem(ts: TokenStream): CNode | null {
     const desig = parseDesignation(ts)
     if (desig) {
       node.children.push(desig)
-      node.designation = desig
     }
   }
 
@@ -1121,7 +1115,6 @@ function parseInitializerItem(ts: TokenStream): CNode | null {
       const init = makeNode('initializer', sub.span)
       init.children.push(sub)
       node.children.push(init)
-      node.value = init
     }
   } else {
     const expr = parseExpression(
@@ -1129,7 +1122,6 @@ function parseInitializerItem(ts: TokenStream): CNode | null {
     )
     if (expr) {
       node.children.push(expr)
-      node.value = expr
     }
   }
   return node.children.length > 0 ? node : null
@@ -1156,14 +1148,12 @@ export function parseStaticAssertDeclaration(ts: TokenStream): CNode {
   )
   if (cond) {
     node.children.push(cond)
-    node.condition = cond
   }
   if (ts.peekName() === 'PUNC_COMMA') {
     ts.takeInto(node) // ','
     const msg = parseExpression(ts, new Set(['PUNC_RPAREN']))
     if (msg) {
       node.children.push(msg)
-      node.message = msg
     }
   }
   if (ts.peekName() === 'PUNC_RPAREN') ts.takeInto(node)
@@ -1401,7 +1391,6 @@ function parseForStatement(ts: TokenStream): CNode {
         const decl = parseDeclaration(ts)
         if (decl) {
           initNode.children.push(decl)
-          initNode.value = decl
         }
         // The declaration's terminating ';' is part of the declaration
         // node, so we don't expect to see another `;` here.
@@ -1409,7 +1398,6 @@ function parseForStatement(ts: TokenStream): CNode {
         const expr = parseExpression(ts, new Set(['PUNC_SEMI']))
         if (expr) {
           initNode.children.push(expr)
-          initNode.value = expr
         }
         if (ts.peekName() === 'PUNC_SEMI') ts.takeInto(initNode)
       }
@@ -1417,7 +1405,6 @@ function parseForStatement(ts: TokenStream): CNode {
       ts.takeInto(initNode) // empty init: just `;`
     }
     ctl.children.push(initNode)
-    ctl.init = initNode
 
     // cond: expression?
     const condNode = makeNode('for_cond', spanOf(ts.peek() || startTkn))
@@ -1425,12 +1412,10 @@ function parseForStatement(ts: TokenStream): CNode {
       const expr = parseExpression(ts, new Set(['PUNC_SEMI', 'PUNC_RPAREN']))
       if (expr) {
         condNode.children.push(expr)
-        condNode.value = expr
       }
     }
     if (ts.peekName() === 'PUNC_SEMI') ts.takeInto(condNode)
     ctl.children.push(condNode)
-    ctl.cond = condNode
 
     // iter: expression?
     const iterNode = makeNode('for_iter', spanOf(ts.peek() || startTkn))
@@ -1438,11 +1423,9 @@ function parseForStatement(ts: TokenStream): CNode {
       const expr = parseExpression(ts, new Set(['PUNC_RPAREN']))
       if (expr) {
         iterNode.children.push(expr)
-        iterNode.value = expr
       }
     }
     ctl.children.push(iterNode)
-    ctl.iter = iterNode
 
     if (ts.peekName() === 'PUNC_RPAREN') ts.takeInto(ctl)
     node.children.push(ctl)
@@ -1556,10 +1539,8 @@ function parseAsmStatement(ts: TokenStream): CNode {
   const t = parseExpression(ts, new Set(['PUNC_COLON', 'PUNC_RPAREN']))
   if (t) {
     template.children.push(t)
-    template.expression = t
   }
   node.children.push(template)
-  node.template = template
 
   const sections = [
     'asm_outputs', 'asm_inputs', 'asm_clobbers', 'asm_labels',
@@ -1580,7 +1561,6 @@ function parseAsmStatement(ts: TokenStream): CNode {
       if (ts.peekName() === 'PUNC_COMMA') ts.takeInto(sec)
     }
     node.children.push(sec)
-    ;(node as any)[sections[sectionIdx]] = sec
     sectionIdx++
   }
 
@@ -1600,7 +1580,6 @@ function parseAsmOperand(ts: TokenStream): CNode | null {
     const nameNode = makeNode('asm_name', spanOf(startTkn))
     consumeBalanced(ts, nameNode, 'PUNC_LBRACKET', 'PUNC_RBRACKET')
     node.children.push(nameNode)
-    node.asmName = nameNode
   }
 
   // Constraint string.
@@ -1611,7 +1590,6 @@ function parseAsmOperand(ts: TokenStream): CNode | null {
     constraint.children.push(taken.ref)
     constraint.value = taken.tkn.src
     node.children.push(constraint)
-    node.constraint = constraint
   }
 
   // ( c-expression )
@@ -1621,11 +1599,9 @@ function parseAsmOperand(ts: TokenStream): CNode | null {
     const inner = parseExpression(ts, new Set(['PUNC_RPAREN']))
     if (inner) {
       expr.children.push(inner)
-      expr.expression = inner
     }
     if (ts.peekName() === 'PUNC_RPAREN') ts.takeInto(expr)
     node.children.push(expr)
-    node.value = expr
   }
 
   return node.children.length > 0 ? node : null
