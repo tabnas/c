@@ -65,12 +65,11 @@ extension verbatim.
 It is a port of [`@jsonic/c`](https://github.com/jsonicjs/c) onto the
 [Tabnas](https://github.com/tabnas/parser) engine. Like `@tabnas/zon`, this
 is a **jsonic plugin**: it layers on `@tabnas/jsonic`'s relaxed-JSON grammar
-(used as the DSL the grammar file is authored in). From 0.6 the TypeScript
-and Go readers build every declaration with their own grammar rules, in
-one path, and read their expressions with
+(used as the DSL the grammar file is authored in). From 0.6 the
+TypeScript, Go and Rust readers build every declaration with their own
+grammar rules, in one path, and read their expressions with
 [`@tabnas/expr`](https://github.com/tabnas/expr) and its options for a
-language like C; [`docs/rules.md`](docs/rules.md) is the design, and says
-what the Rust reader builds until it moves.
+language like C; [`docs/rules.md`](docs/rules.md) is the design.
 Install it on a jsonic-enabled engine:
 
 ```ts
@@ -88,7 +87,7 @@ const cst = new Tabnas().use(jsonic).use(C).parse('typedef int T; T x = 1;')
 |---|---|
 | [`ts/`](ts/) | **Canonical** implementation — the `@tabnas/c` package. |
 | [`go/`](go/) | **Go port**, at parity with the canonical. A hand-translation of the TypeScript: lexer (`tokens.go`/`symbols.go`/`matchers.go`), node helpers (`cst.go`/`node.go`), grammar parse/install + ref map (`grammar_install.go`/`refs.go`: the translation unit, conditional groups, external declarations and their end, the preprocessor directives), C's expressions, read by `@tabnas/expr` with C's operator table (`expr_grammar.go`), the armed fallback (`fallback.go`), the members API (`members.go`, `Member`), what a declaration binds read from its tokens (`declare.go`), the declaration, specifier, struct/union/enum, initializer and statement refs (`refs_newpath*.go`), and the extension constructs (`refs_ext.go`). `tabnasc.Parse`/`MakeC`/`ParseMeta` build the same tree as TypeScript; `go test` runs the shared fixtures (`parity_test.go`), the Csmith corpus against the TypeScript golden fixtures (`csmith_test.go`, 100/100), the repetition test (`repeat_test.go`) and the tree's invariants (`tree_test.go`). The upstream `@jsonic/c` is TypeScript-only, so this is a from-scratch hand-translation. |
-| [`rs/`](rs/) | **Rust port** — crate `tabnas-c` (lib `tabnas_c`), a hand-translation of the TypeScript onto the Rust `tabnas` engine over `tabnas-jsonic` and `tabnas-expr`, all taken as path dependencies on sibling checkouts. `cargo test` runs the shared `test/spec/*.tsv` fixtures (`tests/parity_test.rs`), the Csmith corpus (`tests/csmith_test.rs`) and the path-dispatch catalogue (`tests/path_dispatch_test.rs`); the inputs where it answers differently from the canonical are recorded in [`DIVERGENCE.md`](DIVERGENCE.md) and pinned by `test/divergent.tsv` and named tests. See [`rs/AGENTS.md`](rs/AGENTS.md). |
+| [`rs/`](rs/) | **Rust port** — crate `tabnas-c` (lib `tabnas_c`), a hand-translation of the TypeScript onto the Rust `tabnas` engine over `tabnas-jsonic`, taken as path dependencies on sibling checkouts (the manifest still declares `tabnas-expr`, which the crate no longer uses). C's expression rules' refs are `src/expression.rs`, the armed fallback `src/fallback.rs` and `member(node, name)` `src/members.rs`. `cargo test` runs the shared `test/spec/*.tsv` fixtures (`tests/parity_test.rs`), the Csmith corpus and every Csmith tree's invariants (`tests/csmith_test.rs`), the tree's invariants over the fixtures (`tests/tree_test.rs`), the repetitions (`tests/repeat_test.rs`) and the path-dispatch catalogue (`tests/path_dispatch_test.rs`); the inputs where it answers differently from the canonical are recorded in [`DIVERGENCE.md`](DIVERGENCE.md) and pinned by `test/divergent.tsv` and named tests. See [`rs/AGENTS.md`](rs/AGENTS.md). |
 | [`ts/c-grammar.jsonic`](ts/c-grammar.jsonic) | **Single source of truth** for the declarative grammar (rule shapes for the whole C surface), authored in jsonic-DSL syntax. |
 | [`ts/embed-grammar.js`](ts/embed-grammar.js) | Embeds `c-grammar.jsonic` into `src/c.ts` (between `BEGIN/END EMBEDDED` markers) as the `grammarText` string literal, **and** copies it verbatim to `go/c-grammar.jsonic` for `//go:embed`. The grammar contains backticks, so the Go side embeds from the file rather than inlining a raw string (unlike the smaller ports). Runs as the first half of `npm run build`. |
 | [`ts/src/c.ts`](ts/src/c.ts) | Plugin entry: token catalog wiring, lex matchers, grammar install, and the `@`-named ref map (conditions/actions bound by name from the grammar), the external declaration's dispatch and finishing (the names it binds) among them. |
@@ -131,9 +130,8 @@ drop) from the node that keeps it; a comment the legacy expression path
 moves into a node's `trivia` is written too. The render reads a node's
 `kind`, `children`, `trivia`, `op` and `macroKind`, a token's name, text
 and span, and a raw operator's text and position (`c-keep-key`), and a
-pass before the tree is captured drops every other member: in the 0.5
-tree the Rust reader builds until it moves, the members that
-repeat a subtree `children` holds (`operand`, `target`, `value` and the
+pass before the tree is captured drops every other member: in the tree
+up to 0.5, the members that repeat a subtree `children` holds (`operand`, `target`, `value` and the
 like) make the tree's events grow fast with the nesting of its
 expressions (for half the Csmith programs, to more than 400 times the
 source's size), and 32 of the 92 that nest within a host's default 256
@@ -299,13 +297,14 @@ testing unreleased ones. `cd go && go test ./...` runs the unit tests, the
 shared `test/spec/*.tsv` fixtures (`TestSpec`) and the Csmith parity gate
 (`TestCsmithCorpus`).
 
-The Rust half takes the engine, `jsonic` and `expr` as path dependencies
-on sibling checkouts, with `support` as a path dev-dependency and `json`
+The Rust half takes the engine and `jsonic` as path dependencies on
+sibling checkouts (the manifest also declares `expr`, which the crate no
+longer uses), with `support` as a path dev-dependency and `json`
 arriving through `jsonic` (`rs/Cargo.toml`), so nothing has to be
 published; `cd rs && cargo test --all-targets && cargo test --doc` runs
 the unit tests, the shared fixtures (`tests/parity_test.rs`), the Csmith
-gate (`tests/csmith_test.rs`), the path-dispatch catalogue and the README's
-examples. `ci/rust/run.sh` is the full gate, clippy and the lockfile check
+gate (`tests/csmith_test.rs`), the tree's invariants, the repetitions, the
+path-dispatch catalogue and the README's examples. `ci/rust/run.sh` is the full gate, clippy and the lockfile check
 included. See [`rs/AGENTS.md`](rs/AGENTS.md).
 
 ## Verify your work
@@ -345,11 +344,8 @@ What "correct" means here, in order of authority:
    `ts/test/parity.test.ts`, `go/parity_test.go` and
    `rs/tests/parity_test.rs`), and `ts/test/csmith.test.ts` /
    `TestCsmithCorpus` / `rs/tests/csmith_test.rs` compare every seed's
-   CST against the committed golden fixtures. The Rust grader accepts the
-   37 seeds named in its `KNOWN_DIVERGENT` list when they differ ONLY by
-   the divergence `DIVERGENCE.md` section 3 records, and fails when that
-   set changes in either direction. A row or seed green in one runtime
-   and red in another is a failure, not a discrepancy.
+   CST against the committed golden fixtures. A row or seed green in one
+   runtime and red in another is a failure, not a discrepancy.
 2. **The five version sites agree** — `ts/package.json` `"version"`,
    `VERSION` in `ts/src/c.ts`, `const VERSION` in `go/c.go`, `version` in
    `rs/Cargo.toml` and `pub const VERSION` in `rs/src/lib.rs`.
@@ -363,11 +359,10 @@ What "correct" means here, in order of authority:
    which embeds first) — never hand-edit between the `BEGIN/END EMBEDDED`
    markers. The embed step copies the grammar to `go/c-grammar.jsonic`
    for `//go:embed` and to `rs/c-grammar.jsonic` for `include_str!`, so all
-   three runtimes pick the change up together, but not the Rust copy while
-   the Rust reader builds 0.5's tree (`RUST_ON_0_5` in
-   `ts/embed-grammar.js`; [`docs/rules.md`](docs/rules.md), "Order");
-   `TestEmbeddedGrammarMatchesSource` in `go/tree_test.go` fails if the Go
-   copy lags its source. The same holds for the translation
+   three runtimes pick the change up together;
+   `TestEmbeddedGrammarMatchesSource` in `go/tree_test.go` and
+   `the_embedded_grammar_matches_the_source` in `rs/tests/c_test.rs` fail
+   if a copy lags its source. The same holds for the translation
    parts: edit `tabnas.plugin.json` or `alchemy/render.alc` and run
    `npm run embed`, never the copies in `ts/src/translate.ts`,
    `go/translate/` or `rs/translate/`; the translation tests in all three
@@ -637,9 +632,7 @@ to instead:
 
 1. **Csmith corpus, 100/100.** `ts/test/csmith-corpus/seed-*.c` are 100
    random C programs; `ts/test/csmith-fixtures/seed-*.json.gz` are the
-   golden CSTs. All three runtimes replay every seed and compare; the
-   Rust grader's accepted exceptions are the seeds named in its
-   `KNOWN_DIVERGENT` list, recorded in `DIVERGENCE.md`. Zero
+   golden CSTs. All three runtimes replay every seed and compare. Zero
    `declKind: 'unknown'` declarations is asserted separately in
    TypeScript (`ts/test/csmith.test.ts`) and in Rust
    (`rs/tests/csmith_test.rs`); the Go corpus test has no such

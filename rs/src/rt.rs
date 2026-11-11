@@ -16,7 +16,6 @@ use std::rc::Rc;
 use tabnas::{Context, Lexer, Rule, Token, Value};
 
 use crate::cst::{self, Item};
-use crate::sets;
 use crate::state::{self, handle_node, node_handle, with_state};
 
 // ---------------------------------------------------------------------
@@ -40,19 +39,6 @@ pub fn set_node_id(rule: &mut Rule, node: usize) {
     set_node(rule, node_handle(node));
 }
 
-/// The rule's node, replaced by a fresh node of `kind` when it is not
-/// already one of that kind.
-pub fn ensure_node(rule: &mut Rule, kind: &str) -> usize {
-    match node_id(rule) {
-        Some(node) if cst::kind_of(node) == kind => node,
-        _ => {
-            let node = cst::new_node(kind, None);
-            set_node_id(rule, node);
-            node
-        }
-    }
-}
-
 /// The completed child rule's node, when it is a CST node.
 pub fn child_node_id(rule: &Rule) -> Option<usize> {
     handle_node(&rule.child_node)
@@ -64,37 +50,6 @@ pub fn child_name(rule: &Rule) -> String {
         .as_ref()
         .map(|child| child.name.as_str().to_string())
         .unwrap_or_default()
-}
-
-/// Whether the rule that closed under this one is the `val` the C
-/// grammar pushed to parse an expression.
-///
-/// The canonical TypeScript reads `rule.child.name === 'val'`, and its
-/// `rule.child` is the rule that was PUSHED — a later `r:` replacement
-/// never rewrites it. The Rust engine instead records the rule that
-/// actually popped, so an expression with an operator in it reports the
-/// `@tabnas/expr` rule (`expr`, `ternary`, ...) that `val` turned into
-/// and the plain name test silently drops the expression. Walking
-/// `prev_rule` back to the head of the replacement chain asks the same
-/// question the canonical does: was the pushed rule `val`?
-///
-/// `PREV_CHAIN_CAP` bounds the walk. The chain is one link per `r:` in
-/// the expression, so a pathological input cannot make this quadratic.
-pub fn child_is_val(rule: &Rule) -> bool {
-    const PREV_CHAIN_CAP: usize = 64;
-    let mut current = rule.child_rule.clone();
-    let mut hops = 0;
-    while let Some(snapshot) = current {
-        if snapshot.name.as_str() == "val" {
-            return true;
-        }
-        hops += 1;
-        if PREV_CHAIN_CAP <= hops {
-            return false;
-        }
-        current = snapshot.prev_rule.clone();
-    }
-    false
 }
 
 /// The parent rule's node, when it carries one.
@@ -118,10 +73,6 @@ pub fn k_del(rule: &mut Rule, key: &str) {
 
 pub fn k_bool(rule: &Rule, key: &str) -> bool {
     matches!(rule.k.get(key), Some(Value::Bool(true)))
-}
-
-pub fn k_has(rule: &Rule, key: &str) -> bool {
-    rule.k.get(key).is_some_and(|value| !value.is_undefined())
 }
 
 pub fn k_num(rule: &Rule, key: &str) -> i64 {
@@ -326,10 +277,6 @@ pub fn list_get(list: usize) -> Vec<usize> {
     with_state(|state| state.lists.get(list).cloned().unwrap_or_default())
 }
 
-pub fn list_len(list: usize) -> usize {
-    with_state(|state| state.lists.get(list).map(Vec::len).unwrap_or_default())
-}
-
 /// The token list a rule keeps under `key`, creating it when absent.
 pub fn k_list(rule: &mut Rule, key: &str) -> usize {
     match rule.k.get(key) {
@@ -340,19 +287,6 @@ pub fn k_list(rule: &mut Rule, key: &str) -> usize {
             list
         }
     }
-}
-
-/// The token list a rule keeps under `key`, without creating one.
-pub fn k_list_opt(rule: &Rule, key: &str) -> Option<usize> {
-    match rule.k.get(key) {
-        Some(Value::Number(id)) => Some(*id as usize),
-        _ => None,
-    }
-}
-
-/// The tokens of the list a rule keeps under `key`, or an empty vector.
-pub fn k_list_tokens(rule: &Rule, key: &str) -> Vec<usize> {
-    k_list_opt(rule, key).map(list_get).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------
@@ -372,6 +306,48 @@ pub fn open_token(rule: &Rule, index: usize) -> Option<usize> {
 /// Copy the rule's first close token into the arena.
 pub fn c0(rule: &Rule) -> Option<usize> {
     rule.c0().map(cst::intern_token)
+}
+
+/// Copy the rule's Nth close token into the arena.
+pub fn close_token(rule: &Rule, index: usize) -> Option<usize> {
+    rule.c.get(index).map(cst::intern_token)
+}
+
+pub fn u_has(rule: &Rule, key: &str) -> bool {
+    rule.u.get(key).is_some_and(|value| !value.is_undefined())
+}
+
+pub fn u_del(rule: &mut Rule, key: &str) {
+    rule.u_mut().remove(key);
+}
+
+pub fn u_str(rule: &Rule, key: &str) -> String {
+    match rule.u.get(key) {
+        Some(Value::String(text)) => text.clone(),
+        _ => String::new(),
+    }
+}
+
+pub fn u_set_str(rule: &mut Rule, key: &str, text: &str) {
+    rule.u_mut()
+        .insert(key.to_string(), Value::String(text.to_string()));
+}
+
+pub fn u_num(rule: &Rule, key: &str) -> Option<i64> {
+    match rule.u.get(key) {
+        Some(Value::Number(number)) => Some(*number as i64),
+        _ => None,
+    }
+}
+
+pub fn u_set_num(rule: &mut Rule, key: &str, number: i64) {
+    rule.u_mut()
+        .insert(key.to_string(), Value::Number(number as f64));
+}
+
+/// The id of the rule that closed under this one, when there is one.
+pub fn child_rule_id(rule: &Rule) -> Option<usize> {
+    rule.child_rule.as_ref().map(|child| child.i)
 }
 
 // ---------------------------------------------------------------------
@@ -536,18 +512,6 @@ pub fn node_from_token(kind: &str, token: usize) -> usize {
     let node = cst::new_node(kind, None);
     push_token(node, token);
     node
-}
-
-/// True when the first non-trivia token of the list has this name.
-pub fn first_non_trivia_is(tokens: &[usize], name: &str) -> bool {
-    for token in tokens {
-        let token_name = cst::token_name(*token);
-        if sets::is_trivia(&token_name) {
-            continue;
-        }
-        return token_name == name;
-    }
-    false
 }
 
 /// Append a child node to a node.

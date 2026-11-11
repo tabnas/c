@@ -228,41 +228,12 @@ fn string_at(entries: &indexmap::IndexMap<String, Value>, key: &str) -> Option<S
     }
 }
 
-/// The seeds whose only difference from the golden fixture is the
-/// recorded divergence of DIVERGENCE.md section 3. MEASURED, not
-/// guessed: this is the list the assertion below printed when it was
-/// run with the list empty, and it is exactly the set of golden
-/// fixtures that carry an `initializer_item` with a `{}` child, which
-/// is how `toFixture` writes the raw operator array the canonical
-/// leaves on such an item. Pinning the seeds by name means a repair
-/// goes red here and says which names to delete, and a regression
-/// that widens the set goes red the same way.
-const KNOWN_DIVERGENT: &[&str] = &[
-    "seed-002", "seed-004", "seed-006", "seed-008", "seed-010", "seed-022", "seed-026", "seed-027",
-    "seed-030", "seed-035", "seed-039", "seed-044", "seed-046", "seed-047", "seed-048", "seed-049",
-    "seed-051", "seed-055", "seed-056", "seed-057", "seed-060", "seed-063", "seed-069", "seed-073",
-    "seed-074", "seed-077", "seed-079", "seed-082", "seed-085", "seed-086", "seed-087", "seed-090",
-    "seed-091", "seed-093", "seed-094", "seed-095", "seed-098",
-];
-
-/// Remove the empty-object child the canonical writes for an
-/// initializer item whose expression it left un-evaluated.
-fn strip_unevaluated_items(text: &str) -> String {
-    text.replace(
-        r#"{"k":"initializer_item","children":[{}]}"#,
-        r#"{"k":"initializer_item"}"#,
-    )
-}
-
 fn corpus_dir() -> PathBuf {
     repo_root().join("ts/test/csmith-corpus")
 }
 
 fn fixtures_dir() -> PathBuf {
-    // While this port builds 0.5's tree it reads the fixtures as 0.5
-    // pinned them; its move to the 0.6 tree reads `ts/test/csmith-fixtures`
-    // again and deletes the copy (`docs/rules.md`, "Order").
-    repo_root().join("ts/test/csmith-fixtures-0.5")
+    repo_root().join("ts/test/csmith-fixtures")
 }
 
 fn repo_root() -> PathBuf {
@@ -346,7 +317,6 @@ fn csmith_corpus_matches_the_golden_fixtures() {
     }
 
     let mut passed = 0usize;
-    let mut divergent: Vec<String> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
     for path in &seeds {
         let name = path.file_stem().unwrap().to_string_lossy().to_string();
@@ -386,6 +356,13 @@ fn csmith_corpus_matches_the_golden_fixtures() {
             ));
             continue;
         }
+        // The tree's own invariants, on the parse this grades, as
+        // `tree.test.ts` holds every Csmith tree to them.
+        let problems = common::tree_problems(&value);
+        if !problems.is_empty() {
+            failures.push(format!("{name}: {problems:?}"));
+            continue;
+        }
         let fixture = fixtures_dir().join(format!("{name}.json.gz"));
         let raw = match gunzip(&fixture) {
             Ok(raw) => raw,
@@ -408,25 +385,13 @@ fn csmith_corpus_matches_the_golden_fixtures() {
             passed += 1;
             continue;
         }
-        // The one difference this port is known to produce, recorded in
-        // DIVERGENCE.md section 3: an initializer item whose expression
-        // the canonical leaves as a raw `@tabnas/expr` operator array,
-        // which `toFixture` writes as an empty object. This port leaves
-        // the item empty instead. A seed whose ONLY difference is that
-        // is counted as known-divergent; anything else is a failure.
-        if strip_unevaluated_items(&want) == got {
-            divergent.push(name);
-            continue;
-        }
         failures.push(format!("{name}: differs {}", first_text_diff(&got, &want)));
     }
 
     assert!(
         failures.is_empty(),
-        "{passed} of {} Csmith fixtures match and {} differ only by the recorded \
-         divergence; these differ some OTHER way:\n{}",
+        "{passed} of {} Csmith fixtures match; these differ:\n{}",
         seeds.len(),
-        divergent.len(),
         failures
             .iter()
             .take(8)
@@ -434,19 +399,5 @@ fn csmith_corpus_matches_the_golden_fixtures() {
             .collect::<Vec<_>>()
             .join("\n")
     );
-    assert_eq!(
-        passed + divergent.len(),
-        seeds.len(),
-        "not every seed was graded"
-    );
-    // The recorded divergence is pinned to the seeds it actually
-    // affects, so repairing it goes red here and says which rows to
-    // delete, exactly as the divergence register does.
-    assert_eq!(
-        divergent, KNOWN_DIVERGENT,
-        "the set of seeds that differ only by the recorded divergence has changed. \
-         If the repair landed, delete this list, section 3 of DIVERGENCE.md and \
-         `unevaluated_initializer_items_are_dropped` in tests/c_test.rs; if it \
-         merely moved, re-measure and record the new set."
-    );
+    assert_eq!(passed, seeds.len(), "not every seed was graded");
 }

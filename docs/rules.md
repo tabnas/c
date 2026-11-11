@@ -9,11 +9,8 @@ page is the design the change follows, and what it measured. alchemy's
 `docs/streaming-plan.md`, section 13.2, has the evidence that led to the
 ruling.
 
-The TypeScript and Go readers build the tree this page describes from
-0.6. The Rust reader builds 0.5's tree until it moves to it, reading the
-0.5 copies of the fixtures (`test/spec-0.5/`,
-`ts/test/spec-0.5/path-dispatch.tsv`, `ts/test/csmith-fixtures-0.5/`)
-and keeping the 0.5 grammar (`rs/c-grammar.jsonic`); see "Order".
+The TypeScript, Go and Rust readers build the tree this page describes
+from 0.6; see "Order".
 
 ## What the parser did up to 0.5
 
@@ -288,14 +285,13 @@ With the TypeScript reader of this change against 0.5.15:
 - **The shared fixtures**: every row's difference from its old expected
   value is a span (the rule path's nodes had none), the statement nesting
   above, or a `declKind` on a block declaration, and the rows were
-  regenerated (`test/spec-0.5/` keeps the old ones).
+  regenerated.
 - **Csmith**: every one of the 7,237 declarations 0.5's structurer built
   is built by the rules with the same structure under a normalisation of
   the conventions above (the scratch tool `decl-diff`), and every
   declaration the rule path built is unchanged but for the repaired
   defects (1,548 raw operator arrays, 722 `(e)` read as a call). The
-  fixtures were regenerated (`ts/test/csmith-fixtures-0.5/` keeps the old
-  ones). No declaration became unknown.
+  fixtures were regenerated. No declaration became unknown.
 - **The real-world files**: each is accepted or refused as 0.5 does, in
   both modes, except the 31 on which 0.5 runs out of memory; 0.6 parses
   29 of those and refuses 2 at an unknown type name. In extended mode
@@ -359,6 +355,29 @@ With the Go reader of this change:
   deep, and the rows of its table each return a tree, in under half a
   second.
 
+With the Rust reader of this change:
+
+- **The fixtures and Csmith**: every shared fixture passes, `members.tsv`
+  read through `member`, and every one of the 100 Csmith fixtures, each
+  tree held to the invariants above (`rs/tests/tree_test.rs` over the
+  fixtures, `rs/tests/csmith_test.rs` over the programs); the 21
+  repetitions of `rs/tests/repeat_test.rs` reach the depth one item
+  needs.
+- **Against the TypeScript reader**: over both sweeps, 41,348 documents,
+  the Rust reader builds the same tree for every one.
+- **Nesting**: this port realizes no tree deeper than its cap
+  (`DIVERGENCE.md`), so a parse past it reports `cancel`. An unterminated
+  `#if` nests the rest of the document in its group, two levels a line,
+  so 127 such lines in a row realize past the cap, where 0.5 left them
+  flat and returned a tree. No compiler accepts them.
+- **Speed**: in an optimized build the first ten Csmith programs, 1.4 MB,
+  parse in 7.0 s, where 0.5's reader takes 4.3 s: C's expressions are
+  rules, each operand a stack of them. In the crate's
+  test builds the engine is optimized and its debug assertion over the
+  rule stack is off (`rs/Cargo.toml`): that check compares every frame on
+  every step, and over stacks that deep it took the Csmith grader past an
+  hour.
+
 The maintainer approved the two changes to what is accepted or refused:
 valid C that 0.5 refuses only by its rule path's defects (a
 cast of a cast, the comma operator in a condition, a `return` or an
@@ -390,13 +409,15 @@ are verified at the window's edge.
 ## Order
 
 1. TypeScript: the rules, the tree, the API, the fallback, the tests and
-   the fixtures. The shared fixtures and the Csmith fixtures move to the
-   new tree; until the ports follow, Go and Rust read the 0.5 copies, so
-   every pull request is green on its own, and `ts/embed-grammar.js`
-   does not copy the grammar to them.
+   the fixtures. The shared fixtures and the Csmith fixtures moved to the
+   new tree; until the ports followed, Go and Rust read 0.5 copies of
+   them, so every pull request was green on its own, and
+   `ts/embed-grammar.js` did not copy the grammar to them.
 2. Go, to the same tree, with the same rules and refs (`go/fallback.go`,
    `go/expr_grammar.go`, `go/members.go`), and `ts/embed-grammar.js`
    copies the grammar to it again.
-3. Rust, to the same tree; the 0.5 copies go.
+3. Rust, to the same tree, with the same rules and refs
+   (`rs/src/fallback.rs`, `rs/src/expression.rs`, `rs/src/members.rs`);
+   the 0.5 copies go.
 4. The part, the window, the manifest and the render; the release, a
    minor version, 0.6.0, since the tree changes.

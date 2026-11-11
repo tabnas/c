@@ -28,9 +28,8 @@ fn track_depth(rule: &mut tabnas::Rule, key: &str, token: usize) {
     }
 }
 
-/// Attach the closed child's node once, recording it under a named
-/// field of the node as well.
-fn take_child_field(rule: &mut tabnas::Rule, want: &str, flag: &str, field: &str) -> bool {
+/// Attach the closed child's node once.
+fn take_child_field(rule: &mut tabnas::Rule, want: &str, flag: &str) -> bool {
     if child_name(rule) != want || k_bool(rule, flag) {
         return false;
     }
@@ -38,9 +37,6 @@ fn take_child_field(rule: &mut tabnas::Rule, want: &str, flag: &str, field: &str
         return false;
     };
     cst::push_child(node, Item::Node(child));
-    if !field.is_empty() {
-        cst::set_extra(node, field, Item::Node(child));
-    }
     k_set_bool(rule, flag, true);
     true
 }
@@ -98,135 +94,7 @@ pub fn register(reg: &mut Reg<'_>) {
         k_set_bool(rule, "tookRparen", true);
     });
     reg.act("@sizeof_type_form-bc", |rule, _context| {
-        take_child_field(rule, "type_name", "typeNameAttached", "operand");
-    });
-
-    // --- cast_or_compound_literal ---------------------------------------
-    //
-    // The open action gives the rule a node cell of its own, which the
-    // canonical does not have to do and which the other sub-rules of
-    // `val` do not need. This rule alone reaches its finished node
-    // through `r:` re-entry, and the parent's link to a pushed child is
-    // frozen at the FIRST link of a replacement chain (the engine's
-    // `Rule::freeze_child`, matching how TypeScript never relinks
-    // `rule.child`). A rule is pushed sharing its parent's node cell,
-    // so without this the frozen link names the cell `val` itself is
-    // holding: the finished cast node, installed on a later link of the
-    // chain, is invisible to `val`, and `val` falls back to the node it
-    // inherited -- which is the enclosing `initializer`'s own node, so
-    // `@initializer-bc` pushes that node into itself and the tree stops
-    // being a tree. `int g = (int)0;` is the shortest input that does
-    // it. Taking a private cell here, and WRITING THROUGH it in
-    // `@cocl-finalize` rather than replacing it, is this engine's
-    // spelling of the canonical's `parent.child.node = node`.
-    reg.act("@cast_or_compound_literal-bo", |rule, _context| {
-        if k_token(rule, "lparenTkn").is_none() {
-            set_node(rule, Value::Undefined);
-        }
-    });
-    reg.act("@cocl-take-lparen", |rule, _context| {
-        if let Some(token) = o0(rule) {
-            k_set_token(rule, "lparenTkn", token);
-        }
-    });
-    reg.cond("@cocl-reentered", |rule, _context| {
-        k_token(rule, "lparenTkn").is_some()
-    });
-    reg.cond("@cocl-needs-rparen", |rule, _context| {
-        !k_bool(rule, "tookRparen")
-    });
-    reg.act("@cocl-take-rparen", |rule, _context| {
-        if let Some(token) = c0(rule) {
-            k_set_token(rule, "rparenTkn", token);
-        }
-        k_set_bool(rule, "tookRparen", true);
-    });
-    reg.cond("@cocl-needs-decision", |rule, _context| {
-        k_bool(rule, "tookRparen") && k_str(rule, "decided").is_empty()
-    });
-    reg.act("@cocl-mark-cl", |rule, _context| {
-        k_set_str(rule, "decided", "compound_literal")
-    });
-    reg.act("@cocl-mark-cast", |rule, _context| {
-        k_set_str(rule, "decided", "cast")
-    });
-    reg.act("@cast_or_compound_literal-bc", |rule, _context| {
-        let Some(child) = child_node_id(rule) else {
-            return;
-        };
-        let name = child_name(rule);
-        if name == "type_name" && k_node(rule, "typeName").is_none() {
-            k_set_node(rule, "typeName", child);
-            return;
-        }
-        if matches!(name.as_str(), "initializer_list" | "compound_literal_body")
-            && k_node(rule, "compoundBody").is_none()
-        {
-            k_set_node(rule, "compoundBody", child);
-            return;
-        }
-        if child_is_val(rule) && k_node(rule, "castOperand").is_none() {
-            k_set_node(rule, "castOperand", child);
-        }
-    });
-    reg.act("@cocl-finalize", |rule, _context| {
-        let decided = k_str(rule, "decided");
-        let decided = if decided.is_empty() {
-            "cast".to_string()
-        } else {
-            decided
-        };
-        let type_name = k_node(rule, "typeName");
-        let node = if decided == "compound_literal" {
-            let node = cst::new_node("compound_literal", None);
-            if let Some(token) = k_token(rule, "lparenTkn") {
-                push_token(node, token);
-            }
-            if let Some(type_name) = type_name {
-                cst::push_child(node, Item::Node(type_name));
-                cst::set_extra(node, "typeName", Item::Node(type_name));
-            }
-            if let Some(token) = k_token(rule, "rparenTkn") {
-                push_token(node, token);
-            }
-            if let Some(body) = k_node(rule, "compoundBody") {
-                cst::push_child(node, Item::Node(body));
-            }
-            node
-        } else {
-            let node = cst::new_node("cast_expression", None);
-            if let Some(token) = k_token(rule, "lparenTkn") {
-                push_token(node, token);
-            }
-            if let Some(type_name) = type_name {
-                cst::push_child(node, Item::Node(type_name));
-                cst::set_extra(node, "typeName", Item::Node(type_name));
-            }
-            if let Some(token) = k_token(rule, "rparenTkn") {
-                push_token(node, token);
-            }
-            if let Some(operand) = k_node(rule, "castOperand") {
-                cst::push_child(node, Item::Node(operand));
-                cst::set_extra(node, "operand", Item::Node(operand));
-            }
-            node
-        };
-        // Written THROUGH the cell, not into a fresh one: the parent
-        // reads this rule's node through the cell it froze when the
-        // first link of the `r:` chain was replaced, and a fresh cell
-        // installed here would never reach it. The cell is private to
-        // the chain because `@cast_or_compound_literal-bo` took one;
-        // the check keeps the write off an ancestor's node if the
-        // rule is ever reached without that open action having run.
-        let private = rule
-            .parent_node
-            .as_ref()
-            .is_none_or(|parent| !std::rc::Rc::ptr_eq(parent, &rule.node));
-        if private {
-            *rule.node.borrow_mut() = crate::state::node_handle(node);
-        } else {
-            set_node_id(rule, node);
-        }
+        take_child_field(rule, "type_name", "typeNameAttached");
     });
 
     // --- compound_literal_body ------------------------------------------
@@ -317,7 +185,6 @@ pub fn register(reg: &mut Reg<'_>) {
         };
         if name == "designation" && !k_bool(rule, "desigAttached") {
             cst::push_child(node, Item::Node(child));
-            cst::set_extra(node, "designation", Item::Node(child));
             k_set_bool(rule, "desigAttached", true);
             return;
         }
@@ -327,13 +194,11 @@ pub fn register(reg: &mut Reg<'_>) {
             let init = cst::new_node("initializer", None);
             cst::push_child(init, Item::Node(child));
             cst::push_child(node, Item::Node(init));
-            cst::set_extra(node, "value", Item::Node(init));
             k_set_bool(rule, "gotValue", true);
             return;
         }
-        if child_is_val(rule) && !k_bool(rule, "gotValue") && child != node {
+        if crate::expression::child_is_expr(rule) && !k_bool(rule, "gotValue") && child != node {
             cst::push_child(node, Item::Node(child));
-            cst::set_extra(node, "value", Item::Node(child));
             k_set_bool(rule, "gotValue", true);
         }
     });
@@ -388,6 +253,14 @@ pub fn register(reg: &mut Reg<'_>) {
     reg.cond("@dr-needs-rbracket", |rule, _context| {
         k_str(rule, "kind") == "index" && !k_bool(rule, "tookRbracket")
     });
+    // A designator ends with its member's name or its `]`.
+    reg.cond("@dr-complete", |rule, _context| {
+        match k_str(rule, "kind").as_str() {
+            "member" => k_bool(rule, "tookId"),
+            "index" => k_bool(rule, "tookRbracket"),
+            _ => true,
+        }
+    });
     reg.act("@dr-take-rbracket", |rule, _context| {
         if let (Some(node), Some(token)) = (node_id(rule), c0(rule)) {
             push_token(node, token);
@@ -395,7 +268,9 @@ pub fn register(reg: &mut Reg<'_>) {
         k_set_bool(rule, "tookRbracket", true);
     });
     reg.act("@designator-bc", |rule, _context| {
-        if k_str(rule, "kind") != "index" || !child_is_val(rule) || k_bool(rule, "idxExprAttached")
+        if k_str(rule, "kind") != "index"
+            || !crate::expression::child_is_expr(rule)
+            || k_bool(rule, "idxExprAttached")
         {
             return;
         }
@@ -437,9 +312,7 @@ pub fn register(reg: &mut Reg<'_>) {
 
     // --- generic_selection ------------------------------------------------------
     reg.act("@generic_selection-bo", |rule, _context| {
-        if let Some(node) = open_keep(rule, "generic_selection", "gsNode") {
-            cst::set_extra(node, "associations", Item::List(Vec::new()));
-        }
+        open_keep(rule, "generic_selection", "gsNode");
     });
     reg.cond("@gs-reentered", |rule, _context| k_bool(rule, "kwTaken"));
     reg.act("@gs-take-kw", |rule, _context| {
@@ -491,7 +364,7 @@ pub fn register(reg: &mut Reg<'_>) {
         };
         let name = child_name(rule);
         if name == "generic_controlling_expression" {
-            take_child_field(rule, name.as_str(), "ctrlTaken", "controlling");
+            take_child_field(rule, name.as_str(), "ctrlTaken");
             return;
         }
         if name != "generic_association" {
@@ -504,12 +377,6 @@ pub fn register(reg: &mut Reg<'_>) {
             return;
         }
         cst::push_child(node, Item::Node(child));
-        let mut associations = match cst::extra_of(node, "associations") {
-            Some(Item::List(items)) => items,
-            _ => Vec::new(),
-        };
-        associations.push(Item::Node(child));
-        cst::set_extra(node, "associations", Item::List(associations));
         k_set_bool(rule, "lastWasAssoc", true);
     });
 
@@ -518,7 +385,7 @@ pub fn register(reg: &mut Reg<'_>) {
         set_node_id(rule, node);
     });
     reg.act("@generic_controlling_expression-bc", |rule, _context| {
-        if !child_is_val(rule) || k_bool(rule, "exprAttached") {
+        if !crate::expression::child_is_expr(rule) || u_bool(rule, "exprAttached") {
             return;
         }
         let (Some(node), Some(child)) = (node_id(rule), child_node_id(rule)) else {
@@ -528,8 +395,7 @@ pub fn register(reg: &mut Reg<'_>) {
             return;
         }
         cst::push_child(node, Item::Node(child));
-        cst::set_extra(node, "expression", Item::Node(child));
-        k_set_bool(rule, "exprAttached", true);
+        u_set_bool(rule, "exprAttached", true);
     });
 
     reg.act("@generic_association-bo", |rule, _context| {
@@ -572,10 +438,10 @@ pub fn register(reg: &mut Reg<'_>) {
     reg.act("@generic_association-bc", |rule, _context| {
         let name = child_name(rule);
         if name == "type_name_assoc" {
-            take_child_field(rule, "type_name_assoc", "gaTypeAttached", "typeName");
+            take_child_field(rule, "type_name_assoc", "gaTypeAttached");
             return;
         }
-        if !child_is_val(rule) || k_bool(rule, "gaValueTaken") {
+        if !crate::expression::child_is_expr(rule) || k_bool(rule, "gaValueTaken") {
             return;
         }
         let (Some(node), Some(child)) = (node_id(rule), child_node_id(rule)) else {
@@ -585,7 +451,6 @@ pub fn register(reg: &mut Reg<'_>) {
             return;
         }
         cst::push_child(node, Item::Node(child));
-        cst::set_extra(node, "value", Item::Node(child));
         k_set_bool(rule, "gaValueTaken", true);
     });
 
@@ -622,7 +487,7 @@ pub fn register(reg: &mut Reg<'_>) {
         }
     });
     reg.act("@statement_expression-bc", |rule, _context| {
-        take_child_field(rule, "compound_statement", "bodyAttached", "");
+        take_child_field(rule, "compound_statement", "bodyAttached");
     });
 
     // --- spec_loop relay ---------------------------------------------------------
@@ -690,7 +555,7 @@ pub fn register(reg: &mut Reg<'_>) {
         k_bool(rule, "ssKwTaken") && !k_bool(rule, "ssBodyTaken")
     });
     reg.act("@struct_specifier-bc", |rule, _context| {
-        take_child_field(rule, "member_decl_list", "ssBodyTaken", "");
+        take_child_field(rule, "member_decl_list", "ssBodyTaken");
     });
 
     // --- member_decl_list ------------------------------------------------------------
@@ -758,6 +623,11 @@ pub fn register(reg: &mut Reg<'_>) {
         if let (Some(specs), Some(token)) = (spec_owner_u_node(rule, "specs"), o0(rule)) {
             push_token(specs, token);
         }
+    });
+    // A member's second name with no comma between, in a declaration
+    // held to the rules, as 0.5's rules read it.
+    reg.cond("@sd-lenient-member", |rule, _context| {
+        k_bool(rule, "sdAnyDecl") && !crate::fallback::with_ed(|ed| ed.armed).unwrap_or(false)
     });
     reg.cond("@sd-need-decl-first", |rule, _context| {
         !k_bool(rule, "sdAnyDecl")
@@ -870,7 +740,7 @@ pub fn register(reg: &mut Reg<'_>) {
         }
     });
     reg.act("@bitfield_width-bc", |rule, _context| {
-        if !child_is_val(rule) || k_bool(rule, "bfExprAttached") {
+        if !crate::expression::child_is_expr(rule) || k_bool(rule, "bfExprAttached") {
             return;
         }
         let (Some(node), Some(child)) = (node_id(rule), child_node_id(rule)) else {
@@ -1029,7 +899,10 @@ pub fn register(reg: &mut Reg<'_>) {
         let Some(node) = node_id(rule) else {
             return;
         };
-        if child_is_val(rule) && child != node && !k_bool(rule, "enrValueAttached") {
+        if crate::expression::child_is_expr(rule)
+            && child != node
+            && !k_bool(rule, "enrValueAttached")
+        {
             // The constant expression is wrapped in an `initializer`,
             // as the legacy tree has it.
             let init = cst::new_node("initializer", None);

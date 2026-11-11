@@ -53,13 +53,6 @@ src = src.substring(0, startIdx) + replacement + src.substring(endIdx + END.leng
 fs.writeFileSync(TS_FILE, src)
 console.log('Embedded grammar into', TS_FILE)
 
-// The Go module (//go:embed) and the Rust crate (include_str!) take
-// copies of the grammar. While the TypeScript and Go readers build the 0.6
-// tree and the Rust port still builds 0.5's, the crate keeps the 0.5
-// grammar its refs were written for, so its copy is not written here; its
-// move to the 0.6 tree writes the copy again (docs/rules.md, "Order").
-const RUST_ON_0_5 = true
-
 // Mirror the grammar into the Go module for //go:embed (only if the go/
 // directory exists — the Go port is optional/scaffold).
 if (fs.existsSync(path.dirname(GO_GRAMMAR_FILE))) {
@@ -69,7 +62,7 @@ if (fs.existsSync(path.dirname(GO_GRAMMAR_FILE))) {
 
 // And into the Rust crate for include_str!, on the same guard: a checkout
 // without rs/ is not an error, it is a checkout without the Rust port.
-if (!RUST_ON_0_5 && fs.existsSync(path.dirname(RS_GRAMMAR_FILE))) {
+if (fs.existsSync(path.dirname(RS_GRAMMAR_FILE))) {
   fs.writeFileSync(RS_GRAMMAR_FILE, grammar)
   console.log('Copied grammar to', RS_GRAMMAR_FILE)
 }

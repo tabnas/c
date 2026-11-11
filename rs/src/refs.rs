@@ -7,21 +7,33 @@
 //! their rule when the document installs; the rest are named from an
 //! alternate's `a:` or `c:` field.
 
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
 use tabnas::{Context, Lexer, Rule, Tabnas, Value};
 
 use crate::cst::{self, Item};
+use crate::fallback::{self, Fallback};
 use crate::rt::*;
 use crate::sets;
 use crate::state::with_state;
 use crate::COptions;
 
+type CondFn = Arc<dyn Fn(&mut Rule, &mut Context) -> bool + Send + Sync>;
+type CondLexFn =
+    Arc<dyn for<'source> Fn(&mut Rule, &mut Context, &mut Lexer<'source>) -> bool + Send + Sync>;
+
 /// The registry a port module registers through. It remembers every
 /// name, so `stub_remaining` can tell which references the grammar
-/// document still names without a handler.
+/// document still names without a handler, and every condition, so the
+/// armed fallback's fenced conditions can call the one they fence.
 pub struct Reg<'a> {
     pub parser: &'a mut Tabnas,
-    conditions: std::collections::HashSet<String>,
-    actions: std::collections::HashSet<String>,
+    conditions: HashSet<String>,
+    actions: HashSet<String>,
+    fallback: &'a Fallback,
+    cond_fns: HashMap<String, CondFn>,
+    cond_lex_fns: HashMap<String, CondLexFn>,
 }
 
 impl Reg<'_> {
@@ -31,7 +43,11 @@ impl Reg<'_> {
         name: &str,
         body: impl Fn(&mut Rule, &mut Context) -> bool + Send + Sync + 'static,
     ) {
-        self.parser.alt_condition(name, body);
+        let body: CondFn = Arc::new(body);
+        let call = Arc::clone(&body);
+        self.parser
+            .alt_condition(name, move |rule, context| call(rule, context));
+        self.cond_fns.insert(name.to_string(), body);
         self.conditions.insert(name.to_string());
     }
 
@@ -45,38 +61,81 @@ impl Reg<'_> {
             + Sync
             + 'static,
     ) {
-        self.parser.alt_condition_with_lexer(name, body);
+        let body: CondLexFn = Arc::new(body);
+        let call = Arc::clone(&body);
+        self.parser
+            .alt_condition_with_lexer(name, move |rule, context, lexer| call(rule, context, lexer));
+        self.cond_lex_fns.insert(name.to_string(), body);
         self.conditions.insert(name.to_string());
     }
 
     /// Register an action, or a lifecycle handler: the engine takes
-    /// both from the same table.
+    /// both from the same table. A lifecycle handler of a rule below
+    /// `external_declaration` does nothing once the declaration, or the
+    /// scope it is in, has failed (`crate::fallback`).
     pub fn act(
         &mut self,
         name: &str,
         body: impl Fn(&mut Rule, &mut Context) + Send + Sync + 'static,
     ) {
+        let bails = self.fallback.bails(name);
         self.parser.action_with_context(name, move |rule, context| {
+            if bails && fallback::bailing() {
+                return Ok(());
+            }
             body(rule, context);
             Ok(())
         });
         self.actions.insert(name.to_string());
     }
+
+    /// Bind each fenced condition to the condition it fences, and the
+    /// fallback's own references.
+    fn bind_fallback(&mut self) {
+        for (fenced, inner) in self.fallback.fenced.clone() {
+            if let Some(body) = self.cond_fns.get(&inner).cloned() {
+                self.parser
+                    .alt_condition(fenced.clone(), move |rule, context| {
+                        !fallback::fenced(context) && body(rule, context)
+                    });
+            } else if let Some(body) = self.cond_lex_fns.get(&inner).cloned() {
+                self.parser.alt_condition_with_lexer(
+                    fenced.clone(),
+                    move |rule, context, lexer| {
+                        !fallback::fenced(context) && body(rule, context, lexer)
+                    },
+                );
+            } else {
+                self.parser
+                    .alt_condition(fenced.clone(), |_rule, _context| false);
+            }
+            self.conditions.insert(fenced);
+        }
+        self.cond("@c-unfenced", |_rule, context| !fallback::fenced(context));
+        self.cond("@c-bailing", |_rule, _context| fallback::bailing());
+        self.cond("@c-armed", |_rule, _context| fallback::armed());
+        self.act("@c-fail", |_rule, _context| fallback::fail());
+    }
 }
 
 /// Register every reference the grammar names, and return the ones it
 /// names that got a no-op stub rather than a handler.
-pub fn register(parser: &mut Tabnas, options: &COptions) -> Vec<String> {
+pub fn register(parser: &mut Tabnas, options: &COptions, fallback: &Fallback) -> Vec<String> {
     let mut reg = Reg {
         parser,
-        conditions: std::collections::HashSet::new(),
-        actions: std::collections::HashSet::new(),
+        conditions: HashSet::new(),
+        actions: HashSet::new(),
+        fallback,
+        cond_fns: HashMap::new(),
+        cond_lex_fns: HashMap::new(),
     };
     register_core(&mut reg, options);
+    crate::expression::register(&mut reg);
     crate::refs_newpath::register(&mut reg, options);
     crate::refs_ext::register(&mut reg, options);
-    crate::expr_grammar::register(&mut reg);
-    stub_remaining(&mut reg)
+    let stubbed = stub_remaining(&mut reg);
+    reg.bind_fallback();
+    stubbed
 }
 
 fn register_core(reg: &mut Reg<'_>, options: &COptions) {
@@ -85,8 +144,9 @@ fn register_core(reg: &mut Reg<'_>, options: &COptions) {
     // --- the extension gate ------------------------------------------
     reg.cond("@extended-on", move |_rule, _context| extended);
     reg.cond("@extended-off", move |_rule, _context| !extended);
-    reg.cond("@ext-and-first-iter", move |rule, _context| {
-        extended && first_iteration(rule)
+    // The plain-mode C23 attribute head: two adjacent `[`.
+    reg.cond("@plain-as23", move |_rule, context| {
+        !extended && t_adjacent(context, 0)
     });
 
     // --- translation_unit --------------------------------------------
@@ -96,123 +156,399 @@ fn register_core(reg: &mut Reg<'_>, options: &COptions) {
     });
     reg.act("@translation_unit-bc", |rule, _context| {
         if let Some(node) = node_id(rule) {
-            crate::conditional_groups::structure_conditional_groups(node);
+            cst::fix_spans(node);
         }
     });
 
     // --- extdecl_loop -------------------------------------------------
-    // The node is inherited from translation_unit; the before-close
-    // pushes the completed external_declaration before deciding to
-    // recurse.
+    // The node is the container's (the translation unit's, or a
+    // conditional branch's); the before-close appends each completed
+    // external declaration and each conditional group, but a group's
+    // opener, which the group takes.
     reg.act("@extdecl_loop-bc", |rule, _context| {
-        let Some(child) = child_node_id(rule) else {
+        let Some(id) = child_rule_id(rule) else {
             return;
         };
-        if cst::kind_of(child) != "external_declaration" {
+        if u_num(rule, "lastChild") == Some(id as i64) {
             return;
         }
+        u_set_num(rule, "lastChild", id as i64);
+        let (Some(child), Some(node)) = (child_node_id(rule), node_id(rule)) else {
+            return;
+        };
+        match cst::kind_of(child).as_str() {
+            "external_declaration" => {
+                if conditional_of(child, CONDITIONAL_OPENERS).is_some() {
+                    u_set_node(rule, "opener", child);
+                } else {
+                    append_child(node, child);
+                }
+            }
+            "conditional_group" => {
+                append_child(node, child);
+                // The group took its opener; a parent snapshot cannot
+                // clear it here, as the canonical does from the group.
+                u_del(rule, "opener");
+            }
+            _ => {}
+        }
+    });
+    reg.cond("@opens-group", |rule, _context| {
+        u_node(rule, "opener").is_some()
+    });
+    // A branch's items end at the line of the next branch or the `#endif`.
+    reg.cond("@ends-branch", |rule, context| {
+        k_bool(rule, "inBranch") && directive_ahead(context, CONDITIONAL_BRANCH_ENDS)
+    });
+
+    // --- conditional_group ---------------------------------------------
+    // The group takes its opener from the items loop that pushed it.
+    reg.act("@conditional_group-bo", |rule, _context| {
+        let node = cst::new_node("conditional_group", None);
+        set_node_id(rule, node);
+        if let Some(opener) = parent_u_node(rule, "opener") {
+            u_set_node(rule, "opener", opener);
+        }
+    });
+    reg.cond("@next-branch", |_rule, context| {
+        directive_ahead(context, CONDITIONAL_BRANCHES)
+    });
+    reg.cond("@group-endif", |_rule, context| {
+        directive_ahead(context, CONDITIONAL_ENDIF)
+    });
+    reg.cond("@endif-taken", |rule, _context| u_bool(rule, "endifTaken"));
+    reg.act("@conditional_group-bc", |rule, _context| {
+        let Some(id) = child_rule_id(rule) else {
+            return;
+        };
+        if u_num(rule, "lastChild") == Some(id as i64) {
+            return;
+        }
+        u_set_num(rule, "lastChild", id as i64);
+        let (Some(child), Some(node)) = (child_node_id(rule), node_id(rule)) else {
+            return;
+        };
+        match cst::kind_of(child).as_str() {
+            "conditional_branch" => {
+                append_child(node, child);
+                // The first branch took the opener as its head.
+                u_del(rule, "opener");
+            }
+            "external_declaration" => {
+                append_child(node, child);
+                u_set_bool(rule, "endifTaken", true);
+            }
+            _ => {}
+        }
+    });
+    reg.act("@cg-end", |rule, _context| {
         if let Some(node) = node_id(rule) {
-            append_child(node, child);
+            cst::fix_spans(node);
+        }
+    });
+
+    // --- conditional_branch --------------------------------------------
+    // The first branch's line is the group's opener; a later branch
+    // parses its own.
+    reg.act("@conditional_branch-bo", |rule, _context| {
+        let node = cst::new_node("conditional_branch", None);
+        set_node_id(rule, node);
+        if let Some(opener) = parent_u_node(rule, "opener") {
+            take_branch_head(rule, node, opener);
+        }
+    });
+    reg.cond("@branch-has-head", |rule, _context| {
+        u_bool(rule, "headTaken")
+    });
+    reg.cond("@branch-needs-items", |rule, _context| {
+        u_bool(rule, "headTaken") && !u_bool(rule, "itemsTaken")
+    });
+    reg.act("@conditional_branch-bc", |rule, _context| {
+        let Some(id) = child_rule_id(rule) else {
+            return;
+        };
+        if u_num(rule, "lastChild") == Some(id as i64) {
+            return;
+        }
+        u_set_num(rule, "lastChild", id as i64);
+        let name = child_name(rule);
+        if (name == "external_declaration" || name == "unknown_declaration")
+            && !u_bool(rule, "headTaken")
+        {
+            if let (Some(child), Some(node)) = (child_node_id(rule), node_id(rule)) {
+                take_branch_head(rule, node, child);
+            }
+        } else if name == "extdecl_loop" {
+            u_set_bool(rule, "itemsTaken", true);
         }
     });
 
     // --- external_declaration ----------------------------------------
-    // The before-open runs once per fresh rule instance, the `r:`
-    // recursion included, so it is guarded: the in-progress token list
-    // must survive an iteration.
-    reg.act("@external_declaration-bo", |rule, _context| {
-        ensure_node(rule, "external_declaration");
-        k_list(rule, "tokens");
-        if !k_has(rule, "depth") {
-            k_set_num(rule, "depth", 0);
-        }
-        if !k_has(rule, "terminated") {
-            k_set_bool(rule, "terminated", false);
-        }
+    // Each declaration starts with a fresh node and state; the fallback's
+    // token record is trimmed to the tokens it has not yet taken.
+    reg.act("@external_declaration-bo", |rule, context| {
+        let node = cst::new_node("external_declaration", None);
+        set_node_id(rule, node);
+        fallback::start_declaration(context);
     });
 
-    reg.act("@absorb-token", |rule, _context| {
-        let Some(token) = o0(rule) else {
-            return;
-        };
+    // An armed route (`crate::fallback`).
+    reg.act("@arm", |_rule, _context| {
+        fallback::with_ed(|ed| ed.armed = true);
+    });
+    reg.cond("@c-failed", |_rule, _context| {
+        fallback::with_ed(|ed| ed.failed).unwrap_or(false)
+    });
+    // The rules failed on an armed declaration: it is an unknown one, its
+    // children the tokens it has taken, flat; unknown_declaration takes
+    // the rest of the run.
+    reg.act("@to-unknown", |rule, context| {
+        fallback::with_ed(|ed| ed.unknown = true);
         let Some(node) = node_id(rule) else {
             return;
         };
-        let list = k_list(rule, "tokens");
-        for trivia in cst::leading_trivia_items(token) {
-            if let Some(id) = trivia.as_token() {
-                cst::push_child(node, Item::Token(id));
-                list_push(list, id);
-            }
+        cst::set_children(node, Vec::new());
+        for token in fallback::taken_tokens(context) {
+            cst::push_token_with_trivia(node, token);
         }
-        list_push(list, token);
-        cst::push_child(node, Item::Token(token));
-        k_set_bool(rule, "justClosedBrace", false);
-        let name = cst::token_name(token);
-        if name == "PUNC_LBRACE" {
-            let depth = k_num(rule, "depth") + 1;
-            k_set_num(rule, "depth", depth);
-        } else if name == "PUNC_RBRACE" {
-            let depth = k_num(rule, "depth") - 1;
-            k_set_num(rule, "depth", depth);
-            if depth <= 0 {
-                // A closing top-level brace ends a function body, but a
-                // struct, union, enum or compound literal is followed
-                // by more tokens. The close alternates decide, with
-                // lookahead: see `@just-closed-and-decl-ahead`.
-                k_set_bool(rule, "justClosedBrace", true);
-            }
-        } else if name == "PUNC_SEMI" && k_num(rule, "depth") == 0 {
-            k_set_bool(rule, "terminated", true);
-        } else if name == "PP_NEWLINE"
-            && k_num(rule, "depth") == 0
-            && first_non_trivia_is(&list_get(list), "PP_HASH")
-        {
-            // The directive line ends here: every `#` line is its own
-            // external declaration.
-            k_set_bool(rule, "terminated", true);
+    });
+    // An external declaration no rule starts: unknown from its first
+    // token.
+    reg.act("@unk-start", |_rule, _context| {
+        fallback::with_ed(|ed| {
+            ed.armed = true;
+            ed.unknown = true;
+        });
+    });
+    // The rules ended an armed declaration before the chomp's end: the
+    // rest of the run follows, flat.
+    reg.cond("@armed-runs-on", |_rule, context| {
+        let open = fallback::with_ed(|ed| ed.armed && !ed.failed && !ed.unknown).unwrap_or(false);
+        open && !fallback::chomp_ended(context)
+    });
+    reg.act("@extdecl-trailing", |rule, _context| {
+        splice_declaration(rule);
+        fallback::with_ed(|ed| ed.trailing = true);
+    });
+    // The declaration the rules built.
+    reg.act("@extdecl-built", |rule, context| {
+        splice_declaration(rule);
+        if let Some(node) = node_id(rule) {
+            finish_external_declaration(node, context);
         }
     });
 
-    reg.cond("@terminated", |rule, _context| k_bool(rule, "terminated"));
-    reg.cond("@just-closed-and-decl-ahead", |rule, context| {
-        k_bool(rule, "justClosedBrace") && starts_new_external_declaration(context)
-    });
-    reg.act("@finalize-extdecl", |rule, context| {
-        finalize_external_declaration(rule, context);
-    });
-
-    // --- new-path dispatch markers ------------------------------------
-    reg.act("@mark-new-path", |rule, _context| {
-        u_set_bool(rule, "newPath", true);
-    });
-    reg.cond("@new-path", |rule, _context| u_bool(rule, "newPath"));
-    reg.cond("@is-first-iter", |rule, _context| first_iteration(rule));
-    reg.cond("@plain-and-first-iter", move |rule, _context| {
-        !extended && first_iteration(rule)
-    });
-    reg.cond("@plain-as23-and-first", move |rule, context| {
-        if extended {
-            return false;
+    // --- unknown_declaration -------------------------------------------
+    reg.act("@unk-take", |rule, _context| {
+        if let (Some(node), Some(token)) = (node_id(rule), o0(rule)) {
+            cst::push_token_with_trivia(node, token);
         }
-        if !first_iteration(rule) {
-            return false;
+    });
+    reg.cond("@unk-ended", |_rule, context| {
+        fallback::chomp_ended(context)
+    });
+    reg.act("@unk-end", |rule, context| {
+        if let Some(node) = node_id(rule) {
+            finish_external_declaration(node, context);
         }
-        t_adjacent(context, 0)
     });
 }
 
-/// True when the chomp's token buffer is still empty, which is what
-/// "first iteration of this external_declaration" means.
-pub fn first_iteration(rule: &Rule) -> bool {
-    match k_list_opt(rule, "tokens") {
-        None => true,
-        Some(list) => list_len(list) == 0,
+// ---------------------------------------------------------------------
+// Conditional groups and the end of an external declaration
+// ---------------------------------------------------------------------
+
+/// The directive names that open a conditional group, start its later
+/// branches, and end it.
+const CONDITIONAL_OPENERS: &[&str] = &["if", "ifdef", "ifndef"];
+const CONDITIONAL_BRANCHES: &[&str] = &["elif", "elifdef", "elifndef", "else"];
+const CONDITIONAL_ENDIF: &[&str] = &["endif"];
+const CONDITIONAL_BRANCH_ENDS: &[&str] = &["elif", "elifdef", "elifndef", "else", "endif"];
+
+/// The conditional directive an external declaration is, when its name
+/// is one of `names`.
+fn conditional_of(node: usize, names: &[&str]) -> Option<usize> {
+    let directive = cst::children_of(node)
+        .iter()
+        .filter_map(Item::as_node)
+        .find(|child| cst::kind_of(*child) == "conditional_directive")?;
+    let name = extra_string(directive, "directive")?;
+    names.contains(&name.as_str()).then_some(directive)
+}
+
+/// True when the next line is a `#` line whose directive is one of
+/// `names` (the alternate has fetched its first two tokens).
+fn directive_ahead(context: &Context, names: &[&str]) -> bool {
+    let (Some(hash), Some(name)) = (context.t.first(), context.t.get(1)) else {
+        return false;
+    };
+    hash.name.as_str() == "PP_HASH" && names.contains(&name.src.as_str())
+}
+
+/// A branch's first child is its directive's external declaration.
+fn take_branch_head(rule: &mut Rule, node: usize, head: usize) {
+    append_child(node, head);
+    let directive = cst::children_of(head)
+        .iter()
+        .filter_map(Item::as_node)
+        .find(|child| cst::kind_of(*child) == "conditional_directive");
+    let kind = directive
+        .and_then(|directive| extra_string(directive, "directive"))
+        .unwrap_or_else(|| "unknown".to_string());
+    cst::set_extra(node, "branchKind", Item::str(kind));
+    u_set_bool(rule, "headTaken", true);
+}
+
+/// Splice the declaration a dispatch rule built into the external
+/// declaration's node. simple_declaration's children become the
+/// external declaration's own; a static_assert or asm statement is its
+/// one child.
+fn splice_declaration(rule: &Rule) {
+    let (Some(node), Some(child)) = (node_id(rule), child_node_id(rule)) else {
+        return;
+    };
+    if child == node {
+        return;
+    }
+    let name = child_name(rule);
+    if name == "static_assert_declaration" || name == "asm_statement" {
+        cst::set_children(node, vec![Item::Node(child)]);
+        cst::set_extra(node, "declKind", Item::str("declaration"));
+    } else {
+        cst::set_children(node, cst::children_of(child));
+        let kind = extra_string(child, "declKind").unwrap_or_else(|| "declaration".to_string());
+        cst::set_extra(node, "declKind", Item::str(kind));
+    }
+    // A strict typedef declaration binds the names its rules found when
+    // it ends.
+    if let Some(names) = rule
+        .child_rule
+        .as_ref()
+        .and_then(|child| crate::refs_newpath::typedef_names(child))
+    {
+        fallback::with_ed(|ed| ed.typedef_names = Some(names));
+    }
+}
+
+/// Finish an external declaration: its kind, and the names it binds.
+///
+/// A strict declaration binds the typedef names its rules found. An
+/// armed one (and an unknown one) is the token run the 0.5 parser handed
+/// its structurer, and binds what 0.5 bound for that run, read from its
+/// tokens: the typedef names of a run that starts with `typedef` and ends
+/// with `;` (`register_typedef_if_applicable`), and the macro each
+/// `#define` and `#undef` line in it names (`register_macros_from_tokens`),
+/// unless the run is an unknown declaration that does not start with `#`,
+/// which the structurer did not read. The names decide how later tokens
+/// lex, so binding them as 0.5 did keeps what the parser accepts.
+fn finish_external_declaration(node: usize, context: &mut Context) {
+    let Some(ed) = fallback::with_ed(|ed| ed.clone()) else {
+        return;
+    };
+    if ed.unknown
+        || extra_string(node, "declKind")
+            .unwrap_or_default()
+            .is_empty()
+    {
+        cst::set_extra(node, "declKind", Item::str("unknown"));
+    }
+    cst::fix_spans(node);
+    if ed.armed {
+        let tokens = fallback::taken_tokens(context);
+        register_typedef_if_applicable(&tokens, context);
+        // 0.5 bound the macros of the lines its structurer read as
+        // directives: a `#` line's own, and those of a declaration it
+        // built. An unknown declaration that does not start with `#`
+        // binds none.
+        let first = tokens
+            .iter()
+            .map(|token| cst::token_name(*token))
+            .find(|name| !sets::is_trivia(name));
+        if !ed.unknown || first.as_deref() == Some("PP_HASH") {
+            register_macros_from_tokens(&tokens, context);
+        }
+    } else if let Some(names) = ed.typedef_names {
+        for name in names {
+            with_state(|state| state.symbols.bind_typedef(&name));
+            reclassify(context, &name, "ID", "TYPEDEF_NAME");
+        }
+    }
+}
+
+/// Bind and unbind, in order, the macros a run's `#define` and `#undef`
+/// lines name, as 0.5's structurer read them: the token after the
+/// directive name, when it is an identifier, a macro name or a typedef
+/// name; a define is function-like when a `(` follows the name with no
+/// space.
+fn register_macros_from_tokens(tokens: &[usize], context: &mut Context) {
+    let tokens: Vec<usize> = tokens
+        .iter()
+        .copied()
+        .filter(|token| !sets::is_trivia(&cst::token_name(*token)))
+        .collect();
+    let is_name = |token: usize| {
+        matches!(
+            cst::token_name(token).as_str(),
+            "ID" | "MACRO_NAME" | "TYPEDEF_NAME"
+        )
+    };
+    for index in 0..tokens.len() {
+        if cst::token_name(tokens[index]) != "PP_HASH" {
+            continue;
+        }
+        let directive = tokens.get(index + 1).map(|token| cst::token_src(*token));
+        let Some(&name) = tokens.get(index + 2) else {
+            continue;
+        };
+        if !is_name(name) {
+            continue;
+        }
+        let macro_name = cst::token_src(name);
+        match directive.as_deref() {
+            Some("define") => {
+                let name_span = cst::token_data(name).map(|data| data.span);
+                let function_like = tokens.get(index + 3).is_some_and(|next| {
+                    cst::token_name(*next) == "PUNC_LPAREN"
+                        && name_span.is_some_and(|span| {
+                            cst::token_data(*next).is_some_and(|data| data.span.start == span.end)
+                        })
+                });
+                let mut params = Vec::new();
+                let mut variadic = false;
+                if function_like {
+                    for token in tokens.iter().skip(index + 4) {
+                        let token_name = cst::token_name(*token);
+                        if token_name == "PUNC_RPAREN" || token_name == "PP_NEWLINE" {
+                            break;
+                        }
+                        if token_name == "PUNC_ELLIPSIS" {
+                            variadic = true;
+                        } else if is_name(*token) {
+                            params.push(cst::token_src(*token));
+                        }
+                    }
+                }
+                with_state(|state| {
+                    state.macros.define(crate::state::MacroDef {
+                        name: macro_name.clone(),
+                        is_function_like: function_like,
+                        params,
+                        variadic,
+                    })
+                });
+                reclassify(context, &macro_name, "ID", "MACRO_NAME");
+            }
+            Some("undef") => {
+                with_state(|state| state.macros.undefine(&macro_name));
+                reclassify(context, &macro_name, "MACRO_NAME", "ID");
+            }
+            _ => {}
+        }
     }
 }
 
 // ---------------------------------------------------------------------
-// The chomp finaliser and its helpers
+// What a typedef declaration binds, read from its tokens
 // ---------------------------------------------------------------------
 
 /// Index of the matching closing punctuator for the opener at `from`,
@@ -460,104 +796,10 @@ pub fn register_typedef_if_applicable(tokens: &[usize], context: &mut Context) {
     }
 }
 
-/// Run after the chomp terminates an external declaration: register
-/// typedef names and try to upgrade the flat token list to a structured
-/// tree.
-pub fn finalize_external_declaration(rule: &mut Rule, context: &mut Context) {
-    let tokens = k_list_tokens(rule, "tokens");
-    register_typedef_if_applicable(&tokens, context);
-    let Some(node) = node_id(rule) else {
-        return;
-    };
-    match crate::structure::structure_external_declaration(&tokens) {
-        Some(structured) => {
-            cst::set_children(node, cst::children_of(structured));
-            let decl_kind =
-                cst::extra_of(structured, "declKind").unwrap_or_else(|| Item::str("unknown"));
-            cst::set_extra(node, "declKind", decl_kind);
-            cst::set_extra(node, "viaPath", Item::str("legacy"));
-            register_macros_from_tree(node, context);
-        }
-        None => {
-            cst::set_extra(node, "declKind", Item::str("unknown"));
-            cst::set_extra(node, "viaPath", Item::str("legacy-unknown"));
-        }
-    }
-}
-
-/// Walk a freshly structured node and register every `#define` macro,
-/// removing the ones a `#undef` names.
-///
-/// The walk keeps its own stack rather than recursing, because the tree
-/// is as deep as the source is nested and a Rust stack overflow aborts
-/// the process. The structurer bounds its own recursion, but not the
-/// depth of what it builds: a chain like `x = a + a + ... + a` is built
-/// by a loop, one level per operator. Popping the children in source
-/// order visits the nodes in the order the recursion did, which matters:
-/// a `#define` and a later `#undef` of the same name must apply in that
-/// order.
-pub fn register_macros_from_tree(node: usize, context: &mut Context) {
-    let mut pending = vec![node];
-    while let Some(node) = pending.pop() {
-        register_macros_at(node, context);
-        pending.extend(
-            cst::children_of(node)
-                .iter()
-                .rev()
-                .filter_map(|child| child.as_node()),
-        );
-    }
-}
-
-/// Register the macro one directive node defines, or drop the one it
-/// undefines.
-fn register_macros_at(node: usize, context: &mut Context) {
-    let kind = cst::kind_of(node);
-    if kind == "define_directive" {
-        if let Some(name) = extra_string(node, "macroName") {
-            let function_like = extra_string(node, "macroKind").as_deref() == Some("function-like");
-            let params = extra_strings(node, "macroParams");
-            let variadic = matches!(
-                cst::extra_of(node, "macroVariadic"),
-                Some(Item::Val(Value::Bool(true)))
-            );
-            with_state(|state| {
-                state.macros.define(crate::state::MacroDef {
-                    name: name.clone(),
-                    is_function_like: function_like,
-                    params,
-                    variadic,
-                })
-            });
-            // Lookahead tokens fetched before this define ran still
-            // carry ID; flip them.
-            reclassify(context, &name, "ID", "MACRO_NAME");
-        }
-    } else if kind == "undef_directive" {
-        if let Some(name) = extra_string(node, "macroName") {
-            with_state(|state| state.macros.undefine(&name));
-            reclassify(context, &name, "MACRO_NAME", "ID");
-        }
-    }
-}
-
 pub fn extra_string(node: usize, key: &str) -> Option<String> {
     match cst::extra_of(node, key) {
         Some(Item::Val(Value::String(text))) => Some(text),
         _ => None,
-    }
-}
-
-fn extra_strings(node: usize, key: &str) -> Vec<String> {
-    match cst::extra_of(node, key) {
-        Some(Item::List(items)) => items
-            .iter()
-            .filter_map(|item| match item {
-                Item::Val(Value::String(text)) => Some(text.clone()),
-                _ => None,
-            })
-            .collect(),
-        _ => Vec::new(),
     }
 }
 
@@ -575,43 +817,7 @@ pub fn reclassify(context: &mut Context, name: &str, from: &str, to: &str) {
             token.tin = to_tin;
         }
     }
-}
-
-/// True when the next token to be consumed is one that unambiguously
-/// begins a new external declaration. The chomp uses it to decide that
-/// a top-level `}` ended a function body.
-pub fn starts_new_external_declaration(context: &Context) -> bool {
-    for token in context.t.iter() {
-        let name = token.name.as_str();
-        if sets::is_trivia(name) {
-            continue;
-        }
-        if matches!(name, "#ZZ" | "PP_HASH" | "PUNC_HASH") {
-            return true;
-        }
-        if sets::STORAGE_CLASS_NAMES.contains(&name)
-            || sets::TYPE_SPEC_KEYWORD_NAMES.contains(&name)
-            || sets::TYPE_QUALIFIER_NAMES.contains(&name)
-            || sets::FUNCTION_SPECIFIER_NAMES.contains(&name)
-        {
-            return true;
-        }
-        if matches!(
-            name,
-            "KW___ATTRIBUTE__"
-                | "KW___ATTRIBUTE"
-                | "KW___DECLSPEC"
-                | "KW___EXTENSION__"
-                | "TYPEDEF_NAME"
-        ) {
-            return true;
-        }
-        // An identifier could be a macro that expands to a declaration,
-        // or the declared name of `typedef struct { } S;`. Assume the
-        // declaration continues.
-        return false;
-    }
-    false
+    crate::fallback::reclassify_untaken(context, name, from, to);
 }
 
 // ---------------------------------------------------------------------

@@ -113,7 +113,12 @@ pub fn register(reg: &mut Reg<'_>) {
             return;
         }
         if let Some(child) = child_node_id(rule) {
-            set_node_id(rule, child);
+            // A `#` line in a body is its directive's node, as at the top
+            // level an external declaration holds it.
+            let directive = (child_name(rule) == "preprocessor_directive")
+                .then(|| cst::children_of(child).first().and_then(Item::as_node))
+                .flatten();
+            set_node_id(rule, directive.unwrap_or(child));
         }
     });
     reg.act("@stmt-empty", |rule, _context| {
@@ -132,7 +137,7 @@ pub fn register(reg: &mut Reg<'_>) {
     });
     reg.act("@es-take-expr", |_rule, _context| {});
     reg.act("@expression_statement-bc", |rule, _context| {
-        if !child_is_val(rule) || k_bool(rule, "exprAttached") {
+        if !crate::expression::child_is_expr(rule) || u_bool(rule, "exprAttached") {
             return;
         }
         let (Some(node), Some(child)) = (node_id(rule), child_node_id(rule)) else {
@@ -142,7 +147,7 @@ pub fn register(reg: &mut Reg<'_>) {
             return;
         }
         cst::push_child(node, Item::Node(child));
-        k_set_bool(rule, "exprAttached", true);
+        u_set_bool(rule, "exprAttached", true);
     });
     reg.act("@es-finalize", |rule, _context| take_close(rule));
 
@@ -177,7 +182,10 @@ pub fn register(reg: &mut Reg<'_>) {
         k_set_bool(rule, "tookExpr", true);
     });
     reg.act("@jump_statement-bc", |rule, _context| {
-        if !child_is_val(rule) || !k_bool(rule, "tookExpr") || k_bool(rule, "exprAttached") {
+        if !crate::expression::child_is_expr(rule)
+            || !k_bool(rule, "tookExpr")
+            || k_bool(rule, "exprAttached")
+        {
             return;
         }
         let (Some(node), Some(child)) = (node_id(rule), child_node_id(rule)) else {
@@ -199,7 +207,7 @@ pub fn register(reg: &mut Reg<'_>) {
     reg.act("@pc-open", |rule, _context| take_open(rule));
     reg.act("@pc-take-expr", |_rule, _context| {});
     reg.act("@paren_condition-bc", |rule, _context| {
-        if !child_is_val(rule) || k_bool(rule, "exprAttached") {
+        if !crate::expression::child_is_expr(rule) || u_bool(rule, "exprAttached") {
             return;
         }
         let (Some(node), Some(child)) = (node_id(rule), child_node_id(rule)) else {
@@ -209,7 +217,7 @@ pub fn register(reg: &mut Reg<'_>) {
             return;
         }
         cst::push_child(node, Item::Node(child));
-        k_set_bool(rule, "exprAttached", true);
+        u_set_bool(rule, "exprAttached", true);
     });
     reg.act("@pc-close", |rule, _context| take_close(rule));
 
@@ -228,9 +236,6 @@ pub fn register(reg: &mut Reg<'_>) {
     reg.act("@if-take-else-kw", |rule, _context| {
         take_close(rule);
         k_set_bool(rule, "elseSeen", true);
-    });
-    reg.cond("@if-needs-else-body", |rule, _context| {
-        k_bool(rule, "elseSeen") && !k_bool(rule, "tookElse")
     });
     reg.act("@if_statement-bc", |rule, _context| {
         if take_child_once(rule, "paren_condition", "tookCond") {
@@ -277,8 +282,8 @@ pub fn register(reg: &mut Reg<'_>) {
         take_close(rule);
         k_set_bool(rule, "tookWhile", true);
     });
-    reg.cond("@do-needs-cond", |rule, _context| {
-        k_bool(rule, "tookWhile") && !k_bool(rule, "tookCond")
+    reg.cond("@do-no-while", |rule, _context| {
+        k_bool(rule, "tookBody") && !k_bool(rule, "tookWhile")
     });
     reg.cond("@do-needs-semi", |rule, _context| {
         k_bool(rule, "tookCond") && !k_bool(rule, "tookSemi")
@@ -342,10 +347,10 @@ pub fn register(reg: &mut Reg<'_>) {
     });
     reg.act("@fc-close", |rule, _context| take_close(rule));
     reg.act("@for_controls-bc", |rule, _context| {
-        for (want, flag, field) in [
-            ("for_init", "tookInit", "init"),
-            ("for_cond", "tookCond", "cond"),
-            ("for_iter", "tookIter", "iter"),
+        for (want, flag) in [
+            ("for_init", "tookInit"),
+            ("for_cond", "tookCond"),
+            ("for_iter", "tookIter"),
         ] {
             if child_name(rule) != want || k_bool(rule, flag) {
                 continue;
@@ -354,7 +359,6 @@ pub fn register(reg: &mut Reg<'_>) {
                 return;
             };
             cst::push_child(node, Item::Node(child));
-            cst::set_extra(node, field, Item::Node(child));
             k_set_bool(rule, flag, true);
             return;
         }
@@ -393,7 +397,7 @@ pub fn register(reg: &mut Reg<'_>) {
         // returned by val. They are kept as one test here because the
         // bodies are the same statement.
         if (took == "decl" && name == "simple_declaration")
-            || (took == "expr" && child_is_val(rule))
+            || (took == "expr" && crate::expression::child_is_expr(rule))
         {
             take_clause_value(rule);
         }
@@ -421,7 +425,7 @@ pub fn register(reg: &mut Reg<'_>) {
         k_set_bool(rule, "tookSemi", true);
     });
     reg.act("@for_cond-bc", |rule, _context| {
-        if k_str(rule, "took") == "expr" && child_is_val(rule) {
+        if k_str(rule, "took") == "expr" && crate::expression::child_is_expr(rule) {
             take_clause_value(rule);
         }
     });
@@ -438,16 +442,15 @@ pub fn register(reg: &mut Reg<'_>) {
         k_set_str(rule, "took", "expr")
     });
     reg.act("@for_iter-bc", |rule, _context| {
-        if k_str(rule, "took") == "expr" && child_is_val(rule) {
+        if k_str(rule, "took") == "expr" && crate::expression::child_is_expr(rule) {
             take_clause_value(rule);
         }
     });
 
     // --- labeled_statement ---------------------------------------------------------
+    // A label's statement may be another label: each has its own node,
+    // and its state is its own (u, which a child does not inherit).
     reg.act("@labeled_statement-bo", |rule, _context| {
-        if node_id(rule).is_some_and(|node| cst::kind_of(node) == "labeled_statement") {
-            return;
-        }
         let node = cst::new_node("labeled_statement", None);
         set_node_id(rule, node);
     });
@@ -457,7 +460,7 @@ pub fn register(reg: &mut Reg<'_>) {
         };
         cst::set_extra(node, "labelKind", Item::str("case"));
         push_token(node, token);
-        k_set_str(rule, "kind", "case");
+        u_set_str(rule, "kind", "case");
     });
     reg.act("@lbl-take-default", |rule, _context| {
         let (Some(node), Some(token)) = (node_id(rule), o0(rule)) else {
@@ -465,7 +468,7 @@ pub fn register(reg: &mut Reg<'_>) {
         };
         cst::set_extra(node, "labelKind", Item::str("default"));
         push_token(node, token);
-        k_set_str(rule, "kind", "default");
+        u_set_str(rule, "kind", "default");
     });
     reg.act("@lbl-take-name", |rule, _context| {
         let (Some(node), Some(token)) = (node_id(rule), o0(rule)) else {
@@ -474,36 +477,41 @@ pub fn register(reg: &mut Reg<'_>) {
         cst::set_extra(node, "labelKind", Item::str("label"));
         cst::set_extra(node, "labelName", Item::str(cst::token_src(token)));
         push_token(node, token);
-        k_set_str(rule, "kind", "label");
+        u_set_str(rule, "kind", "label");
     });
     reg.cond("@lbl-needs-expr", |rule, _context| {
-        k_str(rule, "kind") == "case" && !k_bool(rule, "tookExpr")
+        u_str(rule, "kind") == "case" && !u_bool(rule, "tookExpr")
     });
     reg.act("@lbl-mark-expr", |rule, _context| {
-        k_set_bool(rule, "tookExpr", true)
+        u_set_bool(rule, "tookExpr", true)
     });
     reg.cond("@lbl-needs-colon", |rule, _context| {
-        !k_bool(rule, "tookColon")
+        !u_bool(rule, "tookColon")
+    });
+    reg.cond("@lbl-may-end", |rule, _context| {
+        u_str(rule, "kind") != "case" || u_bool(rule, "tookColon")
     });
     reg.act("@lbl-take-colon", |rule, _context| {
         take_close(rule);
-        k_set_bool(rule, "tookColon", true);
-    });
-    reg.cond("@lbl-needs-body", |rule, _context| {
-        k_bool(rule, "tookColon") && !k_bool(rule, "tookBody")
+        u_set_bool(rule, "tookColon", true);
     });
     reg.act("@labeled_statement-bc", |rule, _context| {
-        if k_str(rule, "kind") == "case" && child_is_val(rule) && !k_bool(rule, "exprAttached") {
-            let (Some(node), Some(child)) = (node_id(rule), child_node_id(rule)) else {
-                return;
-            };
-            if child != node {
-                cst::push_child(node, Item::Node(child));
-                k_set_bool(rule, "exprAttached", true);
-                return;
-            }
+        let (Some(node), Some(child)) = (node_id(rule), child_node_id(rule)) else {
+            return;
+        };
+        if u_str(rule, "kind") == "case"
+            && crate::expression::child_is_expr(rule)
+            && child != node
+            && !u_bool(rule, "exprAttached")
+        {
+            cst::push_child(node, Item::Node(child));
+            u_set_bool(rule, "exprAttached", true);
+            return;
         }
-        take_child_once(rule, "statement", "tookBody");
+        if child_name(rule) == "statement" && !u_bool(rule, "tookBody") {
+            cst::push_child(node, Item::Node(child));
+            u_set_bool(rule, "tookBody", true);
+        }
     });
 }
 
@@ -518,15 +526,14 @@ fn jump_kind(rule: &tabnas::Rule) -> String {
     }
 }
 
-/// Attach a for-control clause's value once, as both a child and the
-/// node's `value` field.
+/// Attach a for-control clause's value once.
 fn take_clause_value(rule: &mut tabnas::Rule) {
     let (Some(node), Some(child)) = (node_id(rule), child_node_id(rule)) else {
         return;
     };
-    if child == node || cst::has_extra(node, "value") {
+    if child == node || u_bool(rule, "valueTaken") {
         return;
     }
     cst::push_child(node, Item::Node(child));
-    cst::set_extra(node, "value", Item::Node(child));
+    u_set_bool(rule, "valueTaken", true);
 }

@@ -64,7 +64,4 @@ there.
   which case fix TS first and pin the corrected behaviour here.
 - A new fixture must pass in ALL THREE runtimes: run `go test ./...` (from
   `go/`), `npm test` (from `ts/`) and `cargo test --test parity_test` (from
-  `rs/`) before considering it done. While the Rust reader builds 0.5's
-  tree, it runs the 0.5 copies in `test/spec-0.5/`
-  ([`docs/rules.md`](../docs/rules.md), "Order"), so a fixture of the 0.6
-  tree passes in TypeScript and Go first and in Rust when it moves.
+  `rs/`) before considering it done.

@@ -271,6 +271,15 @@ pub struct CState {
     /// cannot share both, and `reset` clears this at the start of every
     /// parse, so a stale entry cannot outlive the text it came from.
     pub source_chars: Option<(usize, usize, std::rc::Rc<Vec<char>>)>,
+    /// The record of the tokens the lexer gave the parser, as arena ids,
+    /// from the first the current external declaration has not taken
+    /// (`rec_base` is the count of tokens taken before it), and that
+    /// declaration's state: the armed fallback's (`crate::fallback`).
+    pub rec: Vec<usize>,
+    pub rec_base: usize,
+    pub ed: Option<crate::fallback::ExtDecl>,
+    /// The nodes already given their spans (`crate::cst::fix_spans`).
+    pub fixed: std::collections::HashSet<usize>,
 }
 
 impl CState {
@@ -288,6 +297,10 @@ impl CState {
             active: false,
             gave_up: false,
             source_chars: None,
+            rec: Vec::new(),
+            rec_base: 0,
+            ed: None,
+            fixed: std::collections::HashSet::new(),
         }
     }
 }

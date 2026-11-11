@@ -51,15 +51,17 @@ fn divergence_register() {
         .join("divergent.tsv");
     let spec = load_spec(&path, &SpecOptions::default()).unwrap_or_else(|error| panic!("{error}"));
 
-    // An empty register would be legitimate for a port with no
-    // divergences, but an empty FILE is not: it cannot be told apart
-    // from a loader that read nothing. This port has divergences, so the
-    // file has rows.
-    assert!(
-        !spec.rows.is_empty(),
-        "{} has no rows, and this port has divergences to record",
-        path.display()
-    );
+    // A register with no rows is legitimate: from 0.6 this port has no
+    // divergence a cell can hold (DIVERGENCE.md#1 is pinned by tests of
+    // its own). A file the loader read nothing from is not, so the header
+    // must name the columns every row would need.
+    for column in [RUNTIME, "ts", "go", "why", "input"] {
+        assert!(
+            spec.header.iter().any(|name| name == column),
+            "{} has no {column:?} column, so it was not read as the register",
+            path.display()
+        );
+    }
 
     let parser = tabnas_c::make();
     let mut failures: Vec<String> = Vec::new();

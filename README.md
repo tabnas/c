@@ -453,11 +453,10 @@ requires; a `go.work` over sibling `@tabnas` checkouts (see the CI note in
 
 A Rust port lives under [`rs/`](rs/): crate `tabnas-c`, library
 `tabnas_c`, a hand-translation of the TypeScript onto the Rust `tabnas`
-engine over `tabnas-jsonic` and `tabnas-expr`. It builds 0.5's tree until
-it moves to the rules (see [`docs/rules.md`](docs/rules.md), "Order"). The engine and the two
-plugins are on crates.io as well, but this repository's `rs/Cargo.toml`
-takes each by path from a sibling checkout, and the release workflow swaps
-in crates.io versions when it publishes `tabnas-c`.
+engine over `tabnas-jsonic`. The engine and the plugin are on crates.io
+as well, but this repository's `rs/Cargo.toml` takes each by path from a
+sibling checkout, and the release workflow swaps in crates.io versions
+when it publishes `tabnas-c`.
 
 ```rust
 let value = tabnas_c::parse("int f(int a) { return a + 1; }")?;
@@ -465,15 +464,11 @@ assert_eq!(value.to_json()["kind"], "translation_unit");
 ```
 
 **Parity:** every shared `test/spec` fixture passes, and the Rust corpus
-test replays all 100 Csmith seeds: 63 match their golden fixture
-exactly, and the other 37 differ in one recorded way, a prefix operator
-standing alone as a brace-initializer item, which the canonical leaves
-as a raw operator array and this port drops. That difference and the
-two others (a ternary as a whole declaration initializer, which the
-canonical cannot walk, and a cap on nesting depth) are recorded with
-their measurements in [`DIVERGENCE.md`](DIVERGENCE.md), and each is
-pinned by a test that fails when it is repaired as well as when it
-regresses. Build and test from `rs/` with
+test replays all 100 Csmith seeds, each of which matches its golden
+fixture. The one difference from the canonical, a cap on nesting depth,
+is recorded with its measurements in [`DIVERGENCE.md`](DIVERGENCE.md),
+and tests pin it so that they fail when it moves. Build and test from
+`rs/` with
 `cargo test --all-targets && cargo test --doc`, or run the whole gate
 with `ci/rust/run.sh`; [`rs/README.md`](rs/README.md) has the details.
 

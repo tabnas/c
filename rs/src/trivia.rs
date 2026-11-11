@@ -27,17 +27,19 @@ pub fn on_lex_token(token: &mut Token) {
         return;
     }
     let pending = with_state(|state| std::mem::take(&mut state.pending_trivia));
-    if pending.is_empty() {
-        return;
+    if !pending.is_empty() {
+        let leading = Value::array(
+            pending
+                .into_iter()
+                .map(state::token_handle)
+                .collect::<Vec<_>>(),
+        );
+        token
+            .use_data
+            .get_or_insert_with(Default::default)
+            .insert("leading".to_string(), leading);
     }
-    let leading = Value::array(
-        pending
-            .into_iter()
-            .map(state::token_handle)
-            .collect::<Vec<_>>(),
-    );
-    token
-        .use_data
-        .get_or_insert_with(Default::default)
-        .insert("leading".to_string(), leading);
+    // The tokens the parser takes, in order, for the armed fallback
+    // (`crate::fallback`).
+    crate::fallback::record_token(token);
 }

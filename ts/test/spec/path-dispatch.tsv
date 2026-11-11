@@ -5,9 +5,7 @@
 # From 0.6 every declaration is built by rules (docs/rules.md): `grammar`
 # is a strict route, where a declaration the rules cannot parse is
 # refused, and `legacy` an armed one, where it becomes an unknown
-# declaration. The TypeScript test holds each row's `declKind`; the Rust
-# reader, which builds 0.5's tree until it moves, holds the `path` too,
-# from the 0.5 copy in ts/test/spec-0.5/.
+# declaration. The TypeScript and Rust tests hold each row's `declKind`.
 #
 # Columns are tab-separated:
 #   src      C source. Single declaration unless declIdx is set.

@@ -13,7 +13,7 @@ use crate::cst::{self, Item};
 use crate::refs::Reg;
 use crate::rt::*;
 use crate::sets;
-use crate::state::{handle_node, with_state};
+use crate::state::handle_node;
 use crate::COptions;
 
 /// Walk past a tagged-type specifier (`struct`, `union`, `enum`)
@@ -239,9 +239,6 @@ fn is_function_body_supported(
 /// prefix, one or more type specifiers, then a declarator shape this
 /// path can structure. Port of `@looks-simple-decl`.
 fn looks_simple_decl(rule: &mut Rule, context: &mut Context, lexer: &mut Lexer<'_>) -> bool {
-    if !crate::refs::first_iteration(rule) {
-        return false;
-    }
     let mut index = 0usize;
     index = skip_leading_attributes(context, rule, lexer, index);
     if sets::STORAGE_PREFIX.contains(&t_name(context, index).as_str()) {
@@ -506,14 +503,26 @@ fn looks_simple_decl(rule: &mut Rule, context: &mut Context, lexer: &mut Lexer<'
 /// whether the handler fires on the declaration itself or on its
 /// specifier loop.
 pub fn spec_owner_u_node(rule: &Rule, key: &str) -> Option<usize> {
-    if matches!(
-        rule.name.as_str(),
-        "simple_declaration" | "struct_declaration"
-    ) {
-        u_node(rule, key)
-    } else {
-        parent_u_node(rule, key)
+    // The nearest up the rule chain that holds a specifier list
+    // (`u.specs`: simple_declaration, struct_declaration,
+    // enum_utype_specs); spec_loop is its child, and bit_int_paren and
+    // paren_run are spec_loop's.
+    if rule.u.get("specs").and_then(handle_node).is_some() {
+        return u_node(rule, key);
     }
+    let mut current = rule.parent_rule.clone();
+    let mut hops = 1;
+    while let Some(parent) = current {
+        if hops >= 8 {
+            break;
+        }
+        if parent.u.get("specs").and_then(handle_node).is_some() {
+            return parent.u.get(key).and_then(handle_node);
+        }
+        current = parent.parent_rule.clone();
+        hops += 1;
+    }
+    parent_u_node(rule, key)
 }
 
 /// The per-statement `k` keys a fresh control-flow rule clears, so a
@@ -536,67 +545,9 @@ pub fn clear_stmt_state(rule: &mut Rule) {
 }
 
 pub fn register(reg: &mut Reg<'_>, options: &COptions) {
-    let _ = options;
+    let extended = options.extended;
 
     reg.cond_lex("@looks-simple-decl", looks_simple_decl);
-
-    // --- the close action when the structured path was taken ---------
-    reg.act("@finalize-new-path", |rule, context| {
-        let Some(child) = child_node_id(rule) else {
-            return;
-        };
-        let Some(node) = node_id(rule) else {
-            return;
-        };
-        let name = child_name(rule);
-        // A standalone directive or declaration form keeps the
-        // structured node as the single child of the external
-        // declaration; a simple declaration splices its children for
-        // the historic shape.
-        let wrap_as_single = name == "static_assert_declaration" || name == "asm_statement";
-        if wrap_as_single {
-            cst::set_children(node, vec![Item::Node(child)]);
-            cst::set_extra(node, "declKind", Item::str("declaration"));
-        } else {
-            cst::set_children(node, cst::children_of(child));
-            let decl_kind =
-                cst::extra_of(child, "declKind").unwrap_or_else(|| Item::str("declaration"));
-            cst::set_extra(node, "declKind", decl_kind);
-        }
-        cst::set_extra(node, "viaPath", Item::str("grammar"));
-        // Register every declared name as a typedef when the child's
-        // specifier list carried `typedef`.
-        let Some(child_rule) = rule.child_rule.clone() else {
-            return;
-        };
-        let specs = child_rule.u.get("specs").and_then(handle_node);
-        if !specs.is_some_and(|specs| node_flag(specs, "isTypedef")) {
-            return;
-        }
-        // The declarator-list node already owns every declaration. Read
-        // the names from it once at finalization instead of rebuilding a
-        // Value array in the rule bag after each comma. Rebuilding that
-        // array copied the full prefix for every declarator (O(n^2)).
-        let names: Vec<String> = child_rule
-            .u
-            .get("idl")
-            .and_then(handle_node)
-            .map(cst::children_of)
-            .unwrap_or_default()
-            .iter()
-            .filter_map(Item::as_node)
-            .filter_map(
-                |declarator| match cst::extra_of(declarator, "declaredName") {
-                    Some(Item::Val(Value::String(name))) => Some(name),
-                    _ => None,
-                },
-            )
-            .collect();
-        for name in names {
-            with_state(|state| state.symbols.bind_typedef(&name));
-            crate::refs::reclassify(context, &name, "ID", "TYPEDEF_NAME");
-        }
-    });
 
     // --- simple_declaration ------------------------------------------
     reg.act("@simple_declaration-bo", |rule, _context| {
@@ -644,7 +595,8 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
     });
 
     reg.act("@absorb-spec-storage", |rule, _context| {
-        let (Some(specs), Some(token)) = (spec_owner_u_node(rule, "specs"), o0(rule)) else {
+        let (Some(specs), Some(token)) = (spec_owner_u_node(rule, "specs"), state_token(rule))
+        else {
             return;
         };
         push_token(specs, token);
@@ -653,9 +605,62 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
         }
     });
     reg.act("@absorb-spec-type", |rule, _context| {
-        if let (Some(specs), Some(token)) = (spec_owner_u_node(rule, "specs"), o0(rule)) {
+        if let (Some(specs), Some(token)) = (spec_owner_u_node(rule, "specs"), state_token(rule)) {
             push_token(specs, token);
         }
+    });
+    // A specifier with a parenthesised argument: the keyword, and the
+    // parentheses' tokens on the declaration_specifiers too (paren_run).
+    reg.act("@absorb-spec-paren", |rule, _context| {
+        let (Some(specs), Some(token)) = (spec_owner_u_node(rule, "specs"), state_token(rule))
+        else {
+            return;
+        };
+        push_token(specs, token);
+        k_set_node(rule, "prunTarget", specs);
+    });
+
+    // --- paren_run: a balanced ( ... ), flat ---------------------------
+    reg.act("@prun-take", |rule, _context| {
+        let Some(token) = o0(rule) else {
+            return;
+        };
+        if let Some(target) = k_node(rule, "prunTarget").or_else(|| node_id(rule)) {
+            push_token(target, token);
+        }
+        match cst::token_name(token).as_str() {
+            "PUNC_LPAREN" => {
+                let depth = k_num(rule, "prunDepth") + 1;
+                k_set_num(rule, "prunDepth", depth);
+            }
+            "PUNC_RPAREN" => {
+                let depth = k_num(rule, "prunDepth") - 1;
+                k_set_num(rule, "prunDepth", depth);
+            }
+            _ => {}
+        }
+    });
+    reg.cond("@prun-closed", |rule, _context| {
+        k_num(rule, "prunDepth") <= 0
+    });
+    reg.act("@paren_run-ac", |rule, _context| {
+        if k_num(rule, "prunDepth") <= 0 {
+            k_del(rule, "prunTarget");
+            k_del(rule, "prunDepth");
+        }
+    });
+
+    // --- asm_label: `__asm__ ( "name" )` after a declarator ------------
+    reg.act("@asm_label-bo", |rule, _context| {
+        let node = cst::new_node("asm_label", None);
+        set_node_id(rule, node);
+    });
+    reg.act("@alab-kw", |rule, _context| {
+        if let (Some(node), Some(token)) = (node_id(rule), o0(rule)) {
+            push_token(node, token);
+        }
+        k_del(rule, "prunTarget");
+        k_set_num(rule, "prunDepth", 0);
     });
 
     // --- bit_int_paren (C23 `_BitInt(N)`) ----------------------------
@@ -666,7 +671,7 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
     });
     reg.act("@bip-mark-val", |_rule, _context| {});
     reg.act("@bit_int_paren-bc", |rule, _context| {
-        if k_bool(rule, "bipValAttached") || !child_is_val(rule) {
+        if k_bool(rule, "bipValAttached") || !crate::expression::child_is_expr(rule) {
             return;
         }
         let (Some(child), Some(specs)) = (child_node_id(rule), spec_owner_u_node(rule, "specs"))
@@ -725,6 +730,32 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
         k_set_bool(rule, "named", true);
     });
     reg.cond("@idecl-named", |rule, _context| k_bool(rule, "named"));
+    // A declarator after a declarator with no comma between (`int a b;`)
+    // is 0.5's rules' reading, kept where the declaration is held to the
+    // rules; an armed declaration fails there, as the structurer did.
+    reg.cond("@idecl-may-name", |rule, _context| !k_bool(rule, "named"));
+    reg.cond("@sd-may-declarate", |rule, _context| {
+        let Some(idl) = u_node(rule, "idl") else {
+            return true;
+        };
+        let kids = cst::children_of(idl);
+        let Some(last) = kids.last() else {
+            return true;
+        };
+        if last
+            .as_token()
+            .is_some_and(|token| cst::token_name(token) == "PUNC_COMMA")
+        {
+            return true;
+        }
+        if crate::fallback::with_ed(|ed| ed.armed).unwrap_or(false) {
+            return false;
+        }
+        // A declarator with no comma before it: 0.5's rules read it into
+        // the declarator before, whose name it then was.
+        u_set_bool(rule, "lenient", true);
+        true
+    });
 
     reg.act("@idecl-paren-open", |rule, _context| {
         let (Some(token), Some(declarator), Some(direct), Some(node)) = (
@@ -849,7 +880,7 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
         }
     });
     reg.act("@array_postfix-bc", |rule, _context| {
-        if !child_is_val(rule) || u_node(rule, "size").is_some() {
+        if !crate::expression::child_is_expr(rule) || u_node(rule, "size").is_some() {
             return;
         }
         let (Some(node), Some(child)) = (node_id(rule), child_node_id(rule)) else {
@@ -1005,6 +1036,27 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
     reg.cond("@param-has-pointer", |rule, _context| {
         k_node(rule, "lastPointer").is_some()
     });
+    reg.cond("@param-has-pointer-ext", move |rule, _context| {
+        extended && k_node(rule, "lastPointer").is_some()
+    });
+    // A struct, union or enum specifier read in a parameter's specifier
+    // loop goes onto the parameter's declaration_specifiers, once.
+    reg.act("@param_spec_loop-bc", |rule, _context| {
+        let name = child_name(rule);
+        if name != "struct_specifier" && name != "enum_specifier" {
+            return;
+        }
+        let (Some(id), Some(child)) = (child_rule_id(rule), child_node_id(rule)) else {
+            return;
+        };
+        if u_num(rule, "takenTagged") == Some(id as i64) {
+            return;
+        }
+        if let Some(specs) = parent_k_node(rule, "specs") {
+            cst::push_child(specs, Item::Node(child));
+            u_set_num(rule, "takenTagged", id as i64);
+        }
+    });
     reg.act("@param-pointer-qual", |rule, _context| {
         if let (Some(pointer), Some(token)) = (k_node(rule, "lastPointer"), c0(rule)) {
             push_token(pointer, token);
@@ -1057,6 +1109,9 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
             cst::push_child(declarator, Item::Node(pointer));
         }
         k_set_node(rule, "lastPointer", pointer);
+    });
+    reg.cond("@ppi-has-pointer-ext", move |rule, _context| {
+        extended && k_node(rule, "lastPointer").is_some()
     });
     reg.cond("@ppi-has-pointer", |rule, _context| {
         k_node(rule, "lastPointer").is_some()
@@ -1126,6 +1181,22 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
         u_set_bool(rule, "hasInit", true);
     });
     reg.act("@init_declarator-bc", |rule, _context| {
+        // An attribute or an asm label after the declarator.
+        let name = child_name(rule);
+        if matches!(
+            name.as_str(),
+            "attribute_spec_gcc" | "attribute_spec_msvc" | "asm_label"
+        ) {
+            if let (Some(id), Some(child), Some(node)) =
+                (child_rule_id(rule), child_node_id(rule), node_id(rule))
+            {
+                if u_num(rule, "lastSuffix") != Some(id as i64) {
+                    cst::push_child(node, Item::Node(child));
+                    u_set_num(rule, "lastSuffix", id as i64);
+                    return;
+                }
+            }
+        }
         if !u_bool(rule, "hasInit") {
             return;
         }
@@ -1167,9 +1238,16 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
         let name = child_name(rule);
         let child = child_node_id(rule);
         if name == "init_declarator" {
+            let id = child_rule_id(rule).map(|id| id as i64);
             if let Some(child) = child.filter(|child| cst::kind_of(*child) == "init_declarator") {
-                if let Some(idl) = u_node(rule, "idl") {
-                    cst::push_child(idl, Item::Node(child));
+                if id.is_some() && u_num(rule, "lastDeclarator") != id {
+                    if let Some(idl) = u_node(rule, "idl") {
+                        cst::push_child(idl, Item::Node(child));
+                    }
+                    if let Some(id) = id {
+                        u_set_num(rule, "lastDeclarator", id);
+                    }
+                    u_set_bool(rule, "lenient", false);
                 }
             }
         }
@@ -1248,4 +1326,36 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
     });
 
     crate::refs_stmt::register(reg);
+}
+
+/// The names a strict typedef declaration declares, from the
+/// declaration rule that built it: each declarator's, where a declarator
+/// with no comma before it takes the place of the one before, as 0.5's
+/// rules read `int a b;` (its second name was the declarator's).
+/// `None` when the declaration is not a typedef.
+pub fn typedef_names(child: &tabnas::RuleSnapshot) -> Option<Vec<String>> {
+    let specs = child.u.get("specs").and_then(handle_node)?;
+    if !node_flag(specs, "isTypedef") {
+        return None;
+    }
+    let idl = child.u.get("idl").and_then(handle_node)?;
+    let mut names: Vec<String> = Vec::new();
+    let mut after_comma = true;
+    for item in cst::children_of(idl) {
+        if let Some(token) = item.as_token() {
+            after_comma = cst::token_name(token) == "PUNC_COMMA";
+            continue;
+        }
+        let Some(declarator) = item.as_node() else {
+            continue;
+        };
+        if let Some(Item::Val(Value::String(name))) = cst::extra_of(declarator, "declaredName") {
+            if !after_comma && !names.is_empty() {
+                names.pop();
+            }
+            names.push(name);
+        }
+        after_comma = false;
+    }
+    Some(names)
 }

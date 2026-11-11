@@ -43,7 +43,7 @@ fn top_level_call_returns() {
     let parser = tabnas_c::make();
     let value = tabnas_c::parse_with(&parser, "f(1);").expect("a top-level call must return");
     let json = value.to_json();
-    assert_eq!(json["children"][0]["viaPath"], "legacy");
+    assert_eq!(json["children"][0]["kind"], "external_declaration");
 }
 
 #[test]
@@ -151,6 +151,26 @@ fn nest(depth: usize) -> String {
     )
 }
 
+/// An unterminated `#if` is a group that ends with the document, so a run
+/// of them nests two levels a group, and the deepest run the cap admits
+/// has `(REALIZE_DEPTH_CAP - 4) / 2` lines. Past it this port reports
+/// `cancel`, where TypeScript and Go return the tree and 0.5 left the
+/// lines flat (DIVERGENCE.md#1).
+#[test]
+fn unterminated_conditionals_nest_to_the_cap() {
+    let deepest = (tabnas_c::REALIZE_DEPTH_CAP - 4) / 2;
+    for extended in [false, true] {
+        let parser = tabnas_c::make_with(&tabnas_c::COptions::new().with_extended(extended));
+        let value = tabnas_c::parse_with(&parser, &"#if 1\n".repeat(deepest))
+            .unwrap_or_else(|error| panic!("{deepest} lines: {}", error.code));
+        assert_eq!(value.to_json()["kind"], "translation_unit");
+        let error = tabnas_c::parse_with(&parser, &"#if 1\n".repeat(deepest + 1))
+            .err()
+            .unwrap_or_else(|| panic!("{} lines should not have realized", deepest + 1));
+        assert_eq!(error.code, "cancel");
+    }
+}
+
 /// Nesting AT the cap returns a tree, which is the half of the boundary
 /// a test usually forgets.
 #[test]
@@ -184,23 +204,6 @@ fn nesting_past_the_cap() {
     }
 }
 
-/// The canonical builds a tree that holds itself for a ternary used as a
-/// whole declaration initializer, and walks it until the stack runs out.
-/// This port reports the engine's `cancel` code and returns. See
-/// DIVERGENCE.md section 1.
-#[test]
-fn expression_cycle() {
-    let parser = tabnas_c::make();
-    let error =
-        tabnas_c::parse_with(&parser, "int a = b ? c : d;").expect_err("the tree holds itself");
-    assert_eq!(error.code, "cancel");
-
-    // The same ternary inside parentheses is an ordinary parse in every
-    // runtime, measured, so the guard has not swallowed a working input.
-    let value = tabnas_c::parse_with(&parser, "int a = (b ? c : d);").expect("parentheses parse");
-    assert_eq!(value.to_json()["kind"], "translation_unit");
-}
-
 /// Deeply nested expressions and other shapes that recurse elsewhere.
 #[test]
 fn other_deep_shapes_return() {
@@ -225,22 +228,18 @@ fn other_deep_shapes_return() {
     }
 }
 
-/// Every construct the extended mode's structurer recurses on, nested
-/// past the cap, reports `cancel`.
+/// Every construct that nests in the tree, nested past the cap, reports
+/// `cancel`, and the process lives.
 ///
-/// That structurer is a recursive-descent parser, and nesting reaches it
-/// through more than blocks: a statement body without braces, an `else`,
-/// a label, a parenthesised declarator, a parameter list, a struct in a
-/// struct, a brace initializer, an operand. It counts every one of them
-/// against `REALIZE_DEPTH_CAP`, and every shape but the last two reaches
-/// that count on the test harness's 2 MiB thread, so a frame on any of
-/// those paths that grows past what the cap was measured against aborts
-/// this test rather than a caller. The last two are chains a loop
-/// builds, not a recursion: they reach the tree walks after the
-/// structurer thousands of levels deep, and stop at the realize cap.
+/// The rules read every one of these shapes with a rule stack that grows
+/// with the nesting and a parse loop that does not recurse; what nests
+/// is the tree, and the realize walk stops at `REALIZE_DEPTH_CAP`. A
+/// declarator nested in parentheses past one level is the exception: the
+/// rules leave the declaration unknown, a flat run of its tokens, in
+/// every runtime, so it returns that tree.
 ///
 /// The canonical answers these with a tree or with its own stack running
-/// out, depending on the construct: see DIVERGENCE.md section 2.
+/// out, depending on the construct: see DIVERGENCE.md section 1.
 #[test]
 fn every_recursive_construct_stops_at_the_cap() {
     let parser = tabnas_c::make_with(&tabnas_c::COptions::new().with_extended(true));
@@ -261,9 +260,6 @@ fn every_recursive_construct_stops_at_the_cap() {
         body(format!("switch (a) {{ {} }}", deep("case 1: ", " ;", ""))),
         body(deep("if (a) {", " ;", "}")),
         format!("{};", deep("struct s { ", "int x;", "} y;")),
-        format!("int {};", deep("(", "x", ")")),
-        format!("int {};", deep("(*", "x", ")(void)")),
-        format!("void f({});", deep("void (*)(", "int", ")")),
         body(format!("int x = {};", deep("{", "1", "}"))),
         body(format!("x = {};", deep("(", "1", ")"))),
         body(format!("x = {};", deep("-", "1", ""))),
@@ -278,5 +274,19 @@ fn every_recursive_construct_stops_at_the_cap() {
             .err()
             .unwrap_or_else(|| panic!("{head:?} should not have realized"));
         assert_eq!(error.code, "cancel", "{head:?} reported the wrong code");
+    }
+    for source in [
+        format!("int {};", deep("(", "x", ")")),
+        format!("int {};", deep("(*", "x", ")(void)")),
+        format!("void f({});", deep("void (*)(", "int", ")")),
+    ] {
+        let head = &source[..40.min(source.len())];
+        let value = tabnas_c::parse_with(&parser, &source)
+            .unwrap_or_else(|error| panic!("{head:?} reported {}", error.code));
+        assert_eq!(
+            value.to_json()["children"][0]["declKind"],
+            "unknown",
+            "{head:?} is not the unknown declaration every runtime reads"
+        );
     }
 }
