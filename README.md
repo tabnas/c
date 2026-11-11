@@ -259,7 +259,7 @@ block / struct-or-union / enum / for-init) is implemented in
 
 ## Preprocessor
 
-Each `#-line` is its own structured directive node (see shapes above),
+Each `#-line` is its own structured directive node (see shapes above)
 at the top level and in a function body alike. A
 `#if`/`#ifdef`/`#ifndef` … (`#elif`…)\* (`#else`)? … `#endif` run is a
 `conditional_group` containing typed branches, built by rules as the
