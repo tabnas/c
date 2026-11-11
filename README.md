@@ -127,12 +127,12 @@ work in both modes.
   right, and each context starts at the level C's grammar names (an
   initializer is an assignment expression, an array size a conditional
   one). Casts, compound literals, `sizeof ( type )`, `_Generic`, GCC
-  statement expressions, brace lists and adjacent strings are rules of
+  statement expressions, brace lists, and adjacent strings are rules of
   their own.
 
-- **Conditional groups are rules**: a `#if`, `#ifdef` or `#ifndef`
+- **Conditional groups are rules**: a `#if`, `#ifdef`, or `#ifndef`
   line opens a `conditional_group`, whose `conditional_branch`es hold
-  the declarations up to the next `#elif`, `#else` or `#endif` line.
+  the declarations up to the next `#elif`, `#else`, or `#endif` line.
 
 - **One path, dispatched on the head, with a fallback**
   (`src/fallback.ts`): `external_declaration` holds a declaration to the
@@ -421,7 +421,7 @@ hybrid:
   architecture.
 
 - **0.6** every declaration and expression is built by rules, in
-  one path, the chomp, the structurer, `@tabnas/expr` and the
+  one path, the chomp, the structurer, `@tabnas/expr`, and the
   conditional-group post-pass gone; the members that repeat a child
   move to `member()`. [`docs/rules.md`](docs/rules.md) has the
   design and what was measured.
