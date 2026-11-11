@@ -25,7 +25,14 @@ import type { Rule, Context, Token } from '@tabnas/parser'
 
 import {
   CNode, makeNode, keepToken, dropToken, tokenRef, leadingTriviaRefs,
+  isNode, fixSpans,
 } from './node.js'
+
+// What never directly follows an operand in C (c.ts's JUXTAPOSED set).
+const JUXTAPOSED = new Set([
+  'ID', 'TYPEDEF_NAME', 'MACRO_NAME',
+  'LIT_INT', 'LIT_FLOAT', 'LIT_CHAR', 'LIT_STRING',
+])
 
 // The binary operators' precedence, by token name: a larger number binds
 // tighter. C's levels, from `||` to the multiplicative operators.
@@ -124,7 +131,15 @@ export function makeExpressionRefs(): Record<string, Function> {
 
     // ---- val: the rule an expression starts from -------------------
     '@val-start': (rule: Rule): void => { rule.node = undefined as any },
-    '@val-end': relay,
+    // An expression parsed on its own (the start rule `val`): its spans,
+    // as an external declaration's are given when it ends.
+    '@val-end': (rule: Rule, ctx: Context): void => {
+      relay(rule)
+      const parent = (rule as any).parent
+      if ((!parent || parent === (ctx as any).NORULE) && isNode(rule.node)) {
+        fixSpans(rule.node)
+      }
+    },
 
     // ---- expression: the comma operator ----------------------------
     '@expression-bo': fresh,
@@ -204,6 +219,12 @@ export function makeExpressionRefs(): Record<string, Function> {
       rule.u.min = rule.k.min ?? 0
     },
     '@binary-bc': relay,
+    // The token after the operand (the operator alternate before this
+    // one fetched it) is not an identifier or a literal.
+    '@not-juxtaposed': (_rule: Rule, ctx: Context): boolean => {
+      const t = ctx.t[0] as any
+      return !(t && JUXTAPOSED.has(t.name))
+    },
     '@binary_rhs-bo': (rule: Rule): void => {
       isCarried(rule)
       rule.u.min = rule.k.binMin ?? 0
@@ -355,7 +376,8 @@ export function makeExpressionRefs(): Record<string, Function> {
 
     // ---- arguments -------------------------------------------------
     '@argument_list-bo': (rule: Rule): void => {
-      if (!isCarried(rule)) {
+      rule.u.carried = isCarried(rule)
+      if (!rule.u.carried) {
         rule.node = makeNode('argument_list')
         const lp = rule.k.callParen as Token | undefined
         if (lp) dropToken(rule.node, lp)
@@ -366,6 +388,7 @@ export function makeExpressionRefs(): Record<string, Function> {
       const child = freshChild(rule)
       if (child) rule.node.children.push(child.node)
     },
+    '@args-first': (rule: Rule): boolean => rule.u.carried !== true,
     '@args-comma': (rule: Rule): void => {
       dropToken(rule.node, rule.c0 as Token)
       carryOn(rule)

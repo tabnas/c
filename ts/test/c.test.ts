@@ -108,18 +108,21 @@ describe('c parser smoke', () => {
     assert.equal(out.children[0].kind, 'external_declaration')
   })
 
-  test('legacy expressions expose operands only through children', () => {
+  test('expressions expose operands only through children', () => {
     const out = j.parse('int f(){ __asm__("x"); a /*keep*/ = b + c; }')
     const assignment = findKind(out, 'assignment_expression')
+    // The operator is the node's `op`; the comment before it is the
+    // node's child where the operator was.
     assert.deepEqual(
       assignment.children.map((child: any) => child.kind),
-      ['identifier_expression', 'binary_expression'],
+      ['identifier_expression', 'token', 'binary_expression'],
     )
+    assert.equal(assignment.op, '=')
     assert.equal('left' in assignment, false)
     assert.equal('right' in assignment, false)
-    assert.equal(assignment.children[0].trivia.trailing[0].src, '/*keep*/')
+    assert.equal(assignment.children[1].src, '/*keep*/')
     assert.deepEqual(
-      assignment.children[1].children.map((child: any) => child.kind),
+      assignment.children[2].children.map((child: any) => child.kind),
       ['identifier_expression', 'identifier_expression'],
     )
   })

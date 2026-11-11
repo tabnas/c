@@ -65,9 +65,13 @@ extension verbatim.
 It is a port of [`@jsonic/c`](https://github.com/jsonicjs/c) onto the
 [Tabnas](https://github.com/tabnas/parser) engine. Like `@tabnas/zon`, this
 is a **jsonic plugin**: it layers on `@tabnas/jsonic`'s relaxed-JSON grammar
-(used as the DSL the grammar file is authored in) and uses
-[`@tabnas/expr`](https://github.com/tabnas/expr) for Pratt-style expression
-parsing. Install it on a jsonic-enabled engine:
+(used as the DSL the grammar file is authored in). From 0.6 the TypeScript
+reader builds every declaration and expression with its own grammar rules,
+in one path, and no longer installs
+[`@tabnas/expr`](https://github.com/tabnas/expr), which the manifests still
+list until the maintainer removes it; [`docs/rules.md`](docs/rules.md) is
+the design, and says what the Go and Rust readers build until they move.
+Install it on a jsonic-enabled engine:
 
 ```ts
 import { Tabnas } from '@tabnas/parser'
@@ -87,14 +91,15 @@ const cst = new Tabnas().use(jsonic).use(C).parse('typedef int T; T x = 1;')
 | [`rs/`](rs/) | **Rust port** — crate `tabnas-c` (lib `tabnas_c`), a hand-translation of the TypeScript onto the Rust `tabnas` engine over `tabnas-jsonic` and `tabnas-expr`, all taken as path dependencies on sibling checkouts. `cargo test` runs the shared `test/spec/*.tsv` fixtures (`tests/parity_test.rs`), the Csmith corpus (`tests/csmith_test.rs`) and the path-dispatch catalogue (`tests/path_dispatch_test.rs`); the inputs where it answers differently from the canonical are recorded in [`DIVERGENCE.md`](DIVERGENCE.md) and pinned by `test/divergent.tsv` and named tests. See [`rs/AGENTS.md`](rs/AGENTS.md). |
 | [`ts/c-grammar.jsonic`](ts/c-grammar.jsonic) | **Single source of truth** for the declarative grammar (rule shapes for the whole C surface), authored in jsonic-DSL syntax. |
 | [`ts/embed-grammar.js`](ts/embed-grammar.js) | Embeds `c-grammar.jsonic` into `src/c.ts` (between `BEGIN/END EMBEDDED` markers) as the `grammarText` string literal, **and** copies it verbatim to `go/c-grammar.jsonic` for `//go:embed`. The grammar contains backticks, so the Go side embeds from the file rather than inlining a raw string (unlike the smaller ports). Runs as the first half of `npm run build`. |
-| [`ts/src/c.ts`](ts/src/c.ts) | Plugin entry: token catalog wiring, lex matchers, grammar install, and the `@`-named ref map (conditions/actions bound by name from the grammar). |
+| [`ts/src/c.ts`](ts/src/c.ts) | Plugin entry: token catalog wiring, lex matchers, grammar install, and the `@`-named ref map (conditions/actions bound by name from the grammar), the external declaration's dispatch and finishing (the names it binds) among them. |
+| [`ts/src/expression.ts`](ts/src/expression.ts) | C's expression rules' refs: precedence climbing as replace loops, the postfix chain, casts, calls, the juxtaposition check. |
+| [`ts/src/fallback.ts`](ts/src/fallback.ts) | The armed fallback: the token record, the chomp's end, the fence, the catch-all and bail alternates `withFallback` adds to every rule below `external_declaration`, and the local scope `asm_operand` catches a failure in. |
+| [`ts/src/node.ts`](ts/src/node.ts), [`ts/src/members.ts`](ts/src/members.ts) | The tree's node helpers (keeping and dropping a token, its comments kept either way; `fixSpans`, a node's span from its first kept token) and `member(node, name)`, the members the tree no longer holds. |
 | [`ts/src/matchers.ts`](ts/src/matchers.ts) | Focused lex matchers (whitespace, comments, directives, header names, identifiers, literals, punctuators). |
 | [`ts/src/tokens.ts`](ts/src/tokens.ts) | Named tokens for every keyword, extension keyword and punctuator. |
 | [`ts/src/symbols.ts`](ts/src/symbols.ts) | `SymbolTable` + `MacroTable` on `ctx.meta.cmeta`, shared by matchers and rule actions (typedef/macro disambiguation). |
-| [`ts/src/expr.ts`](ts/src/expr.ts), [`ts/src/expr-grammar.ts`](ts/src/expr-grammar.ts) | C operator table + `evaluateCExpr` (converts `@tabnas/expr` S-expressions into the per-kind expression CST shapes); `installExpr` wires `@tabnas/expr` and the C val-atom alts. |
-| [`ts/src/structure.ts`](ts/src/structure.ts) | Recursive-descent post-processor for the legacy-fallback long-tail shapes (K&R params, complex compound declarators). |
-| [`ts/src/conditional-groups.ts`](ts/src/conditional-groups.ts) | Translation-unit post-pass that folds `#if`/`#elif`/`#else`/`#endif` runs into `conditional_group` nodes. |
-| [`ts/test/`](ts/test/) | TS tests (compiled to `dist-test/`): `c.test.ts` (parse cases), `csmith.test.ts` (replays the 100-program Csmith regression corpus against committed gzipped fixtures), `parity.test.ts` (runs the shared `test/spec/*.tsv` fixtures). |
+| [`docs/rules.md`](docs/rules.md) | The design of the rules-built tree (0.6): the dispatch, the fallback, the tree, the members API, and what was measured. |
+| [`ts/test/`](ts/test/) | TS tests (compiled to `dist-test/`): `c.test.ts` (parse cases), `csmith.test.ts` (replays the 100-program Csmith regression corpus against committed gzipped fixtures), `parity.test.ts` (runs the shared `test/spec/*.tsv` fixtures), `repeat.test.ts` (every repetition a replace loop, 10,000 items each), `tree.test.ts` (each subtree held once, scalar members, spans, every comment kept). |
 | [`alchemy/render.alc`](alchemy/render.alc) | The **render**: the reader's tree written back as C source (entry `c-render`), an [alchemy](https://github.com/tabnas/alchemy) library a translating host links. See "Translation". |
 | [`ts/embed-translate.js`](ts/embed-translate.js) | Copies `tabnas.plugin.json` and `alchemy/render.alc` into `ts/src/translate.ts` (GENERATED: `translate()`, exported from the package), `go/translate/` (`Translate()` in `go/translate.go`) and `rs/translate/` (`translate()`, `manifest_text()` and `render_text()` in `rs/src/lib.rs`). Runs in `npm run embed` and in the build, after `embed-grammar.js`. |
 | [`test/spec/`](test/spec/) | **Shared cross-runtime fixtures** (`*.tsv`), auto-discovered and run by all three runners: `ts/test/parity.test.ts`, `go/parity_test.go` and `rs/tests/parity_test.rs`. See [`test/AGENTS.md`](test/AGENTS.md). Prefer a fixture here over a one-off in-language assertion. |
@@ -126,12 +131,16 @@ drop) from the node that keeps it; a comment the legacy expression path
 moves into a node's `trivia` is written too. The render reads a node's
 `kind`, `children`, `trivia`, `op` and `macroKind`, a token's name, text
 and span, and a raw operator's text and position (`c-keep-key`), and a
-pass before the tree is captured drops every other member: the
-members that repeat a subtree `children` holds (`operand`, `target`,
-`value` and the like) make the tree's events grow fast with the nesting
-of its expressions (for half the Csmith programs, to more than 400 times
-the source's size), and 32 of the 92 that nest within a host's default
-256 levels exceed its default 64 MiB capture as they are. A prefix
+pass before the tree is captured drops every other member: in the 0.5
+trees the Go and Rust readers build until they move, the members that
+repeat a subtree `children` holds (`operand`, `target`, `value` and the
+like) make the tree's events grow fast with the nesting of its
+expressions (for half the Csmith programs, to more than 400 times the
+source's size), and 32 of the 92 that nest within a host's default 256
+levels exceed its default 64 MiB capture as they are. A comment the
+TypeScript reader keeps where it drops a token (an operator, a comma, a
+parenthesis) is a child of the node at that token's place, and the
+render writes the piece after it (`c-around`). A prefix
 operator the reader keeps raw is read as the TypeScript reader holds it
 and as the Go reader wraps it (`Val`). The manifest's `loss` list says,
 a sentence each, what a written file does not keep: the kind of white
@@ -250,8 +259,9 @@ The port is mostly mechanical — the grammar is unchanged. The substitutions:
 
 ### The one behavioural fix: val-close clobber
 
-The single non-mechanical change lives in
-[`ts/src/expr-grammar.ts`](ts/src/expr-grammar.ts). tabnas core's
+This was 0.5's, in `ts/src/expr-grammar.ts`, which 0.6 removes: C's `val`
+is cleared of jsonic's alternates and actions, and its own alternates
+(`@val-start`, `@val-end`) set its node. The record of 0.5's fix: tabnas core's
 relaxed-JSON `val` close (`@val-bc/replace` and its `@val-ac` restore,
 supplied by `@tabnas/json` + `@tabnas/jsonic`) preserves only a
 **primitive** node a plugin set in a `val` open action — an **object** CST
@@ -354,9 +364,11 @@ What "correct" means here, in order of authority:
 3. **The embedded grammar matches its source.** If you changed
    `ts/c-grammar.jsonic`, run `npm run embed` from `ts/` (or `npm run build`,
    which embeds first) — never hand-edit between the `BEGIN/END EMBEDDED`
-   markers. The embed step also copies the grammar to `go/c-grammar.jsonic`
+   markers. The embed step copies the grammar to `go/c-grammar.jsonic`
    for `//go:embed` and to `rs/c-grammar.jsonic` for `include_str!`, so all
-   three runtimes pick the change up together;
+   three runtimes pick the change up together, but not while the Go and
+   Rust readers build 0.5's tree (`PORTS_ON_0_5` in `ts/embed-grammar.js`;
+   [`docs/rules.md`](docs/rules.md), "Order");
    `the_embedded_grammar_matches_the_source` in `rs/tests/c_test.rs` fails
    if the Rust copy lags its source. The same holds for the translation
    parts: edit `tabnas.plugin.json` or `alchemy/render.alc` and run
@@ -637,8 +649,8 @@ to instead:
 2. **Shared `test/spec/*.tsv` fixtures** run identically in all three
    runtimes.
 3. **The documented subset in README.md is what the code does.** The
-   `extended` option gates GCC/Clang/MSVC syntax and the legacy fallback;
-   plain C23 (including the whole preprocessor) is the default mode. Keep
+   `extended` option gates GCC/Clang/MSVC syntax; plain C23 (including
+   the whole preprocessor) is the default mode. Keep
    the README "Options" and "Coverage and known limitations" sections
    truthful — verify by parsing, not by memory.
 
@@ -648,9 +660,12 @@ to instead:
    hand-edit the text between the `--- BEGIN/END EMBEDDED c-grammar.jsonic
    ---` markers in `src/c.ts` — edit `c-grammar.jsonic` and re-run
    `npm run embed` (or `npm run build`, which embeds first).
-2. **Both parse paths must agree.** The grammar path and the legacy
-   `structure.ts` fallback must emit identical CST shapes; the Csmith
-   corpus + fixtures (`ts/test/csmith-*`) are the parity contract.
+2. **One path, and its acceptance is 0.5's.** Every declaration is
+   built by rules; a declaration 0.5 held to its rules is refused where
+   the rules cannot parse it, and any other becomes an unknown declaration
+   over the token run 0.5's structurer took (`ts/src/fallback.ts`). A
+   change to what the parser accepts or refuses is the maintainer's to
+   decide. Every repetition is a replace loop (`ts/test/repeat.test.ts`).
 
 ## Agent tooling
 

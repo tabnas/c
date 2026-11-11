@@ -15,6 +15,13 @@ Measured 2026-09-21 by running all three: the canonical under Node
 (type-stripped `ts/src/c.ts`), the Go port through a small driver, and
 the Rust port through `cargo test`.
 
+From 0.6 the canonical builds every declaration and expression with its
+own rules ([`docs/rules.md`](docs/rules.md)), and repairs sections 1 and
+3: C's expression rules build the ternary and the initializer item as
+nodes. The Go and Rust ports build 0.5's tree until they move to the
+rules, reading the 0.5 copies of the fixtures, so sections 1 and 3
+describe them against 0.5's canonical, and their rows go when they move.
+
 ## 1. A ternary in a declaration initializer
 
 | input | TypeScript | Go | Rust |
@@ -40,10 +47,10 @@ report the engine's existing `cancel` code. Neither changes the answer
 for any input that has one.
 
 **Who repairs it.** The defect is upstream, in the canonical: the
-expression node should not contain itself. Until `ts/src/c.ts` is
-repaired, all three runtimes fail on this input and only the manner
-differs. When it is repaired, all three should return a tree and this
-row goes.
+expression node should not contain itself. The canonical is repaired
+from 0.6 (the register's `ts` column is its tree); the ports fail on
+this input, and only the manner differs, until they move to its rules,
+when all three return a tree and this row goes.
 
 **Pinned by.** `test/divergent.tsv`, and `expression_cycle` in
 `rs/tests/limits_test.rs`.
@@ -165,7 +172,9 @@ disagreement is a whole CST, tens of thousands of characters wide, and a
 register row compares whole expected values. Named tests carry it
 instead.
 
-**Who repairs it.** The canonical first, then both ports (ADR-13).
+**Who repairs it.** The canonical first, then both ports (ADR-13). The
+canonical is repaired from 0.6: the item is the `unary_expression` it
+builds everywhere else, and the Csmith fixtures carry it.
 What the canonical leaves on the item is an engine-internal record, not
 a node of the language; the language's shape for that expression is
 the `unary_expression` the canonical itself builds for `int x = -5;`.

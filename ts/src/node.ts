@@ -79,3 +79,51 @@ export function isNode(v: any): v is CNode {
 export function childNodes(node: CNode): CNode[] {
   return node.children.filter(isNode) as CNode[]
 }
+
+const isTrivia = (t: CTokenRef): boolean => t.tname.startsWith('TRIVIA_')
+
+// Give every node in a subtree its span: the span of the first token it
+// keeps, comments and line continuations left out; a node that keeps no
+// token takes its parent's. Run once a subtree is complete: an external
+// declaration when it ends, an expression parsed on its own. A node
+// already given its span (an external declaration inside a conditional
+// group) is not walked again. The walks are iterative: a chain of
+// operators nests as deep as it is long.
+export function fixSpans(node: CNode, parent?: Span): void {
+  const first = new Map<CNode, Span | undefined>()
+  // Post-order: each node's first kept token, from its children's.
+  const stack: Array<[CNode, number]> = [[node, 0]]
+  while (stack.length) {
+    const top = stack[stack.length - 1]
+    const [n, i] = top
+    if ((n as any)[FIXED]) { first.set(n, n.span); stack.pop(); continue }
+    if (i < n.children.length) {
+      top[1] = i + 1
+      const c = n.children[i]
+      if (isNode(c) && !first.has(c)) stack.push([c, 0])
+      continue
+    }
+    let f: Span | undefined
+    for (const c of n.children) {
+      if (!c || 'object' !== typeof c) continue
+      const s = (c as any).kind === 'token'
+        ? (isTrivia(c as CTokenRef) ? undefined : (c as CTokenRef).span)
+        : isNode(c) ? first.get(c) : undefined
+      if (s) { f = s; break }
+    }
+    first.set(n, f)
+    stack.pop()
+  }
+  // Pre-order: a node with no token of its own takes its parent's span.
+  const todo: Array<[CNode, Span]> = [[node, parent ?? zeroSpan()]]
+  while (todo.length) {
+    const [n, p] = todo.pop()!
+    if ((n as any)[FIXED]) continue
+    const f = first.get(n)
+    n.span = f ? { ...f } : { ...p }
+    Object.defineProperty(n, FIXED, { value: true, enumerable: false })
+    for (const c of n.children) if (isNode(c)) todo.push([c, n.span])
+  }
+}
+
+const FIXED = Symbol('spans')
