@@ -136,8 +136,8 @@ work in both modes.
 
 - **One path, dispatched on the head, with a fallback**
   (`src/fallback.ts`): `external_declaration` holds a declaration to the
-  rules where 0.5 did (a type or storage head in plain mode, a head the
-  `@looks-simple-decl` validator accepts in extended mode, a directive, a
+  rules where 0.5 did (a type or storage head in plain mode, a head that
+  `@looks-simple-decl` accepts in extended mode, a directive, a
   `static_assert`, an asm statement), and a declaration the rules cannot
   parse there is a parse error. Any other declaration is *armed*: where
   the rules cannot parse it, it becomes an unknown declaration
