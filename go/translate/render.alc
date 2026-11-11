@@ -337,11 +337,20 @@ def c-operands [n]
   let [kids (c-kids n)]
     filter (fn [i] (c-not (c-trivia-child (c-at kids i)))) (indices kids)
 
-; The operand a position holds, counted from 0, or -1 for a comment.
-def c-ordinal [i ops]
-  match (c-nonzero (count (filter (fn [j] (equal j i)) ops)))
-    case false -1
-    case true (count (filter (fn [j] (c-less j i)) ops))
+; Whether the operand `j` stands before position `i`.
+def c-operand-before [ops i j]
+  match (c-less j (count ops))
+    case true (c-less (c-at ops j) i)
+    case false false
+
+; The operand a position holds, counted from 0 and at most 3, or -1 for a
+; comment. No piece placed among the operands tells the fourth operand
+; from a later one, so the count stops at 3, and a child costs the same
+; however many operands its node has.
+def c-ordinal [kids ops i]
+  match (c-trivia-child (c-at kids i))
+    case true -1
+    case false (count (filter (partial c-operand-before ops i) [0 1 2]))
 
 ; The children's strings with the pieces the tree keeps outside tokens
 ; placed among the operands: `(before k)` just before operand k, and
@@ -349,13 +358,13 @@ def c-ordinal [i ops]
 ; child before the operand that follows it, so the piece is written
 ; after the comment, where the token stood.
 def c-around [n encs before close]
-  let [ops (c-operands n)]
+  let [kids (c-kids n) ops (c-operands n)]
     string-join ""
       vector
         c-join
           map
             fn [i]
-              match (c-ordinal i ops)
+              match (c-ordinal kids ops i)
                 case -1 (c-at encs i)
                 case k (string-join "" [(before k) (c-at encs i)])
             indices encs
@@ -462,14 +471,18 @@ def c-no-arguments [a]
         case _ false
     case false false
 
-; A call of no arguments, the shape the reader gives an expression in
-; parentheses too. An identifier alone gets the two markers the layout
-; decides by the space after it; anything else is written in parentheses.
+; A call of no arguments. A node with a span is a call wherever it is: the
+; reader gives an expression in parentheses a node of its own. A node
+; without one is the 0.5 tree's, whose expression path gives an
+; expression in parentheses the same shape as a call of no arguments:
+; there an identifier alone gets the two markers the layout decides by the
+; space after it, and anything else is written in parentheses.
 def c-call [n encs]
   let [kids (c-kids n)]
-    match (c-no-arguments (c-last kids))
-      case false (c-plain n encs)
-      case true
+    match [(c-no-arguments (c-last kids)) (kind (get "span" n))]
+      case [true :record] (c-plain n encs)
+      case [false _] (c-plain n encs)
+      case _
         let [callee (c-join (pop encs))]
           match [(count encs) (c-kind-is "identifier_expression" (c-at kids 0)) (count (split c-tsep callee))]
             case [2 true 2] (string-join "" [(c-s "(?") callee (c-s ")?")])

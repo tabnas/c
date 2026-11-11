@@ -1465,7 +1465,9 @@ const grammarText = `
           p: 'expression' g: 'cond-then' }
         { s: 'PUNC_COLON' c: '@cond-at-then' a: '@cond-colon'
           p: 'conditional_expression' g: 'cond-else' }
-        { g: 'cond-none' }
+        # No \`?\`: the binary expression is the whole of it. After a \`?\`
+        # the \`:\` and the third operand are due, and nothing else ends it.
+        { c: '@cond-at-test' g: 'cond-none' }
       ]
     }
 
@@ -1562,7 +1564,9 @@ const grammarText = `
           r: 'postfix_more' g: 'pm-arrow' }
         { s: '#INCDEC' c: '@pm-free' a: '@postfix' r: 'postfix_more'
           g: 'pm-incdec' }
-        { g: 'pm-end' }
+        # The chain ends where no operator follows, and only with no \`[\`
+        # or \`(\` left open: an open one is closed by its \`]\` or \`)\`.
+        { c: '@pm-free' g: 'pm-end' }
       ]
     }
 
@@ -1605,7 +1609,8 @@ const grammarText = `
       close: [
         { s: 'PUNC_RPAREN' c: '@paren-pending' a: '@paren-close'
           g: 'pr-rparen' }
-        { g: 'pr-end' }
+        # A parenthesised expression ends with its \`)\`.
+        { c: '@paren-free' g: 'pr-end' }
       ]
     }
 
@@ -1687,10 +1692,13 @@ const grammarText = `
           p: 'assignment_expression' g: 'dr-lbracket' }
       ]
       close: [
-        { c: '@dr-needs-id' s: 'ID' a: '@dr-take-id' g: 'dr-id' }
+        # A member's name is any identifier, a typedef's or a macro's
+        # name among them: members have their own name space.
+        { c: '@dr-needs-id' s: '#MEMBER_NAME' a: '@dr-take-id' g: 'dr-id' }
         { c: '@dr-needs-rbracket' s: 'PUNC_RBRACKET'
           a: '@dr-take-rbracket' g: 'dr-rbracket' }
-        { s: [] g: 'dr-end' }
+        # A designator ends with its name or its \`]\`.
+        { c: '@dr-complete' s: [] g: 'dr-end' }
       ]
     }
 
@@ -2354,9 +2362,9 @@ const grammarText = `
         { c: '@said-need-rparen' s: 'PUNC_RPAREN'
           a: '@said-take-rparen' r: 'static_assert_declaration'
           g: 'sa-rp' }
+        # The \`;\` ends the declaration; nothing else does.
         { c: '@said-need-semi' s: 'PUNC_SEMI'
           a: '@said-take-semi' g: 'sa-end' }
-        { s: [] g: 'sa-fall' }
       ]
     }
   }
@@ -5109,6 +5117,10 @@ return {
   },
   '@dr-needs-rbracket': (rule: Rule): boolean =>
     rule.k.kind === 'index' && !rule.k.tookRbracket,
+  '@dr-complete': (rule: Rule): boolean =>
+    rule.k.kind === 'member' ? rule.k.tookId === true
+      : rule.k.kind === 'index' ? rule.k.tookRbracket === true
+        : true,
   '@dr-take-rbracket': (rule: Rule): void => {
     pushTokenWithTrivia(rule.node, rule.c0 as Token)
     rule.k.tookRbracket = true

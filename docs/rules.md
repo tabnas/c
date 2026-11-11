@@ -129,7 +129,13 @@ the one the run binds, as 0.5 bound it; `default` or a label with no `:`
 ends there; a `do` with no `while` ends after its body; an `else`, a
 label and a `case` before a `}` or a declaration take no statement. An
 armed declaration fails at the declarator with no comma, where 0.5's
-structurer gave up.
+structurer gave up. Where a lenient ending let an unfinished construct
+through, it goes: a designator ends with its member's name or its `]`,
+and a `static_assert` with its `)` and its `;`. In extended mode a
+malformed declaration that 0.5's structurer gave up on is built where the
+rules read it as plain mode always has: a declarator list that starts
+with a comma, two declarations with no `;` between, a `__declspec(` with
+no `)`.
 
 ## Expressions are C's rules
 
@@ -161,8 +167,11 @@ an array size are conditional expressions. `val` stays as the rule an
 expression starts from (the fixtures that parse an expression on its own
 start there), cleared of jsonic's alternates. An operand is never
 directly followed by an identifier or a literal in C, and there no
-alternate of `binary` matches (`#JUXTAPOSED`). C no longer installs
-`@tabnas/expr`; removing the dependency is the maintainer's to decide.
+alternate of `binary` matches (`#JUXTAPOSED`). An expression in
+parentheses, a call's arguments and a subscript end with their `)` or
+`]`, and a conditional with its `:` and its third operand: nothing else
+ends them. C no longer installs `@tabnas/expr`; removing the dependency
+is the maintainer's to decide.
 
 ## Conditional groups are rules
 
@@ -285,32 +294,60 @@ With the TypeScript reader of this change against 0.5.15:
   ones). No declaration became unknown.
 - **The real-world files**: each is accepted or refused as 0.5 does, in
   both modes, except the 31 on which 0.5 runs out of memory; 0.6 parses
-  29 of those and refuses 2 at an unknown type name. Of the declarations
-  0.5's structurer built in them, those 0.6 makes unknown hold a macro
-  where a declaration's syntax is due (`__THROW`, `__REDIRECT`,
-  `extern "C"`) or a type name no included header defines.
+  29 of those and refuses 2 at an unknown type name. In extended mode
+  149 declarations of 49 files that 0.5's structurer built are unknown
+  in 0.6. 77 name a type no included header defines (`FILE`, `size_t`),
+  which the structurer took for a type name: with those names bound as
+  typedef names the rules build all 77. 70 hold a macro where the syntax
+  needs a declarator or a specifier (`__THROW`,
+  `__REDIRECT_NTH (f, (...), g)`, `__exctype (isalnum);`) or C++
+  (`extern "C" {`). One drops its type (`PANEL;`), and one has a pointer
+  before a parenthesised declarator (`typedef char *(*f)(...)`), which
+  the rules do not read; 0.5's rules refuse it in a struct and in a
+  function body too.
 - **Comments**: every comment of every accepted fixture, Csmith program
   and real-world file is in the tree, but those after the last token
   (`ts/test/tree.test.ts` holds the fixtures and Csmith to it).
 - **The render**: every plain-mode fixture's tree is written by
   `alchemy/render.alc` and reads back as the same tree, spans included,
   and so are trees with a comment where an operator, a comma or a
-  parenthesis is dropped.
+  parenthesis is dropped, and a file of 90 expression statements that
+  holds every operator, a call of no arguments on every kind of callee,
+  casts, compound literals and `_Generic`, in both modes. A node's
+  pieces are placed among its operands in one pass: a call of 2,500
+  arguments is written in 4.3 s, 5,000 in 7.3 s and 10,000 in 16 s, where
+  counting each operand's place over the whole list took 22.3 s and
+  83.7 s for the first two.
 - **Acceptance** over 10,708 documents, the fixtures, declarations of six
-  Csmith programs and small headers mutated a token at a time, in both
+  Csmith programs and small headers, each mutated at 12 places, in both
   modes: the differences are the classes below, and the inputs on which
-  0.5 crashes.
+  0.5 crashes. A second sweep, over 24,432 documents, deletes every token
+  of every fixture and of 400 statements of the Csmith programs in turn
+  and doubles every punctuator, in both modes: the review of this change
+  found the unfinished constructs the first one missed (`f(1;`, `a ? b;`).
+  Each document whose acceptance or count of unknown declarations
+  changed is held to a syntax oracle: pycparser over clang's
+  preprocessor output, and clang's own parse errors where pycparser does
+  not read a GNU or C23 form. None that 0.5 refuses is accepted unless
+  it is syntactically valid C, and none that is syntactically valid and
+  0.5 accepts is refused. A declaration 0.6 makes unknown where 0.5
+  built one is not C23: all but a handful drop a type specifier or a
+  typedef name, which C before C99 read as an implicit `int`, and the
+  rest are malformed (`int add( a, int b)`, a label with no `:`).
 
 What 0.6 accepts or refuses otherwise is the maintainer's to decide, and
 was asked: valid C that 0.5 refuses only by its rule path's defects (a
 cast of a cast, the comma operator in a condition, a `return` or an
 expression statement, a chained ternary, `static inline` and every
 order or repetition of the declaration specifiers, an assignment as a
-brace-list item, `(void*)0 & x`) is accepted; invalid C that 0.5
-accepted through jsonic's implicit lists (values side by side in an
-expression: in parentheses, a call's arguments, a `for`'s controls, a
-`static_assert`'s condition or an initializer), an empty subscript
-(`a[]`) or an empty `sizeof()` is refused.
+brace-list item, a member of any postfix expression (`{ .x = 1 .y = 2 }`),
+`(void*)0 & x`) is accepted; invalid C that 0.5 accepted through jsonic's
+implicit lists (values side by side in an expression: in parentheses, a
+call's arguments, a `for`'s controls, a `static_assert`'s condition or
+an initializer), an empty subscript (`a[]`), empty parentheses (`()`,
+`sizeof()`), or its rules' lenient endings (a designator with no name or
+no `]`, `{ . = 1 }` and `{ [4 = 50 }`, and a `static_assert` with no `)`
+or no `;`) is refused.
 
 ## The part
 

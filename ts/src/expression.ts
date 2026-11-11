@@ -419,6 +419,8 @@ export function makeExpressionRefs(): Record<string, Function> {
     },
     '@paren-pending': (rule: Rule): boolean =>
       rule.u.paren === true && rule.u.parenClosed !== true,
+    '@paren-free': (rule: Rule): boolean =>
+      rule.u.paren !== true || rule.u.parenClosed === true,
     '@paren-close': (rule: Rule): void => {
       dropToken(rule.node, rule.c0 as Token)
       rule.u.parenClosed = true
