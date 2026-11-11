@@ -27,15 +27,21 @@ fn version_and_name_are_what_the_package_says() {
 /// visible if something compares them.
 #[test]
 fn the_embedded_grammar_matches_the_source() {
-    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("rs/ has a parent")
-        .join("ts/c-grammar.jsonic");
-    let canonical = std::fs::read_to_string(&source).expect("ts/c-grammar.jsonic is readable");
+    // While the TypeScript reader builds the 0.6 tree and this port still
+    // builds 0.5's, the crate keeps the 0.5 grammar its refs were written
+    // for, and `ts/embed-grammar.js` leaves the copy alone; the port's
+    // move to the 0.6 tree holds the copy to `ts/c-grammar.jsonic` again
+    // (`docs/rules.md`, "Order"). Until then it is held to the 0.5 grammar
+    // by content: its FNV-1a hash and its length.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in tabnas_c::GRAMMAR_TEXT.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
     assert_eq!(
-        tabnas_c::GRAMMAR_TEXT,
-        canonical,
-        "rs/c-grammar.jsonic has drifted from ts/c-grammar.jsonic; run `make embed`"
+        (hash, tabnas_c::GRAMMAR_TEXT.len()),
+        (0x163c_328c_1634_920d, 82_833),
+        "rs/c-grammar.jsonic is no longer the 0.5 grammar this port's refs were written for"
     );
 }
 

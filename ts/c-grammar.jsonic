@@ -303,7 +303,7 @@
       ]
       close: [
         { s: 'PUNC_RPAREN' a: '@bip-take-rparen' g: 'bip-rparen' }
-        { p: 'val' a: '@bip-mark-val' g: 'bip-val' }
+        { p: 'assignment_expression' a: '@bip-mark-val' g: 'bip-val' }
       ]
     }
 
@@ -369,7 +369,7 @@
     initializer: {
       open: [
         { s: 'PUNC_LBRACE' b: 1 p: 'initializer_list' g: 'init-brace' }
-        { p: 'val' g: 'init-expr' }
+        { p: 'assignment_expression' g: 'init-expr' }
       ]
       close: [
         { s: [] g: 'init-end' }
@@ -427,7 +427,7 @@
         { s: 'KW__ATOMIC' b: 1 p: 'array_qualifier_loop' g: 'arr-q-atomic' }
         { s: 'PUNC_STAR PUNC_RBRACKET' b: 2 p: 'array_qualifier_loop'
           g: 'arr-q-star' }
-        { p: 'val' g: 'arr-size' }
+        { p: 'assignment_expression' g: 'arr-size' }
       ]
     }
 
@@ -772,7 +772,7 @@
     # PUNC_SEMI alt before this rule is entered.
     expression_statement: {
       open: [
-        { p: 'val' a: '@es-take-expr' g: 'es-expr' }
+        { p: 'expression' a: '@es-take-expr' g: 'es-expr' }
       ]
       close: [
         { s: 'PUNC_SEMI' a: '@es-finalize' g: 'es-end' }
@@ -800,7 +800,7 @@
         { s: 'PUNC_SEMI' a: '@js-finalize' g: 'js-end' }
         { c: '@js-needs-label' s: 'ID' a: '@js-take-label'
           r: 'jump_statement' g: 'js-take-label' }
-        { c: '@js-needs-expr' p: 'val' a: '@js-take-expr' g: 'js-take-expr' }
+        { c: '@js-needs-expr' p: 'expression' a: '@js-take-expr' g: 'js-take-expr' }
       ]
     }
 
@@ -814,7 +814,7 @@
       ]
       close: [
         { s: 'PUNC_RPAREN' a: '@pc-close' g: 'pc-end' }
-        { p: 'val' a: '@pc-take-expr' g: 'pc-expr' }
+        { p: 'expression' a: '@pc-take-expr' g: 'pc-expr' }
       ]
     }
 
@@ -926,7 +926,7 @@
         { s: '#SIMPLE_TYPE_HEAD' b: 1 p: 'simple_declaration'
           a: '@fi-mark-decl' g: 'fi-decl-type' }
         # Expression init: take expression then `;`
-        { p: 'val' a: '@fi-mark-expr' g: 'fi-expr' }
+        { p: 'expression' a: '@fi-mark-expr' g: 'fi-expr' }
       ]
       close: [
         { c: '@fi-needs-semi' s: 'PUNC_SEMI' a: '@fi-take-semi' g: 'fi-semi' }
@@ -939,7 +939,7 @@
         # Empty cond: bare `;`
         { s: 'PUNC_SEMI' a: '@fcond-empty-take-semi' g: 'fcond-empty' }
         # Expression cond: take expression then `;`
-        { p: 'val' a: '@fcond-mark-expr' g: 'fcond-expr' }
+        { p: 'expression' a: '@fcond-mark-expr' g: 'fcond-expr' }
       ]
       close: [
         { c: '@fcond-needs-semi' s: 'PUNC_SEMI'
@@ -953,7 +953,7 @@
         # Empty iter: backstep the `)` so for_controls can take it.
         { s: 'PUNC_RPAREN' b: 1 a: '@fiter-empty' g: 'fiter-empty' }
         # Expression iter: take expression up to `)`.
-        { p: 'val' a: '@fiter-mark-expr' g: 'fiter-expr' }
+        { p: 'expression' a: '@fiter-mark-expr' g: 'fiter-expr' }
       ]
       close: [
         { s: [] g: 'fiter-end' }
@@ -1025,7 +1025,7 @@
     # strings).
     asm_template: {
       open: [
-        { p: 'val' g: 'tpl-val' }
+        { p: 'assignment_expression' g: 'tpl-val' }
       ]
       close: [
         { s: [] g: 'tpl-end' }
@@ -1124,7 +1124,7 @@
         { s: 'ID' a: '@lbl-take-name' g: 'lbl-name' }
       ]
       close: [
-        { c: '@lbl-needs-expr' p: 'val' a: '@lbl-mark-expr' g: 'lbl-expr' }
+        { c: '@lbl-needs-expr' p: 'conditional_expression' a: '@lbl-mark-expr' g: 'lbl-expr' }
         { c: '@lbl-needs-colon' s: 'PUNC_COLON'
           a: '@lbl-take-colon' g: 'lbl-colon' }
         { c: '@lbl-needs-body' p: 'statement' g: 'lbl-body' }
@@ -1185,40 +1185,197 @@
       ]
     }
 
-    # ---- cast_or_compound_literal (phase C.3) -----------------------
+    # ---- expressions -------------------------------------------------
     #
-    # `( type_name ) <unary>`           → cast_expression
-    # `( type_name ) { initializer }`   → compound_literal (pending C.4
-    #                                      initializer_list rule)
-    #
-    # The val.open alt that dispatches here matches `( <type-head>`
-    # so we know the parens contain a type-name. After taking `)` we
-    # peek the next token: `{` selects the compound-literal arm, any
-    # other token is the cast-expression arm.
-    cast_or_compound_literal: {
+    # C's expressions, as precedence climbing (ts/src/expression.ts has
+    # the actions). Each level of C's expression grammar is a rule, and
+    # each context pushes the level C's grammar names: an initializer, an
+    # argument or a brace-list item an assignment expression, an
+    # expression statement, a condition or a subscript a full expression.
+    # Every repetition is a replace loop at one depth: the items of a
+    # comma expression and of an argument list, a chain of binary
+    # operators, a chain of postfix operators. A node only a later token
+    # decides (a binary operator's after its left operand) is wrapped in
+    # place when that token arrives.
+
+    # val: the rule an expression starts from (a fixture parses a bare
+    # expression from it). jsonic, which this grammar is installed over,
+    # has a `val` rule too and owns its lifecycle phases (`@val-bc/replace`),
+    # so this one works through alternate actions alone.
+    val: {
+      open: [ { a: '@val-start' p: 'expression' g: 'val' } ]
+      close: [ { a: '@val-end' g: 'val-end' } ]
+    }
+
+    # expression: assignment expressions separated by the comma operator.
+    expression: {
+      open: [ { p: 'assignment_expression' g: 'expr-item' } ]
+      close: [
+        { s: 'PUNC_COMMA' a: '@comma' r: 'expression' g: 'expr-comma' }
+        { g: 'expr-end' }
+      ]
+    }
+
+    # assignment_expression: a conditional expression, or one followed by
+    # an assignment operator and an assignment expression (right
+    # associative, so its nesting is the tree's).
+    assignment_expression: {
+      open: [ { p: 'conditional_expression' g: 'asg-lhs' } ]
+      close: [
+        { c: '@asg-done' g: 'asg-end' }
+        { s: '#ASSIGN_OP' a: '@assign' p: 'assignment_expression'
+          g: 'asg-op' }
+        { g: 'asg-none' }
+      ]
+    }
+
+    # conditional_expression: a binary expression, or one followed by
+    # `? expression : conditional-expression`.
+    conditional_expression: {
+      open: [ { p: 'binary' k: { min: 0 } g: 'cond-test' } ]
+      close: [
+        { c: '@cond-done' g: 'cond-end' }
+        { s: 'PUNC_QUESTION' c: '@cond-at-test' a: '@cond-q'
+          p: 'expression' g: 'cond-then' }
+        { s: 'PUNC_COLON' c: '@cond-at-then' a: '@cond-colon'
+          p: 'conditional_expression' g: 'cond-else' }
+        { g: 'cond-none' }
+      ]
+    }
+
+    # binary, binary_rhs: the binary operators by precedence climbing.
+    # `binary` takes an operand; while the next operator binds at least
+    # as tightly as its level (k.min), it wraps what it has and replaces
+    # itself with binary_rhs, which pushes a `binary` one level tighter
+    # for the right operand. A left-associative chain is one replace loop.
+    binary: {
+      open: [ { p: 'cast_expression' g: 'bin-operand' } ]
+      close: [
+        { s: '#BINARY_OP' c: '@bin-binds' a: '@bin-op' r: 'binary_rhs'
+          g: 'bin-op' }
+        { g: 'bin-end' }
+      ]
+    }
+    binary_rhs: {
+      open: [ { p: 'binary' g: 'bin-rhs' } ]
+      close: [
+        { s: '#BINARY_OP' c: '@bin-binds' a: '@bin-op' r: 'binary_rhs'
+          g: 'bin-op' }
+        { g: 'bin-end' }
+      ]
+    }
+
+    # cast_expression: `( type-name )` and a cast expression, a compound
+    # literal (which a postfix chain may follow), or a unary expression.
+    cast_expression: {
       open: [
-        # Re-entry on r: (after taking `)`): preserve state, fall
-        # through to close.
-        { c: '@cocl-reentered' s: [] g: 'cocl-reentry' }
-        { s: 'PUNC_LPAREN' a: '@cocl-take-lparen'
-          p: 'type_name' g: 'cocl-open' }
+        { s: 'PUNC_LPAREN #SIMPLE_TYPE_HEAD' b: 2
+          p: 'cast_or_compound_literal' g: 'cast-paren' }
+        { p: 'unary_expression' g: 'cast-unary' }
       ]
       close: [
-        # Take the closing `)` then r: back through open so the
-        # next close pass can decide cast vs compound literal.
-        { c: '@cocl-needs-rparen' s: 'PUNC_RPAREN'
-          a: '@cocl-take-rparen' r: 'cast_or_compound_literal'
-          g: 'cocl-rparen' }
-        # Compound literal: `(type){…}` — body is an initializer_list.
-        { c: '@cocl-needs-decision' s: 'PUNC_LBRACE'
-          a: '@cocl-mark-cl' b: 1 p: 'initializer_list'
-          g: 'cocl-cl' }
-        # Cast: parse the operand as an expression. (Pratt-driven
-        # val absorbs the full operand; precedence inside cast is
-        # documented as a phase-C.x follow-up if a test case fails.)
-        { c: '@cocl-needs-decision' a: '@cocl-mark-cast'
-          p: 'val' g: 'cocl-cast' }
-        { s: [] a: '@cocl-finalize' g: 'cocl-end' }
+        { c: '@cast-was-cl' r: 'postfix_more' g: 'cast-cl-postfix' }
+        { g: 'cast-end' }
+      ]
+    }
+
+    # cast_or_compound_literal: `( type-name )`, then `{` begins a
+    # compound literal's initializer list and anything else a cast's
+    # operand. The `)` and the next token decide which, in one alternate.
+    cast_or_compound_literal: {
+      open: [
+        { s: 'PUNC_LPAREN' a: '@cocl-open' p: 'type_name' g: 'cocl-open' }
+      ]
+      close: [
+        { c: '@cocl-done' g: 'cocl-end' }
+        { s: 'PUNC_RPAREN PUNC_LBRACE' b: 1 a: '@cocl-cl'
+          p: 'initializer_list' g: 'cocl-cl' }
+        { s: 'PUNC_RPAREN' a: '@cocl-cast' p: 'cast_expression'
+          g: 'cocl-cast' }
+      ]
+    }
+
+    # unary_expression: `sizeof ( type-name )` and its kin, a prefix
+    # operator and its operand, or a postfix expression.
+    unary_expression: {
+      open: [
+        { s: '#SIZEOF_KW PUNC_LPAREN #SIMPLE_TYPE_HEAD' b: 3
+          p: 'sizeof_type_form' g: 'un-sizeof-type' }
+        { s: '#INCDEC' a: '@prefix' p: 'unary_expression' g: 'un-incdec' }
+        { s: '#SIZEOF_KW' a: '@prefix' p: 'unary_expression' g: 'un-sizeof' }
+        { s: '#UNARY_OP' a: '@prefix' p: 'cast_expression' g: 'un-op' }
+        { p: 'postfix_expression' g: 'un-postfix' }
+      ]
+      close: [ { g: 'un-end' } ]
+    }
+
+    # postfix_expression, postfix_more: a primary expression and a replace
+    # loop of `[ expression ]`, `( arguments )`, `. name`, `-> name`, `++`
+    # and `--`, each wrapping what the chain has built.
+    postfix_expression: {
+      open: [ { p: 'primary_expression' g: 'pf-primary' } ]
+      close: [ { a: '@pf-carry' r: 'postfix_more' g: 'pf-more' } ]
+    }
+    postfix_more: {
+      open: [ { g: 'pm-cont' } ]
+      close: [
+        { s: 'PUNC_RBRACKET' c: '@pm-in-subscript' a: '@pm-rbracket'
+          r: 'postfix_more' g: 'pm-rbracket' }
+        { s: 'PUNC_RPAREN' c: '@pm-in-call' a: '@pm-rparen'
+          r: 'postfix_more' g: 'pm-rparen' }
+        { s: 'PUNC_LBRACKET' c: '@pm-free' a: '@subscript' p: 'expression'
+          g: 'pm-subscript' }
+        { s: 'PUNC_LPAREN' c: '@pm-free' a: '@call' p: 'argument_list'
+          g: 'pm-call' }
+        { s: 'PUNC_DOT #MEMBER_NAME' c: '@pm-free' a: '@member'
+          r: 'postfix_more' g: 'pm-dot' }
+        { s: 'PUNC_ARROW #MEMBER_NAME' c: '@pm-free' a: '@member'
+          r: 'postfix_more' g: 'pm-arrow' }
+        { s: '#INCDEC' c: '@pm-free' a: '@postfix' r: 'postfix_more'
+          g: 'pm-incdec' }
+        { g: 'pm-end' }
+      ]
+    }
+
+    # argument_list: a call's arguments, assignment expressions separated
+    # by commas, a replace loop; empty before an immediate `)`.
+    argument_list: {
+      open: [
+        { s: 'PUNC_RPAREN' b: 1 g: 'args-empty' }
+        { p: 'assignment_expression' g: 'args-item' }
+      ]
+      close: [
+        { s: 'PUNC_COMMA' a: '@args-comma' r: 'argument_list'
+          g: 'args-comma' }
+        { g: 'args-end' }
+      ]
+    }
+
+    # primary_expression: a constant, an identifier, adjacent strings, a
+    # parenthesised expression, a statement expression, `_Generic`, or a
+    # brace list.
+    primary_expression: {
+      open: [
+        { s: 'LIT_INT' a: '@lit' g: 'pr-int' }
+        { s: 'LIT_FLOAT' a: '@lit' g: 'pr-float' }
+        { s: 'LIT_CHAR' a: '@lit' g: 'pr-char' }
+        { s: 'KW_NULLPTR' a: '@lit' g: 'pr-nullptr' }
+        { s: 'KW_TRUE' a: '@lit' g: 'pr-true' }
+        { s: 'KW_FALSE' a: '@lit' g: 'pr-false' }
+        { s: 'LIT_STRING' b: 1 p: 'string_atom' g: 'pr-str' }
+        { s: 'ID' a: '@ident' g: 'pr-id' }
+        { s: 'MACRO_NAME' a: '@ident' g: 'pr-macro' }
+        { s: 'TYPEDEF_NAME' a: '@ident' g: 'pr-typedef' }
+        { s: 'PUNC_LPAREN PUNC_LBRACE' b: 2 p: 'statement_expression'
+          g: 'pr-stmt-expr' }
+        { s: 'PUNC_LPAREN' a: '@paren-open' p: 'expression' g: 'pr-paren' }
+        { s: 'KW__GENERIC' b: 1 p: 'generic_selection' g: 'pr-generic' }
+        { s: 'PUNC_LBRACE' b: 1 p: 'initializer_list' g: 'pr-brace' }
+      ]
+      close: [
+        { s: 'PUNC_RPAREN' c: '@paren-pending' a: '@paren-close'
+          g: 'pr-rparen' }
+        { g: 'pr-end' }
       ]
     }
 
@@ -1261,7 +1418,7 @@
         { s: 'PUNC_LBRACE' b: 1 p: 'initializer_list'
           a: '@ii-mark-nested' g: 'ii-nested' }
         # Plain expression value (no designation).
-        { p: 'val' g: 'ii-expr' }
+        { p: 'assignment_expression' g: 'ii-expr' }
       ]
       close: [
         # After designation, take `=` and r:-recurse so the next pass
@@ -1273,7 +1430,7 @@
           b: 1 p: 'initializer_list'
           a: '@ii-mark-nested' g: 'ii-val-list' }
         # After `=`, take an expression as the value.
-        { c: '@ii-needs-value' p: 'val' g: 'ii-val' }
+        { c: '@ii-needs-value' p: 'assignment_expression' g: 'ii-val' }
         { s: [] g: 'ii-end' }
       ]
     }
@@ -1297,7 +1454,7 @@
       open: [
         { s: 'PUNC_DOT' a: '@dr-take-dot' g: 'dr-dot' }
         { s: 'PUNC_LBRACKET' a: '@dr-take-lbracket'
-          p: 'val' g: 'dr-lbracket' }
+          p: 'assignment_expression' g: 'dr-lbracket' }
       ]
       close: [
         { c: '@dr-needs-id' s: 'ID' a: '@dr-take-id' g: 'dr-id' }
@@ -1344,7 +1501,7 @@
     # field) is preserved.
     generic_controlling_expression: {
       open: [
-        { p: 'val' g: 'gce-val' }
+        { p: 'assignment_expression' g: 'gce-val' }
       ]
       close: [
         { s: [] g: 'gce-end' }
@@ -1363,7 +1520,7 @@
       close: [
         { c: '@ga-need-colon' s: 'PUNC_COLON'
           a: '@ga-take-colon' r: 'generic_association' g: 'ga-colon' }
-        { c: '@ga-need-value' p: 'val' g: 'ga-value' }
+        { c: '@ga-need-value' p: 'assignment_expression' g: 'ga-value' }
         { s: [] g: 'ga-end' }
       ]
     }
@@ -1537,7 +1694,7 @@
     # bounded by the surrounding `,` or `;` or attribute-spec head.
     bitfield_width: {
       open: [
-        { s: 'PUNC_COLON' a: '@bfw-take-colon' p: 'val' g: 'bfw-colon' }
+        { s: 'PUNC_COLON' a: '@bfw-take-colon' p: 'assignment_expression' g: 'bfw-colon' }
       ]
       close: [
         { s: [] g: 'bfw-end' }
@@ -1608,7 +1765,7 @@
           b: 2 p: 'attribute_spec_c23'
           r: 'enumerator' g: 'enr-attr' }
         { c: '@enr-need-eq' s: 'PUNC_ASSIGN'
-          a: '@enr-take-eq' p: 'val' g: 'enr-eq' }
+          a: '@enr-take-eq' p: 'assignment_expression' g: 'enr-eq' }
         { s: [] g: 'enr-end' }
       ]
     }
@@ -1733,7 +1890,7 @@
         { s: 'PUNC_RPAREN' a: '@aal-take-rparen' g: 'aal-end' }
         { s: 'PUNC_COMMA' a: '@aal-take-comma'
           r: 'attribute_argument_list' g: 'aal-comma' }
-        { p: 'val' r: 'attribute_argument_list' g: 'aal-arg' }
+        { p: 'assignment_expression' r: 'attribute_argument_list' g: 'aal-arg' }
       ]
     }
 
@@ -1954,12 +2111,12 @@
         { c: '@said-need-lparen' s: 'PUNC_LPAREN'
           a: '@said-take-lparen' r: 'static_assert_declaration'
           g: 'sa-lp' }
-        { c: '@said-need-cond' p: 'val' a: '@said-mark-cond'
+        { c: '@said-need-cond' p: 'assignment_expression' a: '@said-mark-cond'
           g: 'sa-cond' }
         { c: '@said-need-comma' s: 'PUNC_COMMA'
           a: '@said-take-comma' r: 'static_assert_declaration'
           g: 'sa-comma' }
-        { c: '@said-need-msg' p: 'val' a: '@said-mark-msg'
+        { c: '@said-need-msg' p: 'assignment_expression' a: '@said-mark-msg'
           g: 'sa-msg' }
         { c: '@said-need-rparen' s: 'PUNC_RPAREN'
           a: '@said-take-rparen' r: 'static_assert_declaration'

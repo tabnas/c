@@ -36,7 +36,7 @@ import {
 } from './tokens.js'
 import { structureExternalDeclaration } from './structure.js'
 import { structureConditionalGroups } from './conditional-groups.js'
-import { installExpr } from './expr-grammar.js'
+import { makeExpressionRefs, isExpressionRule } from './expression.js'
 
 // --- BEGIN EMBEDDED c-grammar.jsonic ---
 const grammarText = `
@@ -345,7 +345,7 @@ const grammarText = `
       ]
       close: [
         { s: 'PUNC_RPAREN' a: '@bip-take-rparen' g: 'bip-rparen' }
-        { p: 'val' a: '@bip-mark-val' g: 'bip-val' }
+        { p: 'assignment_expression' a: '@bip-mark-val' g: 'bip-val' }
       ]
     }
 
@@ -411,7 +411,7 @@ const grammarText = `
     initializer: {
       open: [
         { s: 'PUNC_LBRACE' b: 1 p: 'initializer_list' g: 'init-brace' }
-        { p: 'val' g: 'init-expr' }
+        { p: 'assignment_expression' g: 'init-expr' }
       ]
       close: [
         { s: [] g: 'init-end' }
@@ -469,7 +469,7 @@ const grammarText = `
         { s: 'KW__ATOMIC' b: 1 p: 'array_qualifier_loop' g: 'arr-q-atomic' }
         { s: 'PUNC_STAR PUNC_RBRACKET' b: 2 p: 'array_qualifier_loop'
           g: 'arr-q-star' }
-        { p: 'val' g: 'arr-size' }
+        { p: 'assignment_expression' g: 'arr-size' }
       ]
     }
 
@@ -814,7 +814,7 @@ const grammarText = `
     # PUNC_SEMI alt before this rule is entered.
     expression_statement: {
       open: [
-        { p: 'val' a: '@es-take-expr' g: 'es-expr' }
+        { p: 'expression' a: '@es-take-expr' g: 'es-expr' }
       ]
       close: [
         { s: 'PUNC_SEMI' a: '@es-finalize' g: 'es-end' }
@@ -842,7 +842,7 @@ const grammarText = `
         { s: 'PUNC_SEMI' a: '@js-finalize' g: 'js-end' }
         { c: '@js-needs-label' s: 'ID' a: '@js-take-label'
           r: 'jump_statement' g: 'js-take-label' }
-        { c: '@js-needs-expr' p: 'val' a: '@js-take-expr' g: 'js-take-expr' }
+        { c: '@js-needs-expr' p: 'expression' a: '@js-take-expr' g: 'js-take-expr' }
       ]
     }
 
@@ -856,7 +856,7 @@ const grammarText = `
       ]
       close: [
         { s: 'PUNC_RPAREN' a: '@pc-close' g: 'pc-end' }
-        { p: 'val' a: '@pc-take-expr' g: 'pc-expr' }
+        { p: 'expression' a: '@pc-take-expr' g: 'pc-expr' }
       ]
     }
 
@@ -968,7 +968,7 @@ const grammarText = `
         { s: '#SIMPLE_TYPE_HEAD' b: 1 p: 'simple_declaration'
           a: '@fi-mark-decl' g: 'fi-decl-type' }
         # Expression init: take expression then \`;\`
-        { p: 'val' a: '@fi-mark-expr' g: 'fi-expr' }
+        { p: 'expression' a: '@fi-mark-expr' g: 'fi-expr' }
       ]
       close: [
         { c: '@fi-needs-semi' s: 'PUNC_SEMI' a: '@fi-take-semi' g: 'fi-semi' }
@@ -981,7 +981,7 @@ const grammarText = `
         # Empty cond: bare \`;\`
         { s: 'PUNC_SEMI' a: '@fcond-empty-take-semi' g: 'fcond-empty' }
         # Expression cond: take expression then \`;\`
-        { p: 'val' a: '@fcond-mark-expr' g: 'fcond-expr' }
+        { p: 'expression' a: '@fcond-mark-expr' g: 'fcond-expr' }
       ]
       close: [
         { c: '@fcond-needs-semi' s: 'PUNC_SEMI'
@@ -995,7 +995,7 @@ const grammarText = `
         # Empty iter: backstep the \`)\` so for_controls can take it.
         { s: 'PUNC_RPAREN' b: 1 a: '@fiter-empty' g: 'fiter-empty' }
         # Expression iter: take expression up to \`)\`.
-        { p: 'val' a: '@fiter-mark-expr' g: 'fiter-expr' }
+        { p: 'expression' a: '@fiter-mark-expr' g: 'fiter-expr' }
       ]
       close: [
         { s: [] g: 'fiter-end' }
@@ -1067,7 +1067,7 @@ const grammarText = `
     # strings).
     asm_template: {
       open: [
-        { p: 'val' g: 'tpl-val' }
+        { p: 'assignment_expression' g: 'tpl-val' }
       ]
       close: [
         { s: [] g: 'tpl-end' }
@@ -1166,7 +1166,7 @@ const grammarText = `
         { s: 'ID' a: '@lbl-take-name' g: 'lbl-name' }
       ]
       close: [
-        { c: '@lbl-needs-expr' p: 'val' a: '@lbl-mark-expr' g: 'lbl-expr' }
+        { c: '@lbl-needs-expr' p: 'conditional_expression' a: '@lbl-mark-expr' g: 'lbl-expr' }
         { c: '@lbl-needs-colon' s: 'PUNC_COLON'
           a: '@lbl-take-colon' g: 'lbl-colon' }
         { c: '@lbl-needs-body' p: 'statement' g: 'lbl-body' }
@@ -1227,40 +1227,197 @@ const grammarText = `
       ]
     }
 
-    # ---- cast_or_compound_literal (phase C.3) -----------------------
+    # ---- expressions -------------------------------------------------
     #
-    # \`( type_name ) <unary>\`           → cast_expression
-    # \`( type_name ) { initializer }\`   → compound_literal (pending C.4
-    #                                      initializer_list rule)
-    #
-    # The val.open alt that dispatches here matches \`( <type-head>\`
-    # so we know the parens contain a type-name. After taking \`)\` we
-    # peek the next token: \`{\` selects the compound-literal arm, any
-    # other token is the cast-expression arm.
-    cast_or_compound_literal: {
+    # C's expressions, as precedence climbing (ts/src/expression.ts has
+    # the actions). Each level of C's expression grammar is a rule, and
+    # each context pushes the level C's grammar names: an initializer, an
+    # argument or a brace-list item an assignment expression, an
+    # expression statement, a condition or a subscript a full expression.
+    # Every repetition is a replace loop at one depth: the items of a
+    # comma expression and of an argument list, a chain of binary
+    # operators, a chain of postfix operators. A node only a later token
+    # decides (a binary operator's after its left operand) is wrapped in
+    # place when that token arrives.
+
+    # val: the rule an expression starts from (a fixture parses a bare
+    # expression from it). jsonic, which this grammar is installed over,
+    # has a \`val\` rule too and owns its lifecycle phases (\`@val-bc/replace\`),
+    # so this one works through alternate actions alone.
+    val: {
+      open: [ { a: '@val-start' p: 'expression' g: 'val' } ]
+      close: [ { a: '@val-end' g: 'val-end' } ]
+    }
+
+    # expression: assignment expressions separated by the comma operator.
+    expression: {
+      open: [ { p: 'assignment_expression' g: 'expr-item' } ]
+      close: [
+        { s: 'PUNC_COMMA' a: '@comma' r: 'expression' g: 'expr-comma' }
+        { g: 'expr-end' }
+      ]
+    }
+
+    # assignment_expression: a conditional expression, or one followed by
+    # an assignment operator and an assignment expression (right
+    # associative, so its nesting is the tree's).
+    assignment_expression: {
+      open: [ { p: 'conditional_expression' g: 'asg-lhs' } ]
+      close: [
+        { c: '@asg-done' g: 'asg-end' }
+        { s: '#ASSIGN_OP' a: '@assign' p: 'assignment_expression'
+          g: 'asg-op' }
+        { g: 'asg-none' }
+      ]
+    }
+
+    # conditional_expression: a binary expression, or one followed by
+    # \`? expression : conditional-expression\`.
+    conditional_expression: {
+      open: [ { p: 'binary' k: { min: 0 } g: 'cond-test' } ]
+      close: [
+        { c: '@cond-done' g: 'cond-end' }
+        { s: 'PUNC_QUESTION' c: '@cond-at-test' a: '@cond-q'
+          p: 'expression' g: 'cond-then' }
+        { s: 'PUNC_COLON' c: '@cond-at-then' a: '@cond-colon'
+          p: 'conditional_expression' g: 'cond-else' }
+        { g: 'cond-none' }
+      ]
+    }
+
+    # binary, binary_rhs: the binary operators by precedence climbing.
+    # \`binary\` takes an operand; while the next operator binds at least
+    # as tightly as its level (k.min), it wraps what it has and replaces
+    # itself with binary_rhs, which pushes a \`binary\` one level tighter
+    # for the right operand. A left-associative chain is one replace loop.
+    binary: {
+      open: [ { p: 'cast_expression' g: 'bin-operand' } ]
+      close: [
+        { s: '#BINARY_OP' c: '@bin-binds' a: '@bin-op' r: 'binary_rhs'
+          g: 'bin-op' }
+        { g: 'bin-end' }
+      ]
+    }
+    binary_rhs: {
+      open: [ { p: 'binary' g: 'bin-rhs' } ]
+      close: [
+        { s: '#BINARY_OP' c: '@bin-binds' a: '@bin-op' r: 'binary_rhs'
+          g: 'bin-op' }
+        { g: 'bin-end' }
+      ]
+    }
+
+    # cast_expression: \`( type-name )\` and a cast expression, a compound
+    # literal (which a postfix chain may follow), or a unary expression.
+    cast_expression: {
       open: [
-        # Re-entry on r: (after taking \`)\`): preserve state, fall
-        # through to close.
-        { c: '@cocl-reentered' s: [] g: 'cocl-reentry' }
-        { s: 'PUNC_LPAREN' a: '@cocl-take-lparen'
-          p: 'type_name' g: 'cocl-open' }
+        { s: 'PUNC_LPAREN #SIMPLE_TYPE_HEAD' b: 2
+          p: 'cast_or_compound_literal' g: 'cast-paren' }
+        { p: 'unary_expression' g: 'cast-unary' }
       ]
       close: [
-        # Take the closing \`)\` then r: back through open so the
-        # next close pass can decide cast vs compound literal.
-        { c: '@cocl-needs-rparen' s: 'PUNC_RPAREN'
-          a: '@cocl-take-rparen' r: 'cast_or_compound_literal'
-          g: 'cocl-rparen' }
-        # Compound literal: \`(type){…}\` — body is an initializer_list.
-        { c: '@cocl-needs-decision' s: 'PUNC_LBRACE'
-          a: '@cocl-mark-cl' b: 1 p: 'initializer_list'
-          g: 'cocl-cl' }
-        # Cast: parse the operand as an expression. (Pratt-driven
-        # val absorbs the full operand; precedence inside cast is
-        # documented as a phase-C.x follow-up if a test case fails.)
-        { c: '@cocl-needs-decision' a: '@cocl-mark-cast'
-          p: 'val' g: 'cocl-cast' }
-        { s: [] a: '@cocl-finalize' g: 'cocl-end' }
+        { c: '@cast-was-cl' r: 'postfix_more' g: 'cast-cl-postfix' }
+        { g: 'cast-end' }
+      ]
+    }
+
+    # cast_or_compound_literal: \`( type-name )\`, then \`{\` begins a
+    # compound literal's initializer list and anything else a cast's
+    # operand. The \`)\` and the next token decide which, in one alternate.
+    cast_or_compound_literal: {
+      open: [
+        { s: 'PUNC_LPAREN' a: '@cocl-open' p: 'type_name' g: 'cocl-open' }
+      ]
+      close: [
+        { c: '@cocl-done' g: 'cocl-end' }
+        { s: 'PUNC_RPAREN PUNC_LBRACE' b: 1 a: '@cocl-cl'
+          p: 'initializer_list' g: 'cocl-cl' }
+        { s: 'PUNC_RPAREN' a: '@cocl-cast' p: 'cast_expression'
+          g: 'cocl-cast' }
+      ]
+    }
+
+    # unary_expression: \`sizeof ( type-name )\` and its kin, a prefix
+    # operator and its operand, or a postfix expression.
+    unary_expression: {
+      open: [
+        { s: '#SIZEOF_KW PUNC_LPAREN #SIMPLE_TYPE_HEAD' b: 3
+          p: 'sizeof_type_form' g: 'un-sizeof-type' }
+        { s: '#INCDEC' a: '@prefix' p: 'unary_expression' g: 'un-incdec' }
+        { s: '#SIZEOF_KW' a: '@prefix' p: 'unary_expression' g: 'un-sizeof' }
+        { s: '#UNARY_OP' a: '@prefix' p: 'cast_expression' g: 'un-op' }
+        { p: 'postfix_expression' g: 'un-postfix' }
+      ]
+      close: [ { g: 'un-end' } ]
+    }
+
+    # postfix_expression, postfix_more: a primary expression and a replace
+    # loop of \`[ expression ]\`, \`( arguments )\`, \`. name\`, \`-> name\`, \`++\`
+    # and \`--\`, each wrapping what the chain has built.
+    postfix_expression: {
+      open: [ { p: 'primary_expression' g: 'pf-primary' } ]
+      close: [ { a: '@pf-carry' r: 'postfix_more' g: 'pf-more' } ]
+    }
+    postfix_more: {
+      open: [ { g: 'pm-cont' } ]
+      close: [
+        { s: 'PUNC_RBRACKET' c: '@pm-in-subscript' a: '@pm-rbracket'
+          r: 'postfix_more' g: 'pm-rbracket' }
+        { s: 'PUNC_RPAREN' c: '@pm-in-call' a: '@pm-rparen'
+          r: 'postfix_more' g: 'pm-rparen' }
+        { s: 'PUNC_LBRACKET' c: '@pm-free' a: '@subscript' p: 'expression'
+          g: 'pm-subscript' }
+        { s: 'PUNC_LPAREN' c: '@pm-free' a: '@call' p: 'argument_list'
+          g: 'pm-call' }
+        { s: 'PUNC_DOT #MEMBER_NAME' c: '@pm-free' a: '@member'
+          r: 'postfix_more' g: 'pm-dot' }
+        { s: 'PUNC_ARROW #MEMBER_NAME' c: '@pm-free' a: '@member'
+          r: 'postfix_more' g: 'pm-arrow' }
+        { s: '#INCDEC' c: '@pm-free' a: '@postfix' r: 'postfix_more'
+          g: 'pm-incdec' }
+        { g: 'pm-end' }
+      ]
+    }
+
+    # argument_list: a call's arguments, assignment expressions separated
+    # by commas, a replace loop; empty before an immediate \`)\`.
+    argument_list: {
+      open: [
+        { s: 'PUNC_RPAREN' b: 1 g: 'args-empty' }
+        { p: 'assignment_expression' g: 'args-item' }
+      ]
+      close: [
+        { s: 'PUNC_COMMA' a: '@args-comma' r: 'argument_list'
+          g: 'args-comma' }
+        { g: 'args-end' }
+      ]
+    }
+
+    # primary_expression: a constant, an identifier, adjacent strings, a
+    # parenthesised expression, a statement expression, \`_Generic\`, or a
+    # brace list.
+    primary_expression: {
+      open: [
+        { s: 'LIT_INT' a: '@lit' g: 'pr-int' }
+        { s: 'LIT_FLOAT' a: '@lit' g: 'pr-float' }
+        { s: 'LIT_CHAR' a: '@lit' g: 'pr-char' }
+        { s: 'KW_NULLPTR' a: '@lit' g: 'pr-nullptr' }
+        { s: 'KW_TRUE' a: '@lit' g: 'pr-true' }
+        { s: 'KW_FALSE' a: '@lit' g: 'pr-false' }
+        { s: 'LIT_STRING' b: 1 p: 'string_atom' g: 'pr-str' }
+        { s: 'ID' a: '@ident' g: 'pr-id' }
+        { s: 'MACRO_NAME' a: '@ident' g: 'pr-macro' }
+        { s: 'TYPEDEF_NAME' a: '@ident' g: 'pr-typedef' }
+        { s: 'PUNC_LPAREN PUNC_LBRACE' b: 2 p: 'statement_expression'
+          g: 'pr-stmt-expr' }
+        { s: 'PUNC_LPAREN' a: '@paren-open' p: 'expression' g: 'pr-paren' }
+        { s: 'KW__GENERIC' b: 1 p: 'generic_selection' g: 'pr-generic' }
+        { s: 'PUNC_LBRACE' b: 1 p: 'initializer_list' g: 'pr-brace' }
+      ]
+      close: [
+        { s: 'PUNC_RPAREN' c: '@paren-pending' a: '@paren-close'
+          g: 'pr-rparen' }
+        { g: 'pr-end' }
       ]
     }
 
@@ -1303,7 +1460,7 @@ const grammarText = `
         { s: 'PUNC_LBRACE' b: 1 p: 'initializer_list'
           a: '@ii-mark-nested' g: 'ii-nested' }
         # Plain expression value (no designation).
-        { p: 'val' g: 'ii-expr' }
+        { p: 'assignment_expression' g: 'ii-expr' }
       ]
       close: [
         # After designation, take \`=\` and r:-recurse so the next pass
@@ -1315,7 +1472,7 @@ const grammarText = `
           b: 1 p: 'initializer_list'
           a: '@ii-mark-nested' g: 'ii-val-list' }
         # After \`=\`, take an expression as the value.
-        { c: '@ii-needs-value' p: 'val' g: 'ii-val' }
+        { c: '@ii-needs-value' p: 'assignment_expression' g: 'ii-val' }
         { s: [] g: 'ii-end' }
       ]
     }
@@ -1339,7 +1496,7 @@ const grammarText = `
       open: [
         { s: 'PUNC_DOT' a: '@dr-take-dot' g: 'dr-dot' }
         { s: 'PUNC_LBRACKET' a: '@dr-take-lbracket'
-          p: 'val' g: 'dr-lbracket' }
+          p: 'assignment_expression' g: 'dr-lbracket' }
       ]
       close: [
         { c: '@dr-needs-id' s: 'ID' a: '@dr-take-id' g: 'dr-id' }
@@ -1386,7 +1543,7 @@ const grammarText = `
     # field) is preserved.
     generic_controlling_expression: {
       open: [
-        { p: 'val' g: 'gce-val' }
+        { p: 'assignment_expression' g: 'gce-val' }
       ]
       close: [
         { s: [] g: 'gce-end' }
@@ -1405,7 +1562,7 @@ const grammarText = `
       close: [
         { c: '@ga-need-colon' s: 'PUNC_COLON'
           a: '@ga-take-colon' r: 'generic_association' g: 'ga-colon' }
-        { c: '@ga-need-value' p: 'val' g: 'ga-value' }
+        { c: '@ga-need-value' p: 'assignment_expression' g: 'ga-value' }
         { s: [] g: 'ga-end' }
       ]
     }
@@ -1579,7 +1736,7 @@ const grammarText = `
     # bounded by the surrounding \`,\` or \`;\` or attribute-spec head.
     bitfield_width: {
       open: [
-        { s: 'PUNC_COLON' a: '@bfw-take-colon' p: 'val' g: 'bfw-colon' }
+        { s: 'PUNC_COLON' a: '@bfw-take-colon' p: 'assignment_expression' g: 'bfw-colon' }
       ]
       close: [
         { s: [] g: 'bfw-end' }
@@ -1650,7 +1807,7 @@ const grammarText = `
           b: 2 p: 'attribute_spec_c23'
           r: 'enumerator' g: 'enr-attr' }
         { c: '@enr-need-eq' s: 'PUNC_ASSIGN'
-          a: '@enr-take-eq' p: 'val' g: 'enr-eq' }
+          a: '@enr-take-eq' p: 'assignment_expression' g: 'enr-eq' }
         { s: [] g: 'enr-end' }
       ]
     }
@@ -1775,7 +1932,7 @@ const grammarText = `
         { s: 'PUNC_RPAREN' a: '@aal-take-rparen' g: 'aal-end' }
         { s: 'PUNC_COMMA' a: '@aal-take-comma'
           r: 'attribute_argument_list' g: 'aal-comma' }
-        { p: 'val' r: 'attribute_argument_list' g: 'aal-arg' }
+        { p: 'assignment_expression' r: 'attribute_argument_list' g: 'aal-arg' }
       ]
     }
 
@@ -1996,12 +2153,12 @@ const grammarText = `
         { c: '@said-need-lparen' s: 'PUNC_LPAREN'
           a: '@said-take-lparen' r: 'static_assert_declaration'
           g: 'sa-lp' }
-        { c: '@said-need-cond' p: 'val' a: '@said-mark-cond'
+        { c: '@said-need-cond' p: 'assignment_expression' a: '@said-mark-cond'
           g: 'sa-cond' }
         { c: '@said-need-comma' s: 'PUNC_COMMA'
           a: '@said-take-comma' r: 'static_assert_declaration'
           g: 'sa-comma' }
-        { c: '@said-need-msg' p: 'val' a: '@said-mark-msg'
+        { c: '@said-need-msg' p: 'assignment_expression' a: '@said-mark-msg'
           g: 'sa-msg' }
         { c: '@said-need-rparen' s: 'PUNC_RPAREN'
           a: '@said-take-rparen' r: 'static_assert_declaration'
@@ -2453,14 +2610,26 @@ const C: any = function C(jsonic: Tabnas, options: COptions): void {
         'KW_INLINE', 'KW___INLINE__', 'KW___INLINE',
         'KW___EXTENSION__',
       ],
-      // C-atom set used by val's paren-preval alt (call / subscript
-      // detection). Distinct from jsonic's standard VAL set so the
-      // implicit-list-of-VALs close alts don't fire on these tokens.
-      C_ATOM: [
-        'LIT_INT', 'LIT_FLOAT', 'LIT_CHAR', 'LIT_STRING',
-        'ID', 'MACRO_NAME', 'TYPEDEF_NAME',
+      // The operators of C's expression rules (c-grammar.jsonic,
+      // "expressions"; ts/src/expression.ts has their precedence).
+      ASSIGN_OP: [
+        'PUNC_ASSIGN', 'PUNC_PLUS_ASSIGN', 'PUNC_MINUS_ASSIGN',
+        'PUNC_STAR_ASSIGN', 'PUNC_SLASH_ASSIGN', 'PUNC_PERCENT_ASSIGN',
+        'PUNC_LSHIFT_ASSIGN', 'PUNC_RSHIFT_ASSIGN', 'PUNC_AMP_ASSIGN',
+        'PUNC_CARET_ASSIGN', 'PUNC_PIPE_ASSIGN',
       ],
-      C_PAREN_OPEN: ['PUNC_LPAREN', 'PUNC_LBRACKET'],
+      BINARY_OP: [
+        'PUNC_OR_OR', 'PUNC_AND_AND', 'PUNC_PIPE', 'PUNC_CARET', 'PUNC_AMP',
+        'PUNC_EQ', 'PUNC_NE', 'PUNC_LT', 'PUNC_LE', 'PUNC_GT', 'PUNC_GE',
+        'PUNC_LSHIFT', 'PUNC_RSHIFT', 'PUNC_PLUS', 'PUNC_MINUS',
+        'PUNC_STAR', 'PUNC_SLASH', 'PUNC_PERCENT',
+      ],
+      INCDEC: ['PUNC_PLUS_PLUS', 'PUNC_MINUS_MINUS'],
+      UNARY_OP: [
+        'PUNC_PLUS', 'PUNC_MINUS', 'PUNC_BANG', 'PUNC_TILDE',
+        'PUNC_STAR', 'PUNC_AMP',
+      ],
+      MEMBER_NAME: ['ID', 'TYPEDEF_NAME', 'MACRO_NAME'],
       // All keyword tokens. Used by attribute_item so a C keyword
       // (e.g. `const` in `__attribute__((const))`) can stand in as
       // the attribute name — mirroring legacy parseAttributeItem
@@ -2557,24 +2726,14 @@ const C: any = function C(jsonic: Tabnas, options: COptions): void {
   if (!opts.extended && spec && spec.rule) {
     for (const name of EXTENSION_RULES) delete spec.rule[name]
   }
+  // C's expressions start from a rule named `val`, as jsonic's do. Clear
+  // jsonic's, alternates and actions both, so that C's is the only one.
+  jsonic.rule('val', (rs: any) => rs.clear())
   jsonic.grammar({
     ...spec,
     ref: makeGrammarRefs(opts),
   })
 
-  // Phase A: install @jsonic/expr on the same jsonic instance with
-  // the full C operator catalog. The plugin sets up val/expr rules
-  // that recognise prefix/infix/suffix/ternary operators and paren
-  // forms (call, subscript, grouping). Because c.ts already
-  // registered PUNC_PLUS / PUNC_LPAREN / etc. via fixed.token, the
-  // plugin reuses those tins instead of minting fresh `#E+` ones, so
-  // its alts match the very tokens our lex matchers emit.
-  //
-  // The main grammar (c-grammar.jsonic) does NOT yet descend into
-  // val — that's phase B. Until then val is unreachable from
-  // translation_unit so this install is functionally a no-op for
-  // existing tests, but the plumbing is in place for later phases.
-  installExpr(jsonic)
 }
 
 C.defaults = {} as any
@@ -2591,6 +2750,8 @@ C.defaults = {} as any
 // plugin builds a fresh refs map per install in C() above.
 function makeGrammarRefs(opts: Required<COptions>): Record<string, Function> {
 return {
+  ...makeExpressionRefs(),
+
 
   // Extension gate ----
   // True when the plugin was installed with `extended: true`. Every
@@ -3034,7 +3195,7 @@ return {
   '@bip-mark-val': (_rule: Rule): void => { /* see -bc */ },
   '@bit_int_paren-bc': (rule: Rule): void => {
     if (rule.k.bipValAttached) return
-    if (rule.child && rule.child.name === 'val' && rule.child.node) {
+    if (rule.child && isExpressionRule(rule.child) && rule.child.node) {
       const owner = specOwner(rule)
       if (owner && owner.u && owner.u.specs) {
         owner.u.specs.children.push(rule.child.node)
@@ -3217,7 +3378,7 @@ return {
   },
 
   '@array_postfix-bc': (rule: Rule): void => {
-    if (rule.child && rule.child.name === 'val' && rule.child.node &&
+    if (rule.child && isExpressionRule(rule.child) && rule.child.node &&
         !rule.u.size) {
       rule.node.children.push(rule.child.node)
       rule.u.size = rule.child.node
@@ -3737,7 +3898,7 @@ return {
   // @expression_statement-bc once val has returned.
   '@es-take-expr': (_rule: Rule): void => { /* see -bc */ },
   '@expression_statement-bc': (rule: Rule): void => {
-    if (rule.child && rule.child.name === 'val' && rule.child.node &&
+    if (rule.child && isExpressionRule(rule.child) && rule.child.node &&
         rule.child.node !== rule.node && !rule.k.exprAttached) {
       rule.node.children.push(rule.child.node)
       rule.k.exprAttached = true
@@ -3773,7 +3934,7 @@ return {
     rule.k.tookExpr = true
   },
   '@jump_statement-bc': (rule: Rule): void => {
-    if (rule.child && rule.child.name === 'val' && rule.child.node &&
+    if (rule.child && isExpressionRule(rule.child) && rule.child.node &&
         rule.child.node !== rule.node && rule.k.tookExpr &&
         !rule.k.exprAttached) {
       rule.node.children.push(rule.child.node)
@@ -3795,7 +3956,7 @@ return {
   // -bc does the actual stitch.
   '@pc-take-expr': (_rule: Rule): void => { /* see -bc */ },
   '@paren_condition-bc': (rule: Rule): void => {
-    if (rule.child && rule.child.name === 'val' && rule.child.node &&
+    if (rule.child && isExpressionRule(rule.child) && rule.child.node &&
         rule.child.node !== rule.node && !rule.k.exprAttached) {
       rule.node.children.push(rule.child.node)
       rule.k.exprAttached = true
@@ -4043,7 +4204,7 @@ return {
         !rule.node.value) {
       rule.node.children.push(rule.child.node)
     } else if (rule.k.took === 'expr' &&
-               rule.child.name === 'val' &&
+               isExpressionRule(rule.child) &&
                rule.child.node !== rule.node &&
                !rule.node.value) {
       rule.node.children.push(rule.child.node)
@@ -4069,7 +4230,7 @@ return {
   '@for_cond-bc': (rule: Rule): void => {
     if (!rule.child || !rule.child.node) return
     if (rule.k.took === 'expr' &&
-        rule.child.name === 'val' &&
+        isExpressionRule(rule.child) &&
         rule.child.node !== rule.node &&
         !rule.node.value) {
       rule.node.children.push(rule.child.node)
@@ -4086,7 +4247,7 @@ return {
   '@for_iter-bc': (rule: Rule): void => {
     if (!rule.child || !rule.child.node) return
     if (rule.k.took === 'expr' &&
-        rule.child.name === 'val' &&
+        isExpressionRule(rule.child) &&
         rule.child.node !== rule.node &&
         !rule.node.value) {
       rule.node.children.push(rule.child.node)
@@ -4127,7 +4288,7 @@ return {
   '@labeled_statement-bc': (rule: Rule): void => {
     if (!rule.child || !rule.child.node) return
     if (rule.k.kind === 'case' &&
-        rule.child.name === 'val' &&
+        isExpressionRule(rule.child) &&
         rule.child.node !== rule.node &&
         !rule.k.exprAttached) {
       rule.node.children.push(rule.child.node)
@@ -4241,7 +4402,7 @@ return {
     rule.node = makeNode('asm_template')
   },
   '@asm_template-bc': (rule: Rule): void => {
-    if (rule.child && rule.child.name === 'val' && rule.child.node &&
+    if (rule.child && isExpressionRule(rule.child) && rule.child.node &&
         rule.child.node !== rule.node && !rule.k.exprAttached) {
       rule.node.children.push(rule.child.node)
       rule.k.exprAttached = true
@@ -4432,78 +4593,6 @@ return {
     }
   },
 
-  // ---- cast_or_compound_literal (phase C.3) ------------------------
-  //
-  // Build the final cast_expression / compound_literal node in
-  // @cocl-finalize from the captured pieces (typeName, surrounding
-  // tokens, operand or initializer body) — we only know which kind
-  // we are after we've seen what follows the closing `)`.
-  '@cast_or_compound_literal-bo': (rule: Rule): void => {
-    rule.k.children = []
-  },
-  '@cocl-take-lparen': (rule: Rule): void => {
-    rule.k.lparenTkn = rule.o0 as Token
-  },
-  '@cocl-reentered': (rule: Rule): boolean => !!rule.k.lparenTkn,
-  '@cocl-needs-rparen': (rule: Rule): boolean => !rule.k.tookRparen,
-  '@cocl-take-rparen': (rule: Rule): void => {
-    rule.k.rparenTkn = rule.c0 as Token
-    rule.k.tookRparen = true
-  },
-  '@cocl-needs-decision': (rule: Rule): boolean =>
-    rule.k.tookRparen === true && !rule.k.decided,
-  '@cocl-mark-cl': (rule: Rule): void => {
-    rule.k.decided = 'compound_literal'
-  },
-  '@cocl-mark-cast': (rule: Rule): void => {
-    rule.k.decided = 'cast'
-  },
-  '@cast_or_compound_literal-bc': (rule: Rule): void => {
-    if (!rule.child || !rule.child.node) return
-    if (rule.child.name === 'type_name' && !rule.k.typeName) {
-      rule.k.typeName = rule.child.node
-      return
-    }
-    if ((rule.child.name === 'initializer_list' ||
-         rule.child.name === 'compound_literal_body') &&
-        !rule.k.compoundBody) {
-      rule.k.compoundBody = rule.child.node
-      return
-    }
-    if (rule.child.name === 'val' && !rule.k.castOperand) {
-      rule.k.castOperand = rule.child.node
-    }
-  },
-  '@cocl-finalize': (rule: Rule): void => {
-    const decided = rule.k.decided || 'cast'
-    const tn = rule.k.typeName
-    let node: CNode
-    if (decided === 'compound_literal') {
-      node = makeNode('compound_literal')
-      if (rule.k.lparenTkn) pushTokenWithTrivia(node, rule.k.lparenTkn)
-      if (tn) node.children.push(tn)
-      if (rule.k.rparenTkn) pushTokenWithTrivia(node, rule.k.rparenTkn)
-      if (rule.k.compoundBody) node.children.push(rule.k.compoundBody)
-    } else {
-      node = makeNode('cast_expression')
-      if (rule.k.lparenTkn) pushTokenWithTrivia(node, rule.k.lparenTkn)
-      if (tn) node.children.push(tn)
-      if (rule.k.rparenTkn) pushTokenWithTrivia(node, rule.k.rparenTkn)
-      if (rule.k.castOperand) {
-        node.children.push(rule.k.castOperand)
-      }
-    }
-    rule.node = node
-    // r:-recursion creates a fresh rule per pass, but the parent's
-    // `.child` reference still points at the FIRST cocl instance.
-    // Propagate the finalised node onto that first instance so the
-    // parent (val) can pick it up via rule.child.node.
-    const parent = (rule as any).parent
-    if (parent && parent.child && parent.child.name === rule.name) {
-      parent.child.node = node
-    }
-  },
-
   // ---- compound_literal_body (alias for initializer_list) ----------
   '@compound_literal_body-bo': (rule: Rule): void => {
     // No-op; the rule p:-delegates to initializer_list and relies on
@@ -4603,7 +4692,7 @@ return {
       rule.k.gotValue = true
       return
     }
-    if (rule.child.name === 'val' && !rule.k.gotValue &&
+    if (isExpressionRule(rule.child) && !rule.k.gotValue &&
         rule.child.node !== rule.node) {
       rule.node.children.push(rule.child.node)
       rule.k.gotValue = true
@@ -4662,7 +4751,7 @@ return {
   },
   '@designator-bc': (rule: Rule): void => {
     if (rule.k.kind === 'index' &&
-        rule.child && rule.child.name === 'val' &&
+        rule.child && isExpressionRule(rule.child) &&
         rule.child.node && rule.child.node !== rule.node &&
         !rule.k.idxExprAttached) {
       rule.node.children.push(rule.child.node)
@@ -4773,7 +4862,7 @@ return {
     rule.node = makeNode('generic_controlling_expression')
   },
   '@generic_controlling_expression-bc': (rule: Rule): void => {
-    if (rule.child && rule.child.name === 'val' && rule.child.node &&
+    if (rule.child && isExpressionRule(rule.child) && rule.child.node &&
         rule.child.node !== rule.node && !rule.k.exprAttached) {
       rule.node.children.push(rule.child.node)
       rule.k.exprAttached = true
@@ -4821,7 +4910,7 @@ return {
       rule.k.gaTypeAttached = true
       return
     }
-    if (rule.child.name === 'val' && rule.child.node !== rule.node &&
+    if (isExpressionRule(rule.child) && rule.child.node !== rule.node &&
         !rule.k.gaValueTaken) {
       rule.node.children.push(rule.child.node)
       rule.k.gaValueTaken = true
@@ -5102,7 +5191,7 @@ return {
     pushTokenWithTrivia(rule.node, rule.o0 as Token)
   },
   '@bitfield_width-bc': (rule: Rule): void => {
-    if (rule.child && rule.child.name === 'val' && rule.child.node &&
+    if (rule.child && isExpressionRule(rule.child) && rule.child.node &&
         rule.child.node !== rule.node && !rule.k.bfExprAttached) {
       rule.node.children.push(rule.child.node)
       rule.k.bfExprAttached = true
@@ -5246,7 +5335,7 @@ return {
     rule.k.enrEqTaken = true
   },
   '@enumerator-bc': (rule: Rule): void => {
-    if (rule.child && rule.child.name === 'val' && rule.child.node &&
+    if (rule.child && isExpressionRule(rule.child) && rule.child.node &&
         rule.child.node !== rule.node && !rule.k.enrValueAttached) {
       // Wrap the const-expr in an `initializer` node to match the
       // legacy CST.
@@ -5523,7 +5612,7 @@ return {
     pushTokenWithTrivia(rule.node, rule.c0 as Token)
   },
   '@attribute_argument_list-bc': (rule: Rule): void => {
-    if (rule.child && rule.child.name === 'val' && rule.child.node &&
+    if (rule.child && isExpressionRule(rule.child) && rule.child.node &&
         rule.child.node !== rule.node && !rule.k.takenArgs?.has(rule.child)) {
       rule.node.children.push(rule.child.node)
       if (!rule.k.takenArgs) rule.k.takenArgs = new Set()
@@ -5965,7 +6054,7 @@ return {
   },
   '@static_assert_declaration-bc': (rule: Rule): void => {
     if (!rule.child || !rule.child.node) return
-    if (rule.child.name === 'val' && rule.child.node !== rule.node) {
+    if (isExpressionRule(rule.child) && rule.child.node !== rule.node) {
       if (!rule.k.saCondTaken) {
         rule.node.children.push(rule.child.node)
         rule.k.saCondTaken = true

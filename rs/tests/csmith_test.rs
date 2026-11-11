@@ -259,7 +259,10 @@ fn corpus_dir() -> PathBuf {
 }
 
 fn fixtures_dir() -> PathBuf {
-    repo_root().join("ts/test/csmith-fixtures")
+    // While this port builds 0.5's tree it reads the fixtures as 0.5
+    // pinned them; its move to the 0.6 tree reads `ts/test/csmith-fixtures`
+    // again and deletes the copy (`docs/rules.md`, "Order").
+    repo_root().join("ts/test/csmith-fixtures-0.5")
 }
 
 fn repo_root() -> PathBuf {

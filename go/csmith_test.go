@@ -327,7 +327,10 @@ func TestCsmithCorpus(t *testing.T) {
 	// cross-runtime parity contract); read them from there rather than
 	// duplicating ~20MB into go/.
 	corpusDir := filepath.Join("..", "ts", "test", "csmith-corpus")
-	fixturesDir := filepath.Join("..", "ts", "test", "csmith-fixtures")
+	// While this port builds 0.5's tree it reads the fixtures as 0.5
+	// pinned them; its move to the 0.6 tree reads ts/test/csmith-fixtures
+	// again and deletes the copy (docs/rules.md, "Order").
+	fixturesDir := filepath.Join("..", "ts", "test", "csmith-fixtures-0.5")
 
 	files, err := csmithCorpusFiles(corpusDir)
 	if err != nil {
