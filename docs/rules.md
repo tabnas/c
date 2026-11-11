@@ -346,6 +346,19 @@ modes and the real-world files: of the documents refused, 212 are
 refused at another token, in each case the one 0.5 refuses at (`s.;` at
 the `;`, as 0.5 does, where C's own rules refused at the `.`).
 
+With the Go reader of this change:
+
+- **The fixtures and Csmith**: every shared fixture passes, `members.tsv`
+  read through `Member`, and every one of the 100 Csmith fixtures; the
+  21 repetitions of `go/repeat_test.go` reach the depth one item needs.
+- **Against the TypeScript reader**: over both sweeps, 41,348 documents,
+  the Go reader builds the same tree for every document but three
+  real-world files holding text past ASCII, where Go counts a span in
+  bytes and TypeScript in UTF-16 units (the engines', `DIVERGENCE.md`).
+- **Nesting**: the 22 shapes of `rs/tests/limits_test.rs`, each 2,000
+  deep, and the rows of its table each return a tree, in under half a
+  second.
+
 The maintainer approved the two changes to what is accepted or refused:
 valid C that 0.5 refuses only by its rule path's defects (a
 cast of a cast, the comma operator in a condition, a `return` or an

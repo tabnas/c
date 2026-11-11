@@ -149,6 +149,16 @@ func registerInitializerRefs(
 	cond("@dr-needs-rbracket", func(r *tabnas.Rule, _ *tabnas.Context) bool {
 		return kStr(r, "kind") == "index" && !kBool(r, "tookRbracket")
 	})
+	// A designator ends with its member's name or its `]`.
+	cond("@dr-complete", func(r *tabnas.Rule, _ *tabnas.Context) bool {
+		switch kStr(r, "kind") {
+		case "member":
+			return kBool(r, "tookId")
+		case "index":
+			return kBool(r, "tookRbracket")
+		}
+		return true
+	})
 	action("@dr-take-rbracket", func(r *tabnas.Rule, _ *tabnas.Context) {
 		pushTokenWithTrivia(ruleNode(r), r.C0)
 		r.K["tookRbracket"] = true

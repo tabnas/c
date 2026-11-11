@@ -511,6 +511,9 @@ func registerExpressionRefs(f regFns) {
 	cond("@paren-pending", func(r *tabnas.Rule, _ *tabnas.Context) bool {
 		return uBool(r, "paren") && !uBool(r, "parenClosed")
 	})
+	cond("@paren-free", func(r *tabnas.Rule, _ *tabnas.Context) bool {
+		return !uBool(r, "paren") || uBool(r, "parenClosed")
+	})
 	action("@paren-close", func(r *tabnas.Rule, _ *tabnas.Context) {
 		dropToken(ruleNode(r), r.C0)
 		r.U["parenClosed"] = true
