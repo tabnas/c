@@ -303,12 +303,14 @@ With the TypeScript reader of this change against 0.5.15:
 
 What 0.6 accepts or refuses otherwise is the maintainer's to decide, and
 was asked: valid C that 0.5 refuses only by its rule path's defects (a
-cast of a cast, the comma operator in a condition or a `return`, a
-chained ternary, `static inline` and every specifier order, an
-assignment as a brace-list item) is accepted; invalid C that 0.5
-accepted through jsonic's implicit lists (values side by side inside an
-expression's parentheses, a call's arguments or a `for`'s controls) or
-an empty subscript (`a[]`) is refused.
+cast of a cast, the comma operator in a condition, a `return` or an
+expression statement, a chained ternary, `static inline` and every
+order or repetition of the declaration specifiers, an assignment as a
+brace-list item, `(void*)0 & x`) is accepted; invalid C that 0.5
+accepted through jsonic's implicit lists (values side by side in an
+expression: in parentheses, a call's arguments, a `for`'s controls, a
+`static_assert`'s condition or an initializer), an empty subscript
+(`a[]`) or an empty `sizeof()` is refused.
 
 ## The part
 
