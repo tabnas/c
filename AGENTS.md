@@ -185,6 +185,23 @@ matrix lives in the shared workflow, not here. Alongside it:
 library, on pull requests touching `go/**`) and `docs.yml` (the prose
 gate).
 
+## The window setting
+
+A parse from a reader (`ParseReader`, `parse_reader`, admin ADR-30) reads
+a window of the source at a time only on a parser that declares
+`lex.window`. This grammar's matchers are not yet verified at the
+window's edge, and its own window comes with its streaming work, so its
+whole parser declares its own setting, `false`: Go's `MakeC` (through
+`makeCOn`) and Rust's `make`/`make_with` (through `make_on`) set
+`lex.window` to false after installing the plugin on jsonic's base, so a
+base that declares the window does not carry it to this grammar.
+`go/window_test.go` and `rs/tests/window_test.rs` hold the parser to it,
+and `TestMakeCOnAWindowedBase` and `window_tests` in `rs/src/lib.rs` give
+the constructor's steps a base that declares the window. TypeScript has
+no constructor of its own; a host composes
+`new Tabnas().use(jsonic).use(C)`, whose plugin functions declare no
+window.
+
 ## Go port: upstream @tabnas/expr requirement
 
 The Go `@tabnas/expr` operator binding reuses tins from the **global**
