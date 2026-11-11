@@ -9,12 +9,11 @@ page is the design the change follows, and what it measured. alchemy's
 `docs/streaming-plan.md`, section 13.2, has the evidence that led to the
 ruling.
 
-The TypeScript reader builds the tree this page describes from 0.6. The
-Go and Rust readers build 0.5's tree until they move to it, reading the
+The TypeScript and Go readers build the tree this page describes from
+0.6. The Rust reader builds 0.5's tree until it moves to it, reading the
 0.5 copies of the fixtures (`test/spec-0.5/`,
 `ts/test/spec-0.5/path-dispatch.tsv`, `ts/test/csmith-fixtures-0.5/`)
-and keeping the 0.5 grammar (`go/c-grammar.jsonic`,
-`rs/c-grammar.jsonic`); see "Order".
+and keeping the 0.5 grammar (`rs/c-grammar.jsonic`); see "Order".
 
 ## What the parser did up to 0.5
 
@@ -382,6 +381,9 @@ are verified at the window's edge.
    new tree; until the ports follow, Go and Rust read the 0.5 copies, so
    every pull request is green on its own, and `ts/embed-grammar.js`
    does not copy the grammar to them.
-2. Go and Rust, to the same tree; the 0.5 copies go.
-3. The part, the window, the manifest and the render; the release, a
+2. Go, to the same tree, with the same rules and refs (`go/fallback.go`,
+   `go/expression.go`, `go/members.go`), and `ts/embed-grammar.js`
+   copies the grammar to it again.
+3. Rust, to the same tree; the 0.5 copies go.
+4. The part, the window, the manifest and the render; the release, a
    minor version, 0.6.0, since the tree changes.

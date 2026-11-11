@@ -5,8 +5,7 @@ package tabnasc
 import tabnas "github.com/tabnas/parser/go"
 
 // Extension-construct grammar-ref handlers: inline assembly (asm_statement
-// and sub-rules), in-body preprocessor lines (preprocessor_line), attribute
-// specs (GCC / MSVC / C23 forms + items + argument lists), and top-level
+// and sub-rules), attribute specs (GCC / MSVC / C23 forms + items + argument lists), and top-level
 // static_assert declarations. Port of the corresponding c.ts makeGrammarRefs
 // regions (phases C.8, B4.2.4, G.1-G.4, I.1 / phase O).
 //
@@ -109,7 +108,6 @@ func registerExtRefs(reg regFns) {
 		node := ruleNode(r)
 		if childName(r) == "asm_template" && !kBool(r, "templateTaken") {
 			pushKids(node, child)
-			node["template"] = child
 			r.K["templateTaken"] = true
 			return
 		}
@@ -123,9 +121,6 @@ func registerExtRefs(reg regFns) {
 				child["kind"] = kind
 			}
 			pushKids(node, child)
-			if kind != "" {
-				node[kind] = child
-			}
 			r.K["sectionIdx"] = idx + 1
 			r.K["lastWasColon"] = false
 			takenSet(r, "takenSecs")[r.Child] = true
@@ -137,12 +132,9 @@ func registerExtRefs(reg regFns) {
 		r.Node = makeNode("asm_template", nil)
 	})
 	state("@asm_template-bc", func(r *tabnas.Rule, _ *tabnas.Context) {
-		if childName(r) == "val" && childNode(r) != nil &&
-			!sameNode(childNode(r), ruleNode(r)) && !kBool(r, "exprAttached") {
-			node := ruleNode(r)
-			pushKids(node, childNode(r))
-			node["expression"] = childNode(r)
-			r.K["exprAttached"] = true
+		if childIsExpr(r) && !sameNode(childNode(r), ruleNode(r)) && !uBool(r, "exprAttached") {
+			pushKids(ruleNode(r), childNode(r))
+			r.U["exprAttached"] = true
 		}
 	})
 
@@ -166,37 +158,17 @@ func registerExtRefs(reg regFns) {
 	// of that kind. On empty section / past-last-item, t0 is `:` or
 	// `)` and all needs-* return false; the open's s:[] fallback
 	// exits the rule cleanly.
-	cond("@asec-needs-operand", func(r *tabnas.Rule, ctx *tabnas.Context) bool {
-		parent := parentRule(r)
-		if parent == nil {
-			return false
-		}
-		idx := kInt(parent, "sectionIdx")
-		if idx != 0 && idx != 1 {
-			return false
-		}
-		t0 := ctxTok0(ctx)
-		if t0 == nil {
-			return false
-		}
-		return t0.Name == "PUNC_LBRACKET" || t0.Name == "LIT_STRING" ||
-			t0.Name == "ID"
+	cond("@asec-operands", func(r *tabnas.Rule, _ *tabnas.Context) bool {
+		idx, ok := asmSectionIndex(r)
+		return ok && (idx == 0 || idx == 1)
 	})
-	cond("@asec-needs-clobber", func(r *tabnas.Rule, ctx *tabnas.Context) bool {
-		parent := parentRule(r)
-		if parent == nil || kInt(parent, "sectionIdx") != 2 {
-			return false
-		}
-		t0 := ctxTok0(ctx)
-		return t0 != nil && t0.Name == "LIT_STRING"
+	cond("@asec-clobbers", func(r *tabnas.Rule, _ *tabnas.Context) bool {
+		idx, ok := asmSectionIndex(r)
+		return ok && idx == 2
 	})
-	cond("@asec-needs-label", func(r *tabnas.Rule, ctx *tabnas.Context) bool {
-		parent := parentRule(r)
-		if parent == nil || kInt(parent, "sectionIdx") != 3 {
-			return false
-		}
-		t0 := ctxTok0(ctx)
-		return t0 != nil && t0.Name == "ID"
+	cond("@asec-labels", func(r *tabnas.Rule, _ *tabnas.Context) bool {
+		idx, ok := asmSectionIndex(r)
+		return ok && idx == 3
 	})
 	action("@asec-take-comma", func(r *tabnas.Rule, _ *tabnas.Context) {
 		pushTokenWithTrivia(ruleNode(r), r.C0)
@@ -214,35 +186,123 @@ func registerExtRefs(reg regFns) {
 		}
 	})
 
-	// ---- asm_operand (opaque) ----------------------------------------
-	state("@asm_operand-bo", func(r *tabnas.Rule, _ *tabnas.Context) {
-		if isRecursion(r) {
-			if n, ok := r.K["aopNode"].(CNode); ok {
-				r.Node = n
-				return
-			}
-		}
+	// ---- asm_operand ---------------------------------------------------
+	state("@asm_operand-bo", func(r *tabnas.Rule, ctx *tabnas.Context) {
 		r.Node = makeNode("asm_operand", nil)
-		r.K["aopNode"] = r.Node
-		r.K["aopDepth"] = 0
+		// The operand catches a failure below it (fallback.go).
+		r.U["scope"] = openLocal(ctx)
 	})
-	cond("@aop-reentered", func(r *tabnas.Rule, _ *tabnas.Context) bool {
-		_, hasNode := r.K["aopNode"].(CNode)
-		return hasNode && kBool(r, "aopTaken")
+	cond("@aop-failed", func(r *tabnas.Rule, _ *tabnas.Context) bool {
+		sc, _ := r.U["scope"].(*LocalScope)
+		return sc != nil && sc.Failed
 	})
-	action("@aop-take", func(r *tabnas.Rule, _ *tabnas.Context) {
-		tkn := stateTok(r)
+	// The structured parts could not read the operand: its tokens so far,
+	// flat, and asm_operand_rest takes the rest.
+	action("@aop-flatten", func(r *tabnas.Rule, ctx *tabnas.Context) {
+		sc, _ := r.U["scope"].(*LocalScope)
+		if sc == nil {
+			return
+		}
+		toks := tokensSince(ctx, sc.VAbs)
+		node := ruleNode(r)
+		node["children"] = []any{}
+		for _, t := range toks {
+			pushTokenWithTrivia(node, t)
+		}
+		r.K["aorDepth"] = bracketDepth(toks)
+		closeLocal(ctx, sc)
+	})
+	cond("@aop-needs-constraint", func(r *tabnas.Rule, _ *tabnas.Context) bool {
+		return !uBool(r, "constraint") && !uBool(r, "value")
+	})
+	cond("@aop-needs-value", func(r *tabnas.Rule, _ *tabnas.Context) bool {
+		return !uBool(r, "value")
+	})
+	action("@aop-end", func(r *tabnas.Rule, ctx *tabnas.Context) {
+		sc, _ := r.U["scope"].(*LocalScope)
+		closeLocal(ctx, sc)
+	})
+	// Tokens after the parts: the rest of the operand, flat.
+	action("@aop-trailing", func(r *tabnas.Rule, ctx *tabnas.Context) {
+		sc, _ := r.U["scope"].(*LocalScope)
+		if sc == nil {
+			return
+		}
+		r.K["aorDepth"] = bracketDepth(tokensSince(ctx, sc.VAbs))
+		closeLocal(ctx, sc)
+	})
+	state("@asm_operand-bc", func(r *tabnas.Rule, _ *tabnas.Context) {
+		child := r.Child
+		if child == nil || child == tabnas.NoRule || childNode(r) == nil {
+			return
+		}
+		if last, _ := r.U["lastChild"].(*tabnas.Rule); last == child {
+			return
+		}
+		part := map[string]string{
+			"asm_name": "name", "asm_constraint": "constraint", "asm_value": "value",
+		}
+		key, ok := part[child.Name]
+		if !ok {
+			return
+		}
+		appendChild(ruleNode(r), childNode(r))
+		r.U[key] = true
+		r.U["lastChild"] = child
+	})
+
+	// ---- asm_operand_rest ------------------------------------------------
+	cond("@aor-stop", func(r *tabnas.Rule, _ *tabnas.Context) bool {
+		return intOr(r.K["aorDepth"], 0) == 0
+	})
+	action("@aor-end", func(r *tabnas.Rule, _ *tabnas.Context) { r.U["ended"] = true })
+	cond("@aor-ended", func(r *tabnas.Rule, _ *tabnas.Context) bool { return uBool(r, "ended") })
+	action("@aor-take", func(r *tabnas.Rule, _ *tabnas.Context) {
+		tkn := r.O0
 		pushTokenWithTrivia(ruleNode(r), tkn)
-		r.K["aopTaken"] = true
 		switch tkn.Name {
 		case "PUNC_LPAREN", "PUNC_LBRACKET":
-			r.K["aopDepth"] = kInt(r, "aopDepth") + 1
+			r.K["aorDepth"] = intOr(r.K["aorDepth"], 0) + 1
 		case "PUNC_RPAREN", "PUNC_RBRACKET":
-			r.K["aopDepth"] = kInt(r, "aopDepth") - 1
+			r.K["aorDepth"] = intOr(r.K["aorDepth"], 0) - 1
 		}
 	})
-	cond("@aop-stop", func(r *tabnas.Rule, _ *tabnas.Context) bool {
-		return kInt(r, "aopDepth") == 0
+
+	// ---- asm_name, asm_constraint, asm_value ------------------------------
+	state("@asm_name-bo", func(r *tabnas.Rule, _ *tabnas.Context) {
+		r.Node = makeNode("asm_name", nil)
+	})
+	action("@aname-take", func(r *tabnas.Rule, _ *tabnas.Context) {
+		node := ruleNode(r)
+		pushTokenWithTrivia(node, r.O0)
+		pushTokenWithTrivia(node, r.O1)
+		if len(r.O) > 2 {
+			pushTokenWithTrivia(node, r.O[2])
+		}
+	})
+	state("@asm_constraint-bo", func(r *tabnas.Rule, _ *tabnas.Context) {
+		r.Node = makeNode("asm_constraint", nil)
+	})
+	action("@acon-take", func(r *tabnas.Rule, _ *tabnas.Context) {
+		tkn := r.O0
+		node := ruleNode(r)
+		pushTokenWithTrivia(node, tkn)
+		node["value"] = tkn.Src
+	})
+	state("@asm_value-bo", func(r *tabnas.Rule, _ *tabnas.Context) {
+		r.Node = makeNode("asm_value", nil)
+	})
+	action("@aval-open", func(r *tabnas.Rule, _ *tabnas.Context) {
+		pushTokenWithTrivia(ruleNode(r), r.O0)
+	})
+	state("@asm_value-bc", func(r *tabnas.Rule, _ *tabnas.Context) {
+		if childIsExpr(r) && !sameNode(childNode(r), ruleNode(r)) && !uBool(r, "exprAttached") {
+			appendChild(ruleNode(r), childNode(r))
+			r.U["exprAttached"] = true
+		}
+	})
+	action("@aval-close", func(r *tabnas.Rule, _ *tabnas.Context) {
+		pushTokenWithTrivia(ruleNode(r), r.C0)
 	})
 
 	// ---- asm_clobber -------------------------------------------------
@@ -268,29 +328,6 @@ func registerExtRefs(reg regFns) {
 	})
 
 	// ==================================================================
-	// preprocessor_line (phase B4.2.4, opaque to PP_NEWLINE)
-	// ==================================================================
-	state("@preprocessor_line-bo", func(r *tabnas.Rule, _ *tabnas.Context) {
-		if n := ruleNode(r); n != nil && n["kind"] == "preprocessor_line" {
-			return
-		}
-		r.Node = makeNode("preprocessor_line", nil)
-	})
-	action("@pp-take-hash", func(r *tabnas.Rule, _ *tabnas.Context) {
-		pushTokenWithTrivia(ruleNode(r), r.O0)
-		r.K["started"] = true
-	})
-	cond("@pp-reentry", func(r *tabnas.Rule, _ *tabnas.Context) bool {
-		return kBool(r, "started")
-	})
-	action("@pp-absorb", func(r *tabnas.Rule, _ *tabnas.Context) {
-		pushTokenWithTrivia(ruleNode(r), r.C0)
-	})
-	action("@pp-take-newline", func(r *tabnas.Rule, _ *tabnas.Context) {
-		pushTokenWithTrivia(ruleNode(r), r.C0)
-	})
-
-	// ==================================================================
 	// attribute_spec_gcc (phase G.2)
 	//
 	// `__attribute__ (( <items> ))` — state machine across r:-recursion
@@ -306,7 +343,6 @@ func registerExtRefs(reg regFns) {
 		}
 		node := makeNode("attribute_spec", nil)
 		node["attributeForm"] = "gcc"
-		node["items"] = []any{}
 		r.K["asgNode"] = node
 		r.Node = node
 	})
@@ -371,7 +407,6 @@ func registerExtRefs(reg regFns) {
 		}
 		node := makeNode("attribute_spec", nil)
 		node["attributeForm"] = "msvc"
-		node["items"] = []any{}
 		r.K["asm2Node"] = node
 		r.Node = node
 	})
@@ -435,7 +470,6 @@ func registerExtRefs(reg regFns) {
 		}
 		node := makeNode("attribute_spec", nil)
 		node["attributeForm"] = "c23"
-		node["items"] = []any{}
 		r.K["as23Node"] = node
 		r.Node = node
 	})
@@ -529,7 +563,6 @@ func registerExtRefs(reg regFns) {
 			!kBool(r, "aiArgsTaken") {
 			node := ruleNode(r)
 			pushKids(node, childNode(r))
-			node["argumentList"] = childNode(r)
 			r.K["aiArgsTaken"] = true
 		}
 	})
@@ -559,7 +592,7 @@ func registerExtRefs(reg regFns) {
 		pushTokenWithTrivia(ruleNode(r), r.C0)
 	})
 	state("@attribute_argument_list-bc", func(r *tabnas.Rule, _ *tabnas.Context) {
-		if childName(r) == "val" && childNode(r) != nil &&
+		if childIsExpr(r) &&
 			!sameNode(childNode(r), ruleNode(r)) && !takenHas(r, "takenArgs") {
 			pushKids(ruleNode(r), childNode(r))
 			takenSet(r, "takenArgs")[r.Child] = true
@@ -638,18 +671,15 @@ func registerExtRefs(reg regFns) {
 		r.K["saSemi"] = true
 	})
 	state("@static_assert_declaration-bc", func(r *tabnas.Rule, _ *tabnas.Context) {
-		if childName(r) != "val" || childNode(r) == nil ||
-			sameNode(childNode(r), ruleNode(r)) {
+		if !childIsExpr(r) || sameNode(childNode(r), ruleNode(r)) {
 			return
 		}
 		node := ruleNode(r)
 		if !kBool(r, "saCondTaken") {
 			pushKids(node, childNode(r))
-			node["condition"] = childNode(r)
 			r.K["saCondTaken"] = true
 		} else if kBool(r, "saComma") && !kBool(r, "saMsgTaken") {
 			pushKids(node, childNode(r))
-			node["message"] = childNode(r)
 			r.K["saMsgTaken"] = true
 		}
 	})
@@ -657,7 +687,7 @@ func registerExtRefs(reg regFns) {
 
 // attrSpecTakeItem returns the shared -bc handler for the three
 // attribute_spec_* forms: attach a returned attribute_item onto the spec
-// node's children + items, and mark lastWasItem via the given k key.
+// node's children, and mark lastWasItem via the given k key.
 func attrSpecTakeItem(lastWasItemKey string) tabnas.StateAction {
 	return func(r *tabnas.Rule, _ *tabnas.Context) {
 		if childName(r) != "attribute_item" || childNode(r) == nil ||
@@ -666,10 +696,21 @@ func attrSpecTakeItem(lastWasItemKey string) tabnas.StateAction {
 		}
 		node := ruleNode(r)
 		pushKids(node, childNode(r))
-		if items, ok := node["items"].([]any); ok {
-			node["items"] = append(items, childNode(r))
-		}
 		r.K[lastWasItemKey] = true
 		takenSet(r, "takenItems")[r.Child] = true
 	}
+}
+
+// asmSectionIndex is which of an asm statement's sections an asm_section
+// rule reads: 0 outputs, 1 inputs, 2 clobbers, 3 labels.
+func asmSectionIndex(r *tabnas.Rule) (int, bool) {
+	parent := parentRule(r)
+	if parent == nil || parent.K == nil {
+		return 0, false
+	}
+	v, ok := parent.K["sectionIdx"]
+	if !ok {
+		return 0, false
+	}
+	return intOr(v, 0), true
 }

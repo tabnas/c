@@ -54,23 +54,22 @@ fs.writeFileSync(TS_FILE, src)
 console.log('Embedded grammar into', TS_FILE)
 
 // The Go module (//go:embed) and the Rust crate (include_str!) take
-// copies of the grammar. While the TypeScript reader builds the 0.6 tree
-// and the ports still build 0.5's, each keeps the 0.5 grammar its refs
-// were written for, so the copies are not written here; a port's move to
-// the 0.6 tree writes its copy again (docs/rules.md, "Order").
-const PORTS_ON_0_5 = true
-if (!PORTS_ON_0_5) {
-  // Mirror the grammar into the Go module for //go:embed (only if the go/
-  // directory exists — the Go port is optional/scaffold).
-  if (fs.existsSync(path.dirname(GO_GRAMMAR_FILE))) {
-    fs.writeFileSync(GO_GRAMMAR_FILE, grammar)
-    console.log('Copied grammar to', GO_GRAMMAR_FILE)
-  }
+// copies of the grammar. While the TypeScript and Go readers build the 0.6
+// tree and the Rust port still builds 0.5's, the crate keeps the 0.5
+// grammar its refs were written for, so its copy is not written here; its
+// move to the 0.6 tree writes the copy again (docs/rules.md, "Order").
+const RUST_ON_0_5 = true
 
-  // And into the Rust crate for include_str!, on the same guard: a checkout
-  // without rs/ is not an error, it is a checkout without the Rust port.
-  if (fs.existsSync(path.dirname(RS_GRAMMAR_FILE))) {
-    fs.writeFileSync(RS_GRAMMAR_FILE, grammar)
-    console.log('Copied grammar to', RS_GRAMMAR_FILE)
-  }
+// Mirror the grammar into the Go module for //go:embed (only if the go/
+// directory exists — the Go port is optional/scaffold).
+if (fs.existsSync(path.dirname(GO_GRAMMAR_FILE))) {
+  fs.writeFileSync(GO_GRAMMAR_FILE, grammar)
+  console.log('Copied grammar to', GO_GRAMMAR_FILE)
+}
+
+// And into the Rust crate for include_str!, on the same guard: a checkout
+// without rs/ is not an error, it is a checkout without the Rust port.
+if (!RUST_ON_0_5 && fs.existsSync(path.dirname(RS_GRAMMAR_FILE))) {
+  fs.writeFileSync(RS_GRAMMAR_FILE, grammar)
+  console.log('Copied grammar to', RS_GRAMMAR_FILE)
 }

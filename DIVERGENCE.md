@@ -18,17 +18,18 @@ the Rust port through `cargo test`.
 From 0.6 the canonical builds every declaration with its own rules and
 reads its expressions with `@tabnas/expr` ([`docs/rules.md`](docs/rules.md)),
 and repairs sections 1 and 3: the ternary and the initializer item are
-nodes. The Go and Rust ports build 0.5's tree until they move to the
-rules, reading the 0.5 copies of the fixtures, so sections 1 and 3
-describe them against 0.5's canonical, and their rows go when they move.
+nodes. The Go port builds the same tree from 0.6. The Rust port builds
+0.5's tree until it moves to the rules, reading the 0.5 copies of the
+fixtures, so sections 1 and 3 describe it against 0.5's canonical, and
+its rows go when it moves.
 
 ## 1. A ternary in a declaration initializer
 
 | input | TypeScript | Go | Rust |
 |---|---|---|---|
-| `int a = b ? c : d;` | `RangeError: Maximum call stack size exceeded` | `fatal error: stack overflow`, the process dies | `ERROR:cancel` |
+| `int a = b ? c : d;` | a tree, from 0.6; 0.5: `RangeError: Maximum call stack size exceeded` | a tree, from 0.6; 0.5: `fatal error: stack overflow`, the process dies | `ERROR:cancel` |
 
-**What happens.** `@tabnas/expr` hands the ternary back as a
+**What happened, up to 0.5.** `@tabnas/expr` hands the ternary back as a
 `conditional_expression`, and the node that the C plugin builds for it
 holds ITSELF among its descendants. The tree is therefore not a tree,
 and every walk over it runs forever. In the canonical the first walk to
@@ -48,9 +49,9 @@ for any input that has one.
 
 **Who repairs it.** The defect is upstream, in the canonical: the
 expression node should not contain itself. The canonical is repaired
-from 0.6 (the register's `ts` column is its tree); the ports fail on
-this input, and only the manner differs, until they move to its rules,
-when all three return a tree and this row goes.
+from 0.6 (the register's `ts` column is its tree), and so is the Go port;
+the Rust port fails on this input until it moves to the canonical's
+rules, when all three return a tree and this row goes.
 
 **Pinned by.** `test/divergent.tsv`, and `expression_cycle` in
 `rs/tests/limits_test.rs`.
@@ -60,7 +61,7 @@ when all three return a tree and this row goes.
 | input | TypeScript | Go | Rust |
 |---|---|---|---|
 | `void f(void) { {{{ ... }}} }`, 4000 deep | a tree | a tree | `ERROR:cancel` |
-| the same, 20000 deep | `RangeError` or an out-of-memory kill | `fatal error: stack overflow` | `ERROR:cancel` |
+| the same, 20000 deep | `RangeError` or an out-of-memory kill | a tree (0.5: `fatal error: stack overflow`) | `ERROR:cancel` |
 | `int x = ((( ... 1 ... )));`, 5000 deep | `RangeError` | a tree | `ERROR:cancel` |
 | `int x = --- ... 1;`, 5000 deep | a tree | a tree | `ERROR:cancel` |
 | `void f(void) { if (a) if (a) ... ; }`, 2000 deep | a tree | a tree | `ERROR:cancel` |
@@ -104,7 +105,10 @@ Measured 2026-09-23 with `extended: true` on the 22 shapes of
 canonical returns a tree for 15 of them and throws `RangeError` for the
 other 7, the Go port returns a tree for 21 and does not finish the
 nested parameter lists in two minutes, and this port reports `cancel`
-for all 22.
+for all 22. Measured 2026-11-11, the Go port of 0.6, which builds every
+declaration with the rules and gives the spans with a loop, returns a
+tree for all 22, each in under half a second, and for every row of the
+table above.
 
 **Where the cap sits, measured.** A translation unit of N nested
 compound statements realizes at depth `N + 2`, and an unoptimized build
@@ -140,7 +144,7 @@ fresh measurement.
 
 | input | TypeScript | Go | Rust |
 |---|---|---|---|
-| `static int g[2] = {-5,1};` | the item's `children` hold a raw `@tabnas/expr` operator array | the same array, on the item's `value` and `children` | the item's `children` are EMPTY |
+| `static int g[2] = {-5,1};` | the item's `children` hold a raw `@tabnas/expr` operator array (0.5) | the same array, on the item's `value` and `children` (0.5) | the item's `children` are EMPTY |
 
 **What happens.** When a prefix operator is the WHOLE of a brace
 initializer item, the expression is handed back by `@tabnas/expr` as
@@ -174,7 +178,8 @@ instead.
 
 **Who repairs it.** The canonical first, then both ports (ADR-13). The
 canonical is repaired from 0.6: the item is the `unary_expression` it
-builds everywhere else, and the Csmith fixtures carry it.
+builds everywhere else, and the Csmith fixtures carry it; so is the Go
+port.
 What the canonical leaves on the item is an engine-internal record, not
 a node of the language; the language's shape for that expression is
 the `unary_expression` the canonical itself builds for `int x = -5;`.

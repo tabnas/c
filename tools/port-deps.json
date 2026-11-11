@@ -1,0 +1,10 @@
+{
+  "note": "The tabnas runtime dependencies the ports of c do not share, with why and what repairs each. tools/port-deps.cjs reads it; ADR-24 in tabnas/admin DECISIONS.md.",
+  "differ": {
+    "expr": {
+      "ports": ["rs", "ts"],
+      "reason": "From 0.6 C's expressions are its own grammar rules (docs/rules.md), and the TypeScript and Go readers no longer install @tabnas/expr: the Go module no longer imports it, while ts/package.json and rs/Cargo.toml still declare it (the Rust reader still installs it until it moves to the rules).",
+      "repair": "Once the Rust reader moves to the rules, the maintainer removes the dependency from ts/package.json, rs/Cargo.toml and go/go.mod (a dependency change, ADR-22)."
+    }
+  }
+}

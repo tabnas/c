@@ -11,22 +11,40 @@ func registerNewPathRefs(g regFns, extended bool) {
 	cond, action, state := g.cond, g.action, g.state
 
 	// ---- dispatch gates --------------------------------------------------
-	cond("@plain-and-first-iter", func(r *tabnas.Rule, _ *tabnas.Context) bool {
-		return !extended && len(kTokens(r)) == 0
-	})
-	cond("@plain-as23-and-first", func(r *tabnas.Rule, ctx *tabnas.Context) bool {
-		if extended {
-			return false
-		}
-		if len(kTokens(r)) > 0 {
-			return false
-		}
-		a := ctxTokAt(ctx, 0)
-		b := ctxTokAt(ctx, 1)
-		return a != nil && b != nil && a.SI+len(a.Src) == b.SI
-	})
+	// Plain mode holds a declaration with a type, storage, `_BitInt` or
+	// `[[` head to the rules; extended mode holds one when this lookahead
+	// validator accepts its head. The validator answers as it did in 0.5,
+	// so the declarations held to the rules are 0.5's.
 	cond("@looks-simple-decl", func(r *tabnas.Rule, ctx *tabnas.Context) bool {
 		return looksSimpleDecl(r, ctx)
+	})
+	// The extensions' spellings of a pointer qualifier, after a `*` in a
+	// parameter's declarator, in extended mode.
+	cond("@param-has-pointer-ext", func(r *tabnas.Rule, _ *tabnas.Context) bool {
+		return extended && kNode(r, "lastPointer") != nil
+	})
+	cond("@ppi-has-pointer-ext", func(r *tabnas.Rule, _ *tabnas.Context) bool {
+		return extended && kNode(r, "lastPointer") != nil
+	})
+	// A struct, union or enum specifier read in a parameter's specifier
+	// loop goes onto the parameter's declaration_specifiers, once.
+	state("@param_spec_loop-bc", func(r *tabnas.Rule, _ *tabnas.Context) {
+		child := r.Child
+		if child == nil || child == tabnas.NoRule || childNode(r) == nil {
+			return
+		}
+		if child.Name != "struct_specifier" && child.Name != "enum_specifier" {
+			return
+		}
+		if taken, _ := r.U["takenTagged"].(*tabnas.Rule); taken == child {
+			return
+		}
+		if owner := parentRule(r); owner != nil {
+			if specs := kNode(owner, "specs"); specs != nil {
+				pushKids(specs, childNode(r))
+				r.U["takenTagged"] = child
+			}
+		}
 	})
 
 	registerDeclRefs(cond, action, state)
@@ -66,7 +84,7 @@ func registerDeclRefs(
 
 	action("@absorb-spec-storage", func(r *tabnas.Rule, _ *tabnas.Context) {
 		owner := specOwnerRule(r)
-		tkn := r.O0
+		tkn := matchedToken(r)
 		pushTokenWithTrivia(uNode(owner, "specs"), tkn)
 		if tkn.Name == "KW_TYPEDEF" {
 			owner.EnsureU()["isTypedef"] = true
@@ -74,7 +92,50 @@ func registerDeclRefs(
 	})
 	action("@absorb-spec-type", func(r *tabnas.Rule, _ *tabnas.Context) {
 		owner := specOwnerRule(r)
-		pushTokenWithTrivia(uNode(owner, "specs"), r.O0)
+		pushTokenWithTrivia(uNode(owner, "specs"), matchedToken(r))
+	})
+	// A specifier with a parenthesised argument: the keyword, and the
+	// parentheses' tokens on the declaration_specifiers too (paren_run).
+	action("@absorb-spec-paren", func(r *tabnas.Rule, _ *tabnas.Context) {
+		owner := specOwnerRule(r)
+		specs := uNode(owner, "specs")
+		pushTokenWithTrivia(specs, matchedToken(r))
+		r.K["prunTarget"] = specs
+	})
+
+	// ---- paren_run: a balanced ( ... ), flat ----
+	action("@prun-take", func(r *tabnas.Rule, _ *tabnas.Context) {
+		tkn := r.O0
+		target := kNode(r, "prunTarget")
+		if target == nil {
+			target = ruleNode(r)
+		}
+		pushTokenWithTrivia(target, tkn)
+		switch tkn.Name {
+		case "PUNC_LPAREN":
+			r.K["prunDepth"] = intOr(r.K["prunDepth"], 0) + 1
+		case "PUNC_RPAREN":
+			r.K["prunDepth"] = intOr(r.K["prunDepth"], 0) - 1
+		}
+	})
+	cond("@prun-closed", func(r *tabnas.Rule, _ *tabnas.Context) bool {
+		return intOr(r.K["prunDepth"], 0) <= 0
+	})
+	state("@paren_run-ac", func(r *tabnas.Rule, _ *tabnas.Context) {
+		if intOr(r.K["prunDepth"], 0) <= 0 {
+			delete(r.K, "prunTarget")
+			delete(r.K, "prunDepth")
+		}
+	})
+
+	// ---- asm_label: `__asm__ ( "name" )` after a declarator ----
+	state("@asm_label-bo", func(r *tabnas.Rule, _ *tabnas.Context) {
+		r.Node = makeNode("asm_label", nil)
+	})
+	action("@alab-kw", func(r *tabnas.Rule, _ *tabnas.Context) {
+		pushTokenWithTrivia(ruleNode(r), r.O0)
+		delete(r.K, "prunTarget")
+		r.K["prunDepth"] = 0
 	})
 
 	// ---- bit_int_paren ----
@@ -89,7 +150,7 @@ func registerDeclRefs(
 		if kBool(r, "bipValAttached") {
 			return
 		}
-		if childName(r) == "val" && childNode(r) != nil {
+		if childIsExpr(r) {
 			owner := specOwnerRule(r)
 			if specs := uNode(owner, "specs"); specs != nil {
 				pushKids(specs, childNode(r))
@@ -132,6 +193,30 @@ func registerDeclRefs(
 	})
 	cond("@idecl-named", func(r *tabnas.Rule, _ *tabnas.Context) bool {
 		return kBool(r, "named")
+	})
+	// A declarator after a declarator with no comma between (`int a b;`)
+	// is 0.5's rules' reading, kept where the declaration is held to the
+	// rules; an armed declaration fails there, as the structurer did.
+	cond("@idecl-may-name", func(r *tabnas.Rule, _ *tabnas.Context) bool {
+		return !kBool(r, "named")
+	})
+	cond("@sd-may-declarate", func(r *tabnas.Rule, ctx *tabnas.Context) bool {
+		idl := uNode(r, "idl")
+		kids := kidsOf(idl)
+		if len(kids) == 0 {
+			return true
+		}
+		if last, ok := kids[len(kids)-1].(map[string]any); ok &&
+			last["kind"] == "token" && last["tname"] == "PUNC_COMMA" {
+			return true
+		}
+		if ed := edOf(ctx); ed != nil && ed.Armed {
+			return false
+		}
+		// A declarator with no comma before it: 0.5's rules read it into
+		// the declarator before, whose name it then was.
+		r.U["lenient"] = true
+		return true
 	})
 	action("@idecl-paren-open", func(r *tabnas.Rule, _ *tabnas.Context) {
 		lparen := r.O0
@@ -228,7 +313,7 @@ func registerDeclRefs(
 		}
 	})
 	state("@array_postfix-bc", func(r *tabnas.Rule, _ *tabnas.Context) {
-		if childName(r) == "val" && childNode(r) != nil && uNode(r, "size") == nil {
+		if childIsExpr(r) && uNode(r, "size") == nil {
 			pushKids(ruleNode(r), childNode(r))
 			r.U["size"] = childNode(r)
 		}
@@ -450,6 +535,16 @@ func registerDeclRefs(
 		r.U["hasInit"] = true
 	})
 	state("@init_declarator-bc", func(r *tabnas.Rule, _ *tabnas.Context) {
+		// An attribute or an asm label after the declarator.
+		if child := r.Child; child != nil && child != tabnas.NoRule && childNode(r) != nil {
+			last, _ := r.U["lastSuffix"].(*tabnas.Rule)
+			if last != child && (child.Name == "attribute_spec_gcc" ||
+				child.Name == "attribute_spec_msvc" || child.Name == "asm_label") {
+				pushKids(ruleNode(r), childNode(r))
+				r.U["lastSuffix"] = child
+				return
+			}
+		}
 		if uBool(r, "hasInit") && childNode(r) != nil {
 			initNode := childNode(r)
 			if initNode["kind"] != "initializer" {
@@ -483,8 +578,23 @@ func registerDeclRefs(
 		cn := childNode(r)
 		switch childName(r) {
 		case "init_declarator":
-			if cn != nil && cn["kind"] == "init_declarator" {
+			last, _ := r.U["lastDeclarator"].(*tabnas.Rule)
+			if cn != nil && cn["kind"] == "init_declarator" && last != r.Child {
+				r.U["lastDeclarator"] = r.Child
 				pushKids(uNode(r, "idl"), cn)
+				// A declarator with no comma before it was, in 0.5's rules,
+				// a second name of the declarator before: the name that
+				// declarator declares, for its typedef names, is this one.
+				if dn, _ := cn["declaredName"].(string); uBool(r, "lenient") && dn != "" {
+					if names, _ := r.U["declaredNames"].([]any); len(names) > 0 {
+						names = names[:len(names)-1]
+						r.U["declaredNames"] = names
+						if len(names) == 0 {
+							delete(r.U, "declaredName")
+						}
+					}
+				}
+				r.U["lenient"] = false
 				if dn, ok := cn["declaredName"].(string); ok && dn != "" {
 					names, _ := r.U["declaredNames"].([]any)
 					r.U["declaredNames"] = append(names, dn)

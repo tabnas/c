@@ -5,9 +5,9 @@ package tabnasc
 import tabnas "github.com/tabnas/parser/go"
 
 // registerExprSupportRefs binds the expression-support sub-rules reached from
-// val: type_name, sizeof_type_form, cast_or_compound_literal,
-// compound_literal_body, string_atom, statement_expression, and the
-// _Generic family. Port of the c.ts phase C.2-C.7 refs.
+// the expression rules: type_name, sizeof_type_form, compound_literal_body,
+// string_atom, statement_expression, and the _Generic family. Port of the
+// c.ts phase C.2-C.7 refs; casts and compound literals are expression.go's.
 func registerExprSupportRefs(
 	cond func(string, tabnas.AltCond),
 	action func(string, tabnas.AltAction),
@@ -77,104 +77,7 @@ func registerExprSupportRefs(
 		if childName(r) == "type_name" && childNode(r) != nil && !kBool(r, "typeNameAttached") {
 			node := ruleNode(r)
 			pushKids(node, childNode(r))
-			node["operand"] = childNode(r)
 			r.K["typeNameAttached"] = true
-		}
-	})
-
-	// ---- cast_or_compound_literal ----
-	state("@cast_or_compound_literal-bo", func(r *tabnas.Rule, _ *tabnas.Context) {
-		r.K["children"] = []any{}
-	})
-	action("@cocl-take-lparen", func(r *tabnas.Rule, _ *tabnas.Context) {
-		r.K["lparenTkn"] = r.O0
-	})
-	cond("@cocl-reentered", func(r *tabnas.Rule, _ *tabnas.Context) bool {
-		_, ok := r.K["lparenTkn"].(*tabnas.Token)
-		return ok
-	})
-	cond("@cocl-needs-rparen", func(r *tabnas.Rule, _ *tabnas.Context) bool {
-		return !kBool(r, "tookRparen")
-	})
-	action("@cocl-take-rparen", func(r *tabnas.Rule, _ *tabnas.Context) {
-		r.K["rparenTkn"] = r.C0
-		r.K["tookRparen"] = true
-	})
-	cond("@cocl-needs-decision", func(r *tabnas.Rule, _ *tabnas.Context) bool {
-		return kBool(r, "tookRparen") && kStr(r, "decided") == ""
-	})
-	action("@cocl-mark-cl", func(r *tabnas.Rule, _ *tabnas.Context) {
-		r.K["decided"] = "compound_literal"
-	})
-	action("@cocl-mark-cast", func(r *tabnas.Rule, _ *tabnas.Context) {
-		r.K["decided"] = "cast"
-	})
-	state("@cast_or_compound_literal-bc", func(r *tabnas.Rule, _ *tabnas.Context) {
-		cn := childNode(r)
-		if cn == nil {
-			return
-		}
-		switch childName(r) {
-		case "type_name":
-			if kNode(r, "typeName") == nil {
-				r.K["typeName"] = cn
-			}
-		case "initializer_list", "compound_literal_body":
-			if kNode(r, "compoundBody") == nil {
-				r.K["compoundBody"] = cn
-			}
-		case "val":
-			if kNode(r, "castOperand") == nil {
-				r.K["castOperand"] = cn
-			}
-		}
-	})
-	action("@cocl-finalize", func(r *tabnas.Rule, _ *tabnas.Context) {
-		decided := kStr(r, "decided")
-		if decided == "" {
-			decided = "cast"
-		}
-		tn := kNode(r, "typeName")
-		var node CNode
-		lparen, _ := r.K["lparenTkn"].(*tabnas.Token)
-		rparen, _ := r.K["rparenTkn"].(*tabnas.Token)
-		if decided == "compound_literal" {
-			node = makeNode("compound_literal", nil)
-			if lparen != nil {
-				pushTokenWithTrivia(node, lparen)
-			}
-			if tn != nil {
-				pushKids(node, tn)
-				node["typeName"] = tn
-			}
-			if rparen != nil {
-				pushTokenWithTrivia(node, rparen)
-			}
-			if cb := kNode(r, "compoundBody"); cb != nil {
-				pushKids(node, cb)
-			}
-		} else {
-			node = makeNode("cast_expression", nil)
-			if lparen != nil {
-				pushTokenWithTrivia(node, lparen)
-			}
-			if tn != nil {
-				pushKids(node, tn)
-				node["typeName"] = tn
-			}
-			if rparen != nil {
-				pushTokenWithTrivia(node, rparen)
-			}
-			if co := kNode(r, "castOperand"); co != nil {
-				pushKids(node, co)
-				node["operand"] = co
-			}
-		}
-		r.Node = node
-		parent := parentRule(r)
-		if parent != nil && parent.Child != nil && parent.Child != tabnas.NoRule &&
-			parent.Child.Name == r.Name {
-			parent.Child.Node = node
 		}
 	})
 
@@ -252,7 +155,6 @@ func registerGenericRefs(
 			}
 		}
 		node := makeNode("generic_selection", nil)
-		node["associations"] = []any{}
 		r.K["gsNode"] = node
 		r.Node = node
 	})
@@ -304,14 +206,12 @@ func registerGenericRefs(
 			if !kBool(r, "ctrlTaken") {
 				node := ruleNode(r)
 				pushKids(node, cn)
-				node["controlling"] = cn
 				r.K["ctrlTaken"] = true
 			}
 		case "generic_association":
 			if !takenHas(r, "takenAssocs") {
 				node := ruleNode(r)
 				pushKids(node, cn)
-				node["associations"] = append(node["associations"].([]any), cn)
 				takenSet(r, "takenAssocs")[r.Child] = true
 				r.K["lastWasAssoc"] = true
 			}
@@ -323,12 +223,9 @@ func registerGenericRefs(
 		r.Node = makeNode("generic_controlling_expression", nil)
 	})
 	state("@generic_controlling_expression-bc", func(r *tabnas.Rule, _ *tabnas.Context) {
-		if childName(r) == "val" && childNode(r) != nil &&
-			!sameNode(childNode(r), ruleNode(r)) && !kBool(r, "exprAttached") {
-			node := ruleNode(r)
-			pushKids(node, childNode(r))
-			node["expression"] = childNode(r)
-			r.K["exprAttached"] = true
+		if childIsExpr(r) && !sameNode(childNode(r), ruleNode(r)) && !uBool(r, "exprAttached") {
+			pushKids(ruleNode(r), childNode(r))
+			r.U["exprAttached"] = true
 		}
 	})
 
@@ -381,14 +278,11 @@ func registerGenericRefs(
 			if !kBool(r, "gaTypeAttached") {
 				node := ruleNode(r)
 				pushKids(node, cn)
-				node["typeName"] = cn
 				r.K["gaTypeAttached"] = true
 			}
-		case "val":
-			if !sameNode(cn, ruleNode(r)) && !kBool(r, "gaValueTaken") {
-				node := ruleNode(r)
-				pushKids(node, cn)
-				node["value"] = cn
+		default:
+			if isExpressionRule(r.Child) && !sameNode(cn, ruleNode(r)) && !kBool(r, "gaValueTaken") {
+				pushKids(ruleNode(r), cn)
 				r.K["gaValueTaken"] = true
 			}
 		}

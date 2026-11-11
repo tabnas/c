@@ -2,6 +2,8 @@
 
 package tabnasc
 
+import tabnas "github.com/tabnas/parser/go"
+
 // Symbol and macro tables used by the C parser to resolve the classic
 // identifier/typedef-name disambiguation problem. Port of ../ts/src/symbols.ts.
 //
@@ -207,6 +209,15 @@ type CMeta struct {
 	// onto each non-trivia token's leading-trivia so trivia stays attached to
 	// the token it precedes even though the parser IGNOREs it.
 	PendingTrivia []any
+	// Rec is the record of the tokens the lexer gave the parser, from the
+	// first the current external declaration has not taken (RecBase is the
+	// count of tokens taken before it), and ED that declaration's state:
+	// the armed fallback's (fallback.go).
+	Rec     []*tabnas.Token
+	RecBase int
+	ED      *ExtDecl
+	// Fixed records the nodes already given their spans (fixSpans).
+	Fixed map[uintptr]CNode
 }
 
 // MakeCMeta builds a fresh CMeta.

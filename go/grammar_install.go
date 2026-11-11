@@ -12,19 +12,14 @@ import (
 // Grammar installation: parse the embedded jsonic-DSL grammar text into a
 // GrammarSpec, strip extension rules in plain-C mode, bind the @-named ref
 // map (real handlers from makeGrammarRefs, typed no-op stubs for any not yet
-// ported), and install it. Mirrors the parseGrammar + jsonic.grammar() flow
-// in c.ts.
+// ported), give it the armed fallback (withFallback), and install it.
+// Mirrors the parseGrammar + jsonic.grammar() flow in c.ts.
 
 // extensionRules are stripped from the spec in plain-C (!extended) mode.
 var extensionRules = []string{
 	// GCC inline assembly
 	"asm_statement", "asm_template", "asm_section",
 	"asm_operand", "asm_clobber", "asm_label_ref",
-	// Preprocessor
-	"preprocessor_line", "preprocessor_directive",
-	"define_directive", "macro_parameter_list", "macro_body",
-	"undef_directive", "include_directive", "header_form",
-	"conditional_directive", "simple_directive",
 	// Compiler-specific attribute spec syntax
 	"attribute_spec_gcc", "attribute_spec_msvc",
 }
@@ -55,12 +50,13 @@ func installGrammar(j *tabnas.Tabnas, opts COptions) error {
 		}
 	}
 
-	rules := convertRules(ruleMapRaw)
-
-	// Collect @refs referenced in alt c:/a: fields and build the ref map:
-	// real handlers where ported, typed no-op stubs otherwise.
+	// Build the ref map, give the rules below external_declaration the
+	// armed fallback (fallback.go), and convert the rules.
 	ref := makeGrammarRefs(opts)
 	scanAndStubRefs(ruleMapRaw, ref)
+	withFallback(ruleMapRaw, ref)
+	scanAndStubRefs(ruleMapRaw, ref)
+	rules := convertRules(ruleMapRaw)
 
 	gs := &tabnas.GrammarSpec{Rule: rules, Ref: ref}
 	return j.Grammar(gs)

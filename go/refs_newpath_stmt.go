@@ -39,8 +39,18 @@ func registerStatementRefs(
 			childNode(r) == nil {
 			return
 		}
-		if childNode(r) != nil {
-			r.Node = childNode(r)
+		if cn := childNode(r); cn != nil {
+			// A `#` line in a body is its directive's node, as at the top
+			// level an external declaration holds it.
+			if childName(r) == "preprocessor_directive" {
+				if kids := kidsOf(cn); len(kids) > 0 {
+					if first, ok := kids[0].(CNode); ok && first != nil {
+						r.Node = first
+						return
+					}
+				}
+			}
+			r.Node = cn
 		}
 	})
 	action("@stmt-empty", func(r *tabnas.Rule, _ *tabnas.Context) {
@@ -55,10 +65,9 @@ func registerStatementRefs(
 	})
 	action("@es-take-expr", func(_ *tabnas.Rule, _ *tabnas.Context) {})
 	state("@expression_statement-bc", func(r *tabnas.Rule, _ *tabnas.Context) {
-		if childName(r) == "val" && childNode(r) != nil &&
-			!sameNode(childNode(r), ruleNode(r)) && !kBool(r, "exprAttached") {
+		if childIsExpr(r) && !sameNode(childNode(r), ruleNode(r)) && !uBool(r, "exprAttached") {
 			pushKids(ruleNode(r), childNode(r))
-			r.K["exprAttached"] = true
+			r.U["exprAttached"] = true
 		}
 	})
 	action("@es-finalize", func(r *tabnas.Rule, _ *tabnas.Context) {
@@ -96,7 +105,7 @@ func registerStatementRefs(
 		r.K["tookExpr"] = true
 	})
 	state("@jump_statement-bc", func(r *tabnas.Rule, _ *tabnas.Context) {
-		if childName(r) == "val" && childNode(r) != nil &&
+		if childIsExpr(r) &&
 			!sameNode(childNode(r), ruleNode(r)) && kBool(r, "tookExpr") && !kBool(r, "exprAttached") {
 			pushKids(ruleNode(r), childNode(r))
 			r.K["exprAttached"] = true
@@ -115,10 +124,9 @@ func registerStatementRefs(
 	})
 	action("@pc-take-expr", func(_ *tabnas.Rule, _ *tabnas.Context) {})
 	state("@paren_condition-bc", func(r *tabnas.Rule, _ *tabnas.Context) {
-		if childName(r) == "val" && childNode(r) != nil &&
-			!sameNode(childNode(r), ruleNode(r)) && !kBool(r, "exprAttached") {
+		if childIsExpr(r) && !sameNode(childNode(r), ruleNode(r)) && !uBool(r, "exprAttached") {
 			pushKids(ruleNode(r), childNode(r))
-			r.K["exprAttached"] = true
+			r.U["exprAttached"] = true
 		}
 	})
 	action("@pc-close", func(r *tabnas.Rule, _ *tabnas.Context) {
@@ -160,9 +168,6 @@ func registerControlFlowRefs(
 	action("@if-take-else-kw", func(r *tabnas.Rule, _ *tabnas.Context) {
 		pushTokenWithTrivia(ruleNode(r), r.C0)
 		r.K["elseSeen"] = true
-	})
-	cond("@if-needs-else-body", func(r *tabnas.Rule, _ *tabnas.Context) bool {
-		return kBool(r, "elseSeen") && !kBool(r, "tookElse")
 	})
 	state("@if_statement-bc", func(r *tabnas.Rule, _ *tabnas.Context) {
 		if childNode(r) == nil {
@@ -245,8 +250,8 @@ func registerControlFlowRefs(
 		pushTokenWithTrivia(ruleNode(r), r.C0)
 		r.K["tookWhile"] = true
 	})
-	cond("@do-needs-cond", func(r *tabnas.Rule, _ *tabnas.Context) bool {
-		return kBool(r, "tookWhile") && !kBool(r, "tookCond")
+	cond("@do-no-while", func(r *tabnas.Rule, _ *tabnas.Context) bool {
+		return kBool(r, "tookBody") && !kBool(r, "tookWhile")
 	})
 	cond("@do-needs-semi", func(r *tabnas.Rule, _ *tabnas.Context) bool {
 		return kBool(r, "tookCond") && !kBool(r, "tookSemi")
@@ -376,21 +381,18 @@ func registerControlFlowRefs(
 			if !kBool(r, "tookInit") {
 				node := ruleNode(r)
 				pushKids(node, cn)
-				node["init"] = cn
 				r.K["tookInit"] = true
 			}
 		case "for_cond":
 			if !kBool(r, "tookCond") {
 				node := ruleNode(r)
 				pushKids(node, cn)
-				node["cond"] = cn
 				r.K["tookCond"] = true
 			}
 		case "for_iter":
 			if !kBool(r, "tookIter") {
 				node := ruleNode(r)
 				pushKids(node, cn)
-				node["iter"] = cn
 				r.K["tookIter"] = true
 			}
 		}
@@ -425,11 +427,9 @@ func registerControlFlowRefs(
 		if kStr(r, "took") == "decl" && childName(r) == "simple_declaration" &&
 			node["value"] == nil {
 			pushKids(node, cn)
-			node["value"] = cn
-		} else if kStr(r, "took") == "expr" && childName(r) == "val" &&
+		} else if kStr(r, "took") == "expr" && isExpressionRule(r.Child) &&
 			!sameNode(cn, node) && node["value"] == nil {
 			pushKids(node, cn)
-			node["value"] = cn
 		}
 	})
 
@@ -458,10 +458,9 @@ func registerControlFlowRefs(
 			return
 		}
 		node := ruleNode(r)
-		if kStr(r, "took") == "expr" && childName(r) == "val" &&
+		if kStr(r, "took") == "expr" && isExpressionRule(r.Child) &&
 			!sameNode(cn, node) && node["value"] == nil {
 			pushKids(node, cn)
-			node["value"] = cn
 		}
 	})
 
@@ -480,67 +479,65 @@ func registerControlFlowRefs(
 			return
 		}
 		node := ruleNode(r)
-		if kStr(r, "took") == "expr" && childName(r) == "val" &&
+		if kStr(r, "took") == "expr" && isExpressionRule(r.Child) &&
 			!sameNode(cn, node) && node["value"] == nil {
 			pushKids(node, cn)
-			node["value"] = cn
 		}
 	})
 
 	// ---- labeled_statement ----
+	// A label's statement may be another label: each has its own node, and
+	// its state is its own (U, which a child does not inherit).
 	state("@labeled_statement-bo", func(r *tabnas.Rule, _ *tabnas.Context) {
-		if n := ruleNode(r); n != nil && n["kind"] == "labeled_statement" {
-			return
-		}
 		r.Node = makeNode("labeled_statement", nil)
 	})
 	action("@lbl-take-case", func(r *tabnas.Rule, _ *tabnas.Context) {
 		node := ruleNode(r)
 		node["labelKind"] = "case"
 		pushTokenWithTrivia(node, r.O0)
-		r.K["kind"] = "case"
+		r.U["kind"] = "case"
 	})
 	action("@lbl-take-default", func(r *tabnas.Rule, _ *tabnas.Context) {
 		node := ruleNode(r)
 		node["labelKind"] = "default"
 		pushTokenWithTrivia(node, r.O0)
-		r.K["kind"] = "default"
+		r.U["kind"] = "default"
 	})
 	action("@lbl-take-name", func(r *tabnas.Rule, _ *tabnas.Context) {
 		node := ruleNode(r)
 		node["labelKind"] = "label"
 		node["labelName"] = r.O0.Src
 		pushTokenWithTrivia(node, r.O0)
-		r.K["kind"] = "label"
+		r.U["kind"] = "label"
 	})
 	cond("@lbl-needs-expr", func(r *tabnas.Rule, _ *tabnas.Context) bool {
-		return kStr(r, "kind") == "case" && !kBool(r, "tookExpr")
+		return uStr(r, "kind") == "case" && !uBool(r, "tookExpr")
 	})
-	action("@lbl-mark-expr", func(r *tabnas.Rule, _ *tabnas.Context) { r.K["tookExpr"] = true })
+	action("@lbl-mark-expr", func(r *tabnas.Rule, _ *tabnas.Context) { r.U["tookExpr"] = true })
 	cond("@lbl-needs-colon", func(r *tabnas.Rule, _ *tabnas.Context) bool {
-		return !kBool(r, "tookColon")
+		return !uBool(r, "tookColon")
+	})
+	cond("@lbl-may-end", func(r *tabnas.Rule, _ *tabnas.Context) bool {
+		return uStr(r, "kind") != "case" || uBool(r, "tookColon")
 	})
 	action("@lbl-take-colon", func(r *tabnas.Rule, _ *tabnas.Context) {
 		pushTokenWithTrivia(ruleNode(r), r.C0)
-		r.K["tookColon"] = true
-	})
-	cond("@lbl-needs-body", func(r *tabnas.Rule, _ *tabnas.Context) bool {
-		return kBool(r, "tookColon") && !kBool(r, "tookBody")
+		r.U["tookColon"] = true
 	})
 	state("@labeled_statement-bc", func(r *tabnas.Rule, _ *tabnas.Context) {
 		cn := childNode(r)
 		if cn == nil {
 			return
 		}
-		if kStr(r, "kind") == "case" && childName(r) == "val" &&
-			!sameNode(cn, ruleNode(r)) && !kBool(r, "exprAttached") {
+		if uStr(r, "kind") == "case" && isExpressionRule(r.Child) &&
+			!sameNode(cn, ruleNode(r)) && !uBool(r, "exprAttached") {
 			pushKids(ruleNode(r), cn)
-			r.K["exprAttached"] = true
+			r.U["exprAttached"] = true
 			return
 		}
-		if childName(r) == "statement" && !kBool(r, "tookBody") {
+		if childName(r) == "statement" && !uBool(r, "tookBody") {
 			pushKids(ruleNode(r), cn)
-			r.K["tookBody"] = true
+			r.U["tookBody"] = true
 		}
 	})
 }

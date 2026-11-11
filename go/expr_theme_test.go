@@ -63,7 +63,7 @@ func TestExprCastWithTypedefName(t *testing.T) {
 		t.Fatal("no function_definition")
 	}
 	cast := mustFind(t, fn, "cast_expression")
-	if cast["typeName"] == nil {
+	if Member(cast, "typeName") == nil {
 		t.Error("cast_expression has no typeName")
 	}
 	op := field(cast, "operand")

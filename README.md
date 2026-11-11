@@ -427,15 +427,14 @@ hybrid:
 
 ## Go port
 
-A complete Go port lives under [`go/`](go/). It builds 0.5's tree until it
-moves to the rules (see [`docs/rules.md`](docs/rules.md), "Order"). The whole
-TypeScript parser of 0.5 is
-hand-translated: the lexer, the `@tabnas/expr`-driven expression layer, the
-grammar install, the conditional-group post-pass, the top-level chomp +
-preprocessor directives, the new-path structured dispatch (declarations,
-declarators, struct/union/enum, initializers, statements), and the legacy
-recursive-descent structurer. `tabnasc.Parse(src)` / `tabnasc.MakeC()` parse C
-into structured concrete-syntax trees with typedef/macro tracking.
+A complete Go port lives under [`go/`](go/). It builds the same tree as
+TypeScript, with the same rules: the lexer, the grammar install, C's
+expression rules, the conditional groups, the external declarations with
+the armed fallback, the preprocessor directives, and the declarations,
+declarators, struct/union/enum, initializers and statements, all
+hand-translated. `tabnasc.Parse(src)` / `tabnasc.MakeC()` parse C into
+structured concrete-syntax trees with typedef/macro tracking, and
+`tabnasc.Member(node, name)` gives back a node's members.
 
 ```go
 import tabnasc "github.com/tabnas/c/go"
@@ -448,9 +447,7 @@ cst, _ := tabnasc.Parse(`int f(int a){ return a + 1; }`, map[string]any{"extende
 against the TypeScript golden fixtures (the same `.json.gz` set the TS suite
 uses). The Go port builds against the published modules `go/go.mod`
 requires; a `go.work` over sibling `@tabnas` checkouts (see the CI note in
-[`AGENTS.md`](AGENTS.md)) is only for testing unreleased ones. One optional
-upstream `@tabnas/expr` sort fix makes the synthetic start=`val` precedence
-unit test deterministic (corpus parity holds without it).
+[`AGENTS.md`](AGENTS.md)) is only for testing unreleased ones.
 
 ## Rust port
 
