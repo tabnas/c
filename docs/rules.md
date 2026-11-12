@@ -137,41 +137,46 @@ rules read it as plain mode always has: a declarator list that starts
 with a comma, two declarations with no `;` between, a `__declspec(` with
 no `)`.
 
-## Expressions are C's rules
+## Expressions are read by expr
 
-C's expressions are C's own rules, written as precedence climbing, the
-algorithm `expr.ts` implemented, in `ts/src/expression.ts` and the
-grammar's "expressions" section:
+C reads its expressions with `@tabnas/expr` (0.6.1 or later), in every
+runtime: the maintainer ruled that C uses expr, and that expr is fixed
+where it falls short of C. `ts/src/expr-grammar.ts` installs it over
+C's grammar with C's operator table and the options expr has for a
+language like C (expr's `ts/doc/reference.md`):
 
-- `expression` (the comma operator) is a replace loop of
-  `assignment_expression`s; `assignment_expression` is a
-  `conditional_expression` and, on an assignment operator, an
-  `assignment_expression` (right-associative, so its nesting is the
-  tree's); `conditional_expression` is a `binary` and, on `?`, an
-  `expression`, `:` and a `conditional_expression`.
-- `binary` takes a cast expression and, while the next operator binds at
-  least as tightly as its level (`k.min`), wraps what it has in a
-  `binary_expression` and replaces itself with `binary_rhs`, which pushes
-  a `binary` one level tighter for the right operand: a left-associative
-  chain is one replace loop at one depth.
-- `cast_expression` is `( type-name )` and a cast expression, or a
-  compound literal, or a unary expression; `unary_expression` is a prefix
-  operator and a cast expression, `sizeof` or `_Alignof`, or a postfix
-  expression; `postfix_expression` is a primary expression and a replace
-  loop of `[ ]`, `( )`, `.`, `->`, `++` and `--`.
+- a binding power on a call's and a subscript's parenthesis, so
+  `a.b[1]` subscripts `a.b` and `a.b(1)` calls it;
+- a cast at the unary level, accepted where the group holds a type name;
+- the comma operator beside separators: a call's arguments are a
+  separated list, and so is every context but an expression statement,
+  a `return`, a condition, a `for`'s controls and an asm operand's value
+  (`n.expr_sep`);
+- `juxtapose: false`, with C's identifiers and literals as expr's
+  `values`, so values side by side are refused wherever they stand;
+- a required content, so `()` and `a[]` are refused;
+- the conditional as a ternary with binding powers between assignment
+  and `||`, so `x = a ? b : c` is `x = (a ? b : c)`.
 
-Each context pushes the level C's grammar names: an initializer, an
-argument, a `static_assert` operand and a brace-list item are assignment
-expressions; a case label, a bit-field width, an enumerator's value and
-an array size are conditional expressions. `val` stays as the rule an
-expression starts from (the fixtures that parse an expression on its own
-start there), cleared of jsonic's alternates. An operand is never
-directly followed by an identifier or a literal in C, and there no
-alternate of `binary` matches (`#JUXTAPOSED`). An expression in
-parentheses, a call's arguments and a subscript end with their `)` or
-`]`, and a conditional with its `:` and its third operand: nothing else
-ends them. C no longer installs `@tabnas/expr`; removing the dependency
-is the maintainer's to decide.
+A context pushes `val` where C's grammar names an expression, and
+expr's evaluate callback builds C's node for each operation, from the
+root down once the expression has ended, with the shapes the tree had:
+an operator is `op`, a call drops its parentheses and commas, and a
+dropped token's comments stay as the node's children at its place. The
+tokens expr does not hand over with an operation (a paren's opener, a
+call's commas, a conditional's `:`) are reached through links the
+sub-lex hook makes as the tokens are lexed. A cast whose operand starts
+with a brace list is a compound literal, which the postfix operators
+after it apply to. `sizeof ( type )`, `_Generic`, GCC statement
+expressions, brace lists and adjacent strings are C's rules, which
+`val` opens. The armed fallback covers the rules expr reads with, its
+own and jsonic's.
+
+An expression in parentheses, a call's arguments and a subscript end
+with their `)` or `]`, and a conditional with its `:` and its third
+operand: nothing else ends them. Each expression is evaluated into C's
+nodes iteratively, so a chain of 10,000 operators adds no depth to the
+call stack, and its rules repeat by replacement (`ts/test/repeat.test.ts`).
 
 ## Conditional groups are rules
 
@@ -335,8 +340,15 @@ With the TypeScript reader of this change against 0.5.15:
   typedef name, which C before C99 read as an implicit `int`, and the
   rest are malformed (`int add( a, int b)`, a label with no `:`).
 
-What 0.6 accepts or refuses otherwise is the maintainer's to decide, and
-was asked: valid C that 0.5 refuses only by its rule path's defects (a
+Reading the expressions with expr (above) in place of C's own expression
+rules, which this change first wrote, left every tree and every answer
+the same, over the fixtures, the Csmith programs, both sweeps in both
+modes and the real-world files: of the documents refused, 212 are
+refused at another token, in each case the one 0.5 refuses at (`s.;` at
+the `;`, as 0.5 does, where C's own rules refused at the `.`).
+
+The maintainer approved the two changes to what is accepted or refused:
+valid C that 0.5 refuses only by its rule path's defects (a
 cast of a cast, the comma operator in a condition, a `return` or an
 expression statement, a chained ternary, `static inline` and every
 order or repetition of the declaration specifiers, an assignment as a
@@ -347,7 +359,8 @@ call's arguments, a `for`'s controls, a `static_assert`'s condition or
 an initializer), an empty subscript (`a[]`), empty parentheses (`()`,
 `sizeof()`), or its rules' lenient endings (a designator with no name or
 no `]`, `{ . = 1 }` and `{ [4 = 50 }`, and a `static_assert` with no `)`
-or no `;`) is refused.
+or no `;`) is refused. `test/spec/unfinished.tsv` and the rows beside it
+pin both.
 
 ## The part
 

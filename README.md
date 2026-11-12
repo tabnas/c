@@ -121,14 +121,14 @@ work in both modes.
   grammar file reads as structural intent and action logic stays
   out of it.
 
-- **Expressions are C's rules** (`src/expression.ts`, the grammar's
-  "expressions" section): precedence climbing, as replace loops. A
-  binary chain is one loop at one depth, an assignment nests to the
-  right, and each context starts at the level C's grammar names (an
-  initializer is an assignment expression, an array size a conditional
-  one). Casts, compound literals, `sizeof ( type )`, `_Generic`, GCC
-  statement expressions, brace lists, and adjacent strings are rules of
-  their own.
+- **Expressions are read by `@tabnas/expr`** (`src/expr-grammar.ts`),
+  with C's operator table and expr's options for a language like C:
+  calls and subscripts bind as postfix operators, a cast is accepted
+  where its group holds a type name, a call's arguments are a separated
+  list beside the comma operator, values side by side are refused, and
+  the conditional binds between assignment and `||`. Compound literals,
+  `sizeof ( type )`, `_Generic`, GCC statement expressions, brace lists,
+  and adjacent strings are rules of their own.
 
 - **Conditional groups are rules**: a `#if`, `#ifdef`, or `#ifndef`
   line opens a `conditional_group`, whose `conditional_branch`es hold

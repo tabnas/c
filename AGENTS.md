@@ -66,11 +66,11 @@ It is a port of [`@jsonic/c`](https://github.com/jsonicjs/c) onto the
 [Tabnas](https://github.com/tabnas/parser) engine. Like `@tabnas/zon`, this
 is a **jsonic plugin**: it layers on `@tabnas/jsonic`'s relaxed-JSON grammar
 (used as the DSL the grammar file is authored in). From 0.6 the TypeScript
-reader builds every declaration and expression with its own grammar rules,
-in one path, and no longer installs
-[`@tabnas/expr`](https://github.com/tabnas/expr), which the manifests still
-list until the maintainer removes it; [`docs/rules.md`](docs/rules.md) is
-the design, and says what the Go and Rust readers build until they move.
+reader builds every declaration with its own grammar rules, in one path,
+and reads its expressions with
+[`@tabnas/expr`](https://github.com/tabnas/expr) and its options for a
+language like C; [`docs/rules.md`](docs/rules.md) is the design, and says
+what the Go and Rust readers build until they move.
 Install it on a jsonic-enabled engine:
 
 ```ts
@@ -92,7 +92,7 @@ const cst = new Tabnas().use(jsonic).use(C).parse('typedef int T; T x = 1;')
 | [`ts/c-grammar.jsonic`](ts/c-grammar.jsonic) | **Single source of truth** for the declarative grammar (rule shapes for the whole C surface), authored in jsonic-DSL syntax. |
 | [`ts/embed-grammar.js`](ts/embed-grammar.js) | Embeds `c-grammar.jsonic` into `src/c.ts` (between `BEGIN/END EMBEDDED` markers) as the `grammarText` string literal, **and** copies it verbatim to `go/c-grammar.jsonic` for `//go:embed`. The grammar contains backticks, so the Go side embeds from the file rather than inlining a raw string (unlike the smaller ports). Runs as the first half of `npm run build`. |
 | [`ts/src/c.ts`](ts/src/c.ts) | Plugin entry: token catalog wiring, lex matchers, grammar install, and the `@`-named ref map (conditions/actions bound by name from the grammar), the external declaration's dispatch and finishing (the names it binds) among them. |
-| [`ts/src/expression.ts`](ts/src/expression.ts) | C's expression rules' refs: precedence climbing as replace loops, the postfix chain, casts, calls, the juxtaposition check. |
+| [`ts/src/expr-grammar.ts`](ts/src/expr-grammar.ts) | C's expressions through `@tabnas/expr`: the operator table and its options, the evaluate callback that builds C's node for each operation, the links to the tokens an operation drops, compound literals, and the alternates `val` gains for C's own forms. |
 | [`ts/src/fallback.ts`](ts/src/fallback.ts) | The armed fallback: the token record, the chomp's end, the fence, the catch-all and bail alternates `withFallback` adds to every rule below `external_declaration`, and the local scope `asm_operand` catches a failure in. |
 | [`ts/src/node.ts`](ts/src/node.ts), [`ts/src/members.ts`](ts/src/members.ts) | The tree's node helpers (keeping and dropping a token, its comments kept either way; `fixSpans`, a node's span from its first kept token) and `member(node, name)`, the members the tree no longer holds. |
 | [`ts/src/matchers.ts`](ts/src/matchers.ts) | Focused lex matchers (whitespace, comments, directives, header names, identifiers, literals, punctuators). |
