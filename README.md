@@ -19,10 +19,9 @@ best-effort handling of preprocessor conditional groups.
 
 > Ported from [`@jsonic/c`](https://github.com/jsonicjs/c) to the
 > [Tabnas](https://github.com/tabnas/parser) engine. The plugin runs on
-> `@tabnas/parser` + `@tabnas/jsonic`, and from 0.6 every declaration and
-> expression is built by its own grammar rules
-> ([`docs/rules.md`](docs/rules.md)). It no longer installs
-> `@tabnas/expr`, which its manifest still lists.
+> `@tabnas/parser`, `@tabnas/jsonic`, and `@tabnas/expr`. From 0.6 every
+> declaration is built by its own grammar rules, and `@tabnas/expr` reads
+> every expression ([`docs/rules.md`](docs/rules.md)).
 
 ## Install
 

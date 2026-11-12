@@ -15,9 +15,9 @@ Measured 2026-09-21 by running all three: the canonical under Node
 (type-stripped `ts/src/c.ts`), the Go port through a small driver, and
 the Rust port through `cargo test`.
 
-From 0.6 the canonical builds every declaration and expression with its
-own rules ([`docs/rules.md`](docs/rules.md)), and repairs sections 1 and
-3: C's expression rules build the ternary and the initializer item as
+From 0.6 the canonical builds every declaration with its own rules and
+reads its expressions with `@tabnas/expr` ([`docs/rules.md`](docs/rules.md)),
+and repairs sections 1 and 3: the ternary and the initializer item are
 nodes. The Go and Rust ports build 0.5's tree until they move to the
 rules, reading the 0.5 copies of the fixtures, so sections 1 and 3
 describe them against 0.5's canonical, and their rows go when they move.

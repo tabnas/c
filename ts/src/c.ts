@@ -250,8 +250,8 @@ const grammarText = `
     # Recognises:
     #   <storage>? <type>+ <init_declarator> (, <init_declarator>)* ;
     # where each init_declarator is \`ID (= initializer)?\`, an initializer
-    # an assignment expression or a brace list (C's expression rules,
-    # the "expressions" section below).
+    # an assignment expression or a brace list (\`val\`, which
+    # @tabnas/expr reads: the "expressions" section below).
     simple_declaration: {
       open: [
         # Leading C23 attribute spec — plain C23.
@@ -544,7 +544,8 @@ const grammarText = `
     }
 
     # array_postfix: \`[ const-expr? ]\`
-    # The size is a conditional expression (C's expression rules).
+    # The size is a conditional expression (\`val\`, which @tabnas/expr
+    # reads).
     array_postfix: {
       open: [
         { s: 'PUNC_LBRACKET' a: '@arr-open' g: 'arr-open' }
@@ -912,8 +913,8 @@ const grammarText = `
     }
 
     # expression_statement: <expr> \`;\`
-    # Descends into expression (C's expression rules) and then takes
-    # the trailing \`;\`. Empty \`;\` is handled by statement's
+    # Descends into an expression (\`val\`, which @tabnas/expr reads) and
+    # then takes the trailing \`;\`. Empty \`;\` is handled by statement's
     # PUNC_SEMI alt before this rule is entered.
     expression_statement: {
       open: [
@@ -2629,8 +2630,8 @@ const C: any = function C(jsonic: Tabnas, options: COptions): void {
         'KW___EXTENSION__',
         'KW___ATTRIBUTE__', 'KW___ATTRIBUTE', 'KW___DECLSPEC',
       ],
-      // The operators of C's expression rules (c-grammar.jsonic,
-      // "expressions"; ts/src/expression.ts has their precedence).
+      // C's operators, as token sets (ts/src/expr-grammar.ts has their
+      // table).
       ASSIGN_OP: [
         'PUNC_ASSIGN', 'PUNC_PLUS_ASSIGN', 'PUNC_MINUS_ASSIGN',
         'PUNC_STAR_ASSIGN', 'PUNC_SLASH_ASSIGN', 'PUNC_PERCENT_ASSIGN',
