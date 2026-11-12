@@ -121,14 +121,14 @@ work in both modes.
   grammar file reads as structural intent and action logic stays
   out of it.
 
-- **Expressions are read by `@tabnas/expr`** (`src/expr-grammar.ts`),
+- **`@tabnas/expr` reads the expressions** (`src/expr-grammar.ts`),
   with C's operator table and expr's options for a language like C:
-  calls and subscripts bind as postfix operators, a cast is accepted
-  where its group holds a type name, a call's arguments are a separated
-  list beside the comma operator, values side by side are refused, and
-  the conditional binds between assignment and `||`. Compound literals,
-  `sizeof ( type )`, `_Generic`, GCC statement expressions, brace lists,
-  and adjacent strings are rules of their own.
+  calls and subscripts bind as postfix operators, a group that holds a
+  type name casts the operand after it, a call's arguments are a
+  separated list beside the comma operator, expr refuses values side by
+  side, and the conditional binds between assignment and `||`. Compound
+  literals, `sizeof ( type )`, `_Generic`, GCC statement expressions,
+  brace lists, and adjacent strings are rules of their own.
 
 - **Conditional groups are rules**: a `#if`, `#ifdef`, or `#ifndef`
   line opens a `conditional_group`, whose `conditional_branch`es hold
