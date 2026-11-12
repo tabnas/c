@@ -533,3 +533,115 @@ func wrapFallbackRef(fn any, lifecycle bool) any {
 	}
 	return fn
 }
+
+// withRuleFallback is withFallback for rules a plugin installs below the
+// grammar, whose alternates and actions are functions rather than refs:
+// expr's `val`, `expr`, `paren` and `ternary`, over which C's expressions
+// are read, and the jsonic rules expr pushes. Each state gets the bail
+// first and the catch-all last; an alternate that takes a token gets the
+// fence; an alternate's error hook, in an armed declaration, fails it
+// rather than refusing the document; and every function is guarded as a
+// ref is. Port of withRuleFallback in ts/src/fallback.ts.
+func withRuleFallback(j *tabnas.Tabnas, names []string) {
+	bailing := func(_ *tabnas.Rule, ctx *tabnas.Context) bool {
+		ed := edOf(ctx)
+		if ed == nil {
+			return false
+		}
+		sc := innermost(ed)
+		return ed.Failed || (sc != nil && sc.Failed)
+	}
+	armed := func(_ *tabnas.Rule, ctx *tabnas.Context) bool {
+		ed := edOf(ctx)
+		if ed == nil || ed.Failed {
+			return false
+		}
+		if sc := innermost(ed); sc != nil {
+			return !sc.Failed
+		}
+		return ed.Armed
+	}
+	fail := func(_ *tabnas.Rule, ctx *tabnas.Context) {
+		if ed := edOf(ctx); ed != nil {
+			if sc := innermost(ed); sc != nil {
+				sc.Failed = true
+			} else {
+				ed.Failed = true
+			}
+		}
+	}
+	guardAction := func(f tabnas.AltAction) tabnas.AltAction {
+		return wrapFallbackRef(f, false).(tabnas.AltAction)
+	}
+	guardCond := func(f tabnas.AltCond) tabnas.AltCond {
+		return wrapFallbackRef(f, false).(tabnas.AltCond)
+	}
+	for _, name := range names {
+		j.Rule(name, func(rs *tabnas.RuleSpec, _ *tabnas.Parser) {
+			for _, alts := range [][]*tabnas.AltSpec{rs.OpenAlts(), rs.CloseAlts()} {
+				for _, alt := range alts {
+					if alt == nil {
+						continue
+					}
+					if alt.A != nil {
+						alt.A = guardAction(alt.A)
+					}
+					if alt.H != nil {
+						h := alt.H
+						alt.H = func(a *tabnas.AltSpec, r *tabnas.Rule, ctx *tabnas.Context) (out *tabnas.AltSpec) {
+							ed, sc, skip, guarded := fallbackGuard(ctx, false)
+							if skip {
+								return a
+							}
+							if guarded {
+								defer failOnPanic(ed, sc)
+							}
+							return h(a, r, ctx)
+						}
+					}
+					var cond tabnas.AltCond
+					if alt.C != nil {
+						cond = guardCond(alt.C)
+					}
+					if len(alt.S)-alt.B > 0 {
+						inner := cond
+						alt.C = func(r *tabnas.Rule, ctx *tabnas.Context) bool {
+							if fenced(ctx) {
+								return false
+							}
+							return inner == nil || inner(r, ctx)
+						}
+					} else if cond != nil {
+						alt.C = cond
+					}
+					if alt.E != nil {
+						ef := alt.E
+						alt.E = func(r *tabnas.Rule, ctx *tabnas.Context) *tabnas.Token {
+							if armed(r, ctx) {
+								fail(r, ctx)
+								return nil
+							}
+							return ef(r, ctx)
+						}
+					}
+				}
+			}
+			if len(rs.OpenAlts()) > 0 {
+				rs.PrependOpen(&tabnas.AltSpec{C: bailing, G: "c-bail"})
+				rs.AddOpen(&tabnas.AltSpec{C: armed, A: fail, G: "c-fail"})
+			}
+			if len(rs.CloseAlts()) > 0 {
+				rs.PrependClose(&tabnas.AltSpec{C: bailing, G: "c-bail"})
+				rs.AddClose(&tabnas.AltSpec{C: armed, A: fail, G: "c-fail"})
+			}
+			for _, phase := range []string{"bo", "ao", "bc", "ac"} {
+				acts := rs.Actions(phase)
+				for i, act := range acts {
+					if act != nil {
+						acts[i] = wrapFallbackRef(act, true).(tabnas.StateAction)
+					}
+				}
+			}
+		})
+	}
+}

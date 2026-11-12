@@ -218,6 +218,9 @@ type CMeta struct {
 	ED      *ExtDecl
 	// Fixed records the nodes already given their spans (fixSpans).
 	Fixed map[uintptr]CNode
+	// Links is the state of the links between an expression's tokens
+	// (expr_grammar.go).
+	Links *LinkState
 }
 
 // MakeCMeta builds a fresh CMeta.

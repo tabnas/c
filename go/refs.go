@@ -70,9 +70,6 @@ func makeGrammarRefs(opts COptions) map[tabnas.FuncRef]any {
 			a.SI+len(a.Src) == b.SI
 	})
 
-	// --- expressions (expression.go) -------------------------------------
-	registerExpressionRefs(regFns{cond: cond, action: action, state: state})
-
 	// --- translation_unit -------------------------------------------------
 	state("@translation_unit-bo", func(r *tabnas.Rule, _ *tabnas.Context) {
 		r.Node = makeNode("translation_unit", nil)

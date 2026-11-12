@@ -301,6 +301,7 @@ func C(j *tabnas.Tabnas, opts map[string]any) error {
 						m.RecBase = 0
 						m.ED = nil
 						m.Fixed = map[uintptr]CNode{}
+						m.Links = newLinks()
 					}
 				},
 			},
@@ -333,21 +334,34 @@ func C(j *tabnas.Tabnas, opts map[string]any) error {
 			m.PendingTrivia = nil
 		}
 		// The tokens the parser takes, in order, for the armed fallback
-		// (fallback.go).
+		// (fallback.go), and the links between an expression's tokens
+		// (expr_grammar.go).
 		if tkn.Name != "#ZZ" {
 			recordToken(m, tkn)
+			if m.Links == nil {
+				m.Links = newLinks()
+			}
+			linkToken(m.Links, tkn)
 		}
 	}, nil)
 
-	// 5. C's expressions start from a rule named `val`, as jsonic's do.
-	//    Clear jsonic's, alternates and actions both, so that C's is the
-	//    only one. Then parse and install the embedded grammar with the
-	//    @-ref map and the armed fallback (fallback.go), stripping the
-	//    extension rules in plain-C mode.
+	// 5. C's expressions are read by @tabnas/expr, from the rule named
+	//    `val` that jsonic's grammar has too. Clear jsonic's, alternates and
+	//    actions both, so that expr's and C's are the only ones. Then parse
+	//    and install the embedded grammar with the @-ref map and the armed
+	//    fallback (fallback.go), stripping the extension rules in plain-C
+	//    mode, and install expr over it (expr_grammar.go).
 	j.Rule("val", func(rs *tabnas.RuleSpec, _ *tabnas.Parser) { rs.Clear() })
 	if err := installGrammar(j, copts); err != nil {
 		return err
 	}
+	if err := installExpr(j); err != nil {
+		return err
+	}
+	// The rules expr reads an expression with, its own and the jsonic ones
+	// it pushes (an implicit list inside a paren), are below every external
+	// declaration too.
+	withRuleFallback(j, []string{"val", "expr", "paren", "ternary", "list", "elem", "map", "pair"})
 
 	return nil
 }

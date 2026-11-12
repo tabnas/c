@@ -185,6 +185,16 @@ func fixSpans(node CNode, parent map[string]any, fixed map[uintptr]CNode) {
 	}
 }
 
+// unfixSpan forgets that a node was given its span, so the next fixSpans
+// over a tree holding it gives it one again: a node that an evaluation
+// built and a later one extended (a comma expression, a compound literal's
+// postfix chain).
+func unfixSpan(ctx *tabnas.Context, node CNode) {
+	if m := ctxCMeta(ctx); m != nil && m.Fixed != nil && node != nil {
+		delete(m.Fixed, nodeID(node))
+	}
+}
+
 // fixSpansIn runs fixSpans with the parse's record of the nodes already
 // given their spans.
 func fixSpansIn(ctx *tabnas.Context, node CNode) {

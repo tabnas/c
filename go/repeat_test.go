@@ -46,7 +46,7 @@ func TestRepetitionIsReplacement(t *testing.T) {
 		{"init declarators", func(n int) string { return "int a" + rep(", a", n-1) + ";" }, false},
 		{"specifiers", func(n int) string { return rep("const ", n) + "int x;" }, false},
 		{"a binary chain", func(n int) string { return "int x = a" + rep(" + a", n) + ";" }, false},
-		{"a comma expression", func(n int) string { return "void f(void) { a" + rep(", a", n-1) + "; }" }, false},
+		{"a comma expression", func(n int) string { return "void f(void) { a" + rep(", a", n) + "; }" }, false},
 		{"arguments", func(n int) string { return "int x = f(a" + rep(", a", n-1) + ");" }, false},
 		{"a postfix chain", func(n int) string { return "int x = a" + rep("[0]", n) + ";" }, false},
 		{"member accesses", func(n int) string { return "int x = a" + rep(".b", n) + ";" }, false},
