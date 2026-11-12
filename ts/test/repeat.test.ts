@@ -32,7 +32,7 @@ const CASES: Array<[string, (n: number) => string, boolean?]> = [
   ['init declarators', (n) => 'int a' + ', a'.repeat(n - 1) + ';'],
   ['specifiers', (n) => 'const '.repeat(n) + 'int x;'],
   ['a binary chain', (n) => 'int x = a' + ' + a'.repeat(n) + ';'],
-  ['a comma expression', (n) => 'void f(void) { a' + ', a'.repeat(n - 1) + '; }'],
+  ['a comma expression', (n) => 'void f(void) { a' + ', a'.repeat(n) + '; }'],
   ['arguments', (n) => 'int x = f(a' + ', a'.repeat(n - 1) + ');'],
   ['a postfix chain', (n) => 'int x = a' + '[0]'.repeat(n) + ';'],
   ['member accesses', (n) => 'int x = a' + '.b'.repeat(n) + ';'],

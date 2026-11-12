@@ -121,9 +121,16 @@ export function fixSpans(node: CNode, parent?: Span): void {
     if ((n as any)[FIXED]) continue
     const f = first.get(n)
     n.span = f ? { ...f } : { ...p }
-    Object.defineProperty(n, FIXED, { value: true, enumerable: false })
+    Object.defineProperty(n, FIXED, { value: true, enumerable: false, configurable: true })
     for (const c of n.children) if (isNode(c)) todo.push([c, n.span])
   }
 }
 
 const FIXED = Symbol('spans')
+
+// A node given its span whose children change after (an expression's
+// node that a later operation of the same expression extends) is given
+// its span again by the next fixSpans over it.
+export function unfixSpan(node: CNode): void {
+  delete (node as any)[FIXED]
+}

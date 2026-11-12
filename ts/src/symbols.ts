@@ -167,6 +167,8 @@ export interface CMeta {
   recBase?: number
   // The current external declaration's state (ts/src/fallback.ts).
   ed?: ExtDecl
+  // The links between an expression's tokens (ts/src/expr-grammar.ts).
+  links?: any
 }
 
 export function makeCMeta(): CMeta {

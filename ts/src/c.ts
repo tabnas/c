@@ -34,11 +34,11 @@ import {
   PUNCTUATORS,
   keywordTokenName,
 } from './tokens.js'
-import { makeExpressionRefs, isExpressionRule } from './expression.js'
+import { installExpr, isExpressionRule, linkToken, newLinks } from './expr-grammar.js'
 import { fixSpans } from './node.js'
 import {
-  withFallback, recordToken, startDeclaration, takenTokens, chompEnded,
-  edOf, openLocal, closeLocal, tokensSince, bracketDepth,
+  withFallback, withRuleFallback, recordToken, startDeclaration, takenTokens,
+  chompEnded, edOf, openLocal, closeLocal, tokensSince, bracketDepth,
 } from './fallback.js'
 
 // --- BEGIN EMBEDDED c-grammar.jsonic ---
@@ -428,7 +428,7 @@ const grammarText = `
       ]
       close: [
         { s: 'PUNC_RPAREN' a: '@bip-take-rparen' g: 'bip-rparen' }
-        { p: 'assignment_expression' a: '@bip-mark-val' g: 'bip-val' }
+        { p: 'val' a: '@bip-mark-val' g: 'bip-val' }
       ]
     }
 
@@ -509,7 +509,7 @@ const grammarText = `
     initializer: {
       open: [
         { s: 'PUNC_LBRACE' b: 1 p: 'initializer_list' g: 'init-brace' }
-        { p: 'assignment_expression' g: 'init-expr' }
+        { p: 'val' g: 'init-expr' }
       ]
       close: [
         { s: [] g: 'init-end' }
@@ -565,7 +565,7 @@ const grammarText = `
         { s: 'KW__ATOMIC' b: 1 p: 'array_qualifier_loop' g: 'arr-q-atomic' }
         { s: 'PUNC_STAR PUNC_RBRACKET' b: 2 p: 'array_qualifier_loop'
           g: 'arr-q-star' }
-        { p: 'assignment_expression' g: 'arr-size' }
+        { p: 'val' g: 'arr-size' }
       ]
     }
 
@@ -917,7 +917,7 @@ const grammarText = `
     # PUNC_SEMI alt before this rule is entered.
     expression_statement: {
       open: [
-        { p: 'expression' a: '@es-take-expr' g: 'es-expr' }
+        { p: 'val' a: '@es-take-expr' g: 'es-expr' }
       ]
       close: [
         { s: 'PUNC_SEMI' a: '@es-finalize' g: 'es-end' }
@@ -945,7 +945,7 @@ const grammarText = `
         { s: 'PUNC_SEMI' a: '@js-finalize' g: 'js-end' }
         { c: '@js-needs-label' s: 'ID' a: '@js-take-label'
           r: 'jump_statement' g: 'js-take-label' }
-        { c: '@js-needs-expr' p: 'expression' a: '@js-take-expr' g: 'js-take-expr' }
+        { c: '@js-needs-expr' p: 'val' a: '@js-take-expr' g: 'js-take-expr' }
       ]
     }
 
@@ -959,7 +959,7 @@ const grammarText = `
       ]
       close: [
         { s: 'PUNC_RPAREN' a: '@pc-close' g: 'pc-end' }
-        { p: 'expression' a: '@pc-take-expr' g: 'pc-expr' }
+        { p: 'val' a: '@pc-take-expr' g: 'pc-expr' }
       ]
     }
 
@@ -1083,7 +1083,7 @@ const grammarText = `
         { s: '#SIMPLE_TYPE_HEAD' b: 1 p: 'simple_declaration'
           a: '@fi-mark-decl' g: 'fi-decl-type' }
         # Expression init: take expression then \`;\`
-        { p: 'expression' a: '@fi-mark-expr' g: 'fi-expr' }
+        { p: 'val' a: '@fi-mark-expr' g: 'fi-expr' }
       ]
       close: [
         { c: '@fi-needs-semi' s: 'PUNC_SEMI' a: '@fi-take-semi' g: 'fi-semi' }
@@ -1096,7 +1096,7 @@ const grammarText = `
         # Empty cond: bare \`;\`
         { s: 'PUNC_SEMI' a: '@fcond-empty-take-semi' g: 'fcond-empty' }
         # Expression cond: take expression then \`;\`
-        { p: 'expression' a: '@fcond-mark-expr' g: 'fcond-expr' }
+        { p: 'val' a: '@fcond-mark-expr' g: 'fcond-expr' }
       ]
       close: [
         { c: '@fcond-needs-semi' s: 'PUNC_SEMI'
@@ -1110,7 +1110,7 @@ const grammarText = `
         # Empty iter: backstep the \`)\` so for_controls can take it.
         { s: 'PUNC_RPAREN' b: 1 a: '@fiter-empty' g: 'fiter-empty' }
         # Expression iter: take expression up to \`)\`.
-        { p: 'expression' a: '@fiter-mark-expr' g: 'fiter-expr' }
+        { p: 'val' a: '@fiter-mark-expr' g: 'fiter-expr' }
       ]
       close: [
         { s: [] g: 'fiter-end' }
@@ -1182,7 +1182,7 @@ const grammarText = `
     # strings).
     asm_template: {
       open: [
-        { p: 'assignment_expression' g: 'tpl-val' }
+        { p: 'val' g: 'tpl-val' }
       ]
       close: [
         { s: [] g: 'tpl-end' }
@@ -1282,7 +1282,7 @@ const grammarText = `
     # asm_value: \`( expression )\`, its parentheses kept, as a condition's.
     asm_value: {
       open: [
-        { s: 'PUNC_LPAREN' a: '@aval-open' p: 'expression' g: 'aval-open' }
+        { s: 'PUNC_LPAREN' a: '@aval-open' p: 'val' g: 'aval-open' }
       ]
       close: [
         { s: 'PUNC_RPAREN' a: '@aval-close' g: 'aval-close' }
@@ -1341,7 +1341,7 @@ const grammarText = `
         { s: 'ID' a: '@lbl-take-name' g: 'lbl-name' }
       ]
       close: [
-        { c: '@lbl-needs-expr' p: 'conditional_expression' a: '@lbl-mark-expr' g: 'lbl-expr' }
+        { c: '@lbl-needs-expr' p: 'val' a: '@lbl-mark-expr' g: 'lbl-expr' }
         # A label with no statement after it: at a block's end, or
         # before a declaration (C23). The block takes what follows.
         { c: '@lbl-needs-colon' s: 'PUNC_COLON PUNC_RBRACE' b: 1
@@ -1413,207 +1413,12 @@ const grammarText = `
 
     # ---- expressions -------------------------------------------------
     #
-    # C's expressions, as precedence climbing (ts/src/expression.ts has
-    # the actions). Each level of C's expression grammar is a rule, and
-    # each context pushes the level C's grammar names: an initializer, an
-    # argument or a brace-list item an assignment expression, an
-    # expression statement, a condition or a subscript a full expression.
-    # Every repetition is a replace loop at one depth: the items of a
-    # comma expression and of an argument list, a chain of binary
-    # operators, a chain of postfix operators. A node only a later token
-    # decides (a binary operator's after its left operand) is wrapped in
-    # place when that token arrives.
-
-    # val: the rule an expression starts from (a fixture parses a bare
-    # expression from it). jsonic, which this grammar is installed over,
-    # has a \`val\` rule too and owns its lifecycle phases (\`@val-bc/replace\`),
-    # so this one works through alternate actions alone.
-    val: {
-      open: [ { a: '@val-start' p: 'expression' g: 'val' } ]
-      close: [ { a: '@val-end' g: 'val-end' } ]
-    }
-
-    # expression: assignment expressions separated by the comma operator.
-    expression: {
-      open: [ { p: 'assignment_expression' g: 'expr-item' } ]
-      close: [
-        { s: 'PUNC_COMMA' a: '@comma' r: 'expression' g: 'expr-comma' }
-        { g: 'expr-end' }
-      ]
-    }
-
-    # assignment_expression: a conditional expression, or one followed by
-    # an assignment operator and an assignment expression (right
-    # associative, so its nesting is the tree's).
-    assignment_expression: {
-      open: [ { p: 'conditional_expression' g: 'asg-lhs' } ]
-      close: [
-        { c: '@asg-done' g: 'asg-end' }
-        { s: '#ASSIGN_OP' a: '@assign' p: 'assignment_expression'
-          g: 'asg-op' }
-        { g: 'asg-none' }
-      ]
-    }
-
-    # conditional_expression: a binary expression, or one followed by
-    # \`? expression : conditional-expression\`.
-    conditional_expression: {
-      open: [ { p: 'binary' k: { min: 0 } g: 'cond-test' } ]
-      close: [
-        { c: '@cond-done' g: 'cond-end' }
-        { s: 'PUNC_QUESTION' c: '@cond-at-test' a: '@cond-q'
-          p: 'expression' g: 'cond-then' }
-        { s: 'PUNC_COLON' c: '@cond-at-then' a: '@cond-colon'
-          p: 'conditional_expression' g: 'cond-else' }
-        # No \`?\`: the binary expression is the whole of it. After a \`?\`
-        # the \`:\` and the third operand are due, and nothing else ends it.
-        { c: '@cond-at-test' g: 'cond-none' }
-      ]
-    }
-
-    # binary, binary_rhs: the binary operators by precedence climbing.
-    # \`binary\` takes an operand; while the next operator binds at least
-    # as tightly as its level (k.min), it wraps what it has and replaces
-    # itself with binary_rhs, which pushes a \`binary\` one level tighter
-    # for the right operand. A left-associative chain is one replace loop.
-    # An operand is never directly followed by an identifier or a
-    # literal in C: there the operand does not end, and no alternate
-    # matches (#JUXTAPOSED, @not-juxtaposed).
-    binary: {
-      open: [ { p: 'cast_expression' g: 'bin-operand' } ]
-      close: [
-        { s: '#BINARY_OP' c: '@bin-binds' a: '@bin-op' r: 'binary_rhs'
-          g: 'bin-op' }
-        { c: '@not-juxtaposed' g: 'bin-end' }
-      ]
-    }
-    binary_rhs: {
-      open: [ { p: 'binary' g: 'bin-rhs' } ]
-      close: [
-        { s: '#BINARY_OP' c: '@bin-binds' a: '@bin-op' r: 'binary_rhs'
-          g: 'bin-op' }
-        { c: '@not-juxtaposed' g: 'bin-end' }
-      ]
-    }
-
-    # cast_expression: \`( type-name )\` and a cast expression, a compound
-    # literal (which a postfix chain may follow), or a unary expression.
-    cast_expression: {
-      open: [
-        { s: 'PUNC_LPAREN #SIMPLE_TYPE_HEAD' b: 2
-          p: 'cast_or_compound_literal' g: 'cast-paren' }
-        { p: 'unary_expression' g: 'cast-unary' }
-      ]
-      close: [
-        { c: '@cast-was-cl' r: 'postfix_more' g: 'cast-cl-postfix' }
-        { g: 'cast-end' }
-      ]
-    }
-
-    # cast_or_compound_literal: \`( type-name )\`, then \`{\` begins a
-    # compound literal's initializer list and anything else a cast's
-    # operand. The \`)\` and the next token decide which, in one alternate.
-    cast_or_compound_literal: {
-      open: [
-        { s: 'PUNC_LPAREN' a: '@cocl-open' p: 'type_name' g: 'cocl-open' }
-      ]
-      close: [
-        { c: '@cocl-done' g: 'cocl-end' }
-        { s: 'PUNC_RPAREN PUNC_LBRACE' b: 1 a: '@cocl-cl'
-          p: 'initializer_list' g: 'cocl-cl' }
-        { s: 'PUNC_RPAREN' a: '@cocl-cast' p: 'cast_expression'
-          g: 'cocl-cast' }
-      ]
-    }
-
-    # unary_expression: \`sizeof ( type-name )\` and its kin, a prefix
-    # operator and its operand, or a postfix expression.
-    unary_expression: {
-      open: [
-        { s: '#SIZEOF_KW PUNC_LPAREN #SIMPLE_TYPE_HEAD' b: 3
-          p: 'sizeof_type_form' g: 'un-sizeof-type' }
-        { s: '#INCDEC' a: '@prefix' p: 'unary_expression' g: 'un-incdec' }
-        { s: '#SIZEOF_KW' a: '@prefix' p: 'unary_expression' g: 'un-sizeof' }
-        { s: '#UNARY_OP' a: '@prefix' p: 'cast_expression' g: 'un-op' }
-        { p: 'postfix_expression' g: 'un-postfix' }
-      ]
-      close: [ { g: 'un-end' } ]
-    }
-
-    # postfix_expression, postfix_more: a primary expression and a replace
-    # loop of \`[ expression ]\`, \`( arguments )\`, \`. name\`, \`-> name\`, \`++\`
-    # and \`--\`, each wrapping what the chain has built.
-    postfix_expression: {
-      open: [ { p: 'primary_expression' g: 'pf-primary' } ]
-      close: [ { a: '@pf-carry' r: 'postfix_more' g: 'pf-more' } ]
-    }
-    postfix_more: {
-      open: [ { g: 'pm-cont' } ]
-      close: [
-        { s: 'PUNC_RBRACKET' c: '@pm-in-subscript' a: '@pm-rbracket'
-          r: 'postfix_more' g: 'pm-rbracket' }
-        { s: 'PUNC_RPAREN' c: '@pm-in-call' a: '@pm-rparen'
-          r: 'postfix_more' g: 'pm-rparen' }
-        { s: 'PUNC_LBRACKET' c: '@pm-free' a: '@subscript' p: 'expression'
-          g: 'pm-subscript' }
-        { s: 'PUNC_LPAREN' c: '@pm-free' a: '@call' p: 'argument_list'
-          g: 'pm-call' }
-        { s: 'PUNC_DOT #MEMBER_NAME' c: '@pm-free' a: '@member'
-          r: 'postfix_more' g: 'pm-dot' }
-        { s: 'PUNC_ARROW #MEMBER_NAME' c: '@pm-free' a: '@member'
-          r: 'postfix_more' g: 'pm-arrow' }
-        { s: '#INCDEC' c: '@pm-free' a: '@postfix' r: 'postfix_more'
-          g: 'pm-incdec' }
-        # The chain ends where no operator follows, and only with no \`[\`
-        # or \`(\` left open: an open one is closed by its \`]\` or \`)\`.
-        { c: '@pm-free' g: 'pm-end' }
-      ]
-    }
-
-    # argument_list: a call's arguments, assignment expressions separated
-    # by commas, a replace loop; empty before an immediate \`)\`.
-    argument_list: {
-      open: [
-        # No arguments; after a comma one is due.
-        { s: 'PUNC_RPAREN' b: 1 c: '@args-first' g: 'args-empty' }
-        { p: 'assignment_expression' g: 'args-item' }
-      ]
-      close: [
-        { s: 'PUNC_COMMA' a: '@args-comma' r: 'argument_list'
-          g: 'args-comma' }
-        { g: 'args-end' }
-      ]
-    }
-
-    # primary_expression: a constant, an identifier, adjacent strings, a
-    # parenthesised expression, a statement expression, \`_Generic\`, or a
-    # brace list.
-    primary_expression: {
-      open: [
-        { s: 'LIT_INT' a: '@lit' g: 'pr-int' }
-        { s: 'LIT_FLOAT' a: '@lit' g: 'pr-float' }
-        { s: 'LIT_CHAR' a: '@lit' g: 'pr-char' }
-        { s: 'KW_NULLPTR' a: '@lit' g: 'pr-nullptr' }
-        { s: 'KW_TRUE' a: '@lit' g: 'pr-true' }
-        { s: 'KW_FALSE' a: '@lit' g: 'pr-false' }
-        { s: 'LIT_STRING' b: 1 p: 'string_atom' g: 'pr-str' }
-        { s: 'ID' a: '@ident' g: 'pr-id' }
-        { s: 'MACRO_NAME' a: '@ident' g: 'pr-macro' }
-        { s: 'TYPEDEF_NAME' a: '@ident' g: 'pr-typedef' }
-        { s: 'PUNC_LPAREN PUNC_LBRACE' b: 2 p: 'statement_expression'
-          g: 'pr-stmt-expr' }
-        { s: 'PUNC_LPAREN' a: '@paren-open' p: 'expression' g: 'pr-paren' }
-        { s: 'KW__GENERIC' b: 1 p: 'generic_selection' g: 'pr-generic' }
-        { s: 'PUNC_LBRACE' b: 1 p: 'initializer_list' g: 'pr-brace' }
-      ]
-      close: [
-        { s: 'PUNC_RPAREN' c: '@paren-pending' a: '@paren-close'
-          g: 'pr-rparen' }
-        # A parenthesised expression ends with its \`)\`.
-        { c: '@paren-free' g: 'pr-end' }
-      ]
-    }
-
+    # C's expressions are read by @tabnas/expr, installed over this grammar
+    # with C's operator table (ts/src/expr-grammar.ts). A context pushes
+    # \`val\`, the rule an expression starts from, where C's grammar names an
+    # expression; \`val\` reads the rules below where a term is one of C's
+    # own forms: \`sizeof ( type-name )\`, a cast's type name, a brace list, a
+    # statement expression, \`_Generic\` and adjacent strings.
     # ---- initializer_list family (phase C.4) ------------------------
     #
     # \`{ <item>, <item>, … }\` — used as the RHS of \`=\` in declarators
@@ -1653,7 +1458,7 @@ const grammarText = `
         { s: 'PUNC_LBRACE' b: 1 p: 'initializer_list'
           a: '@ii-mark-nested' g: 'ii-nested' }
         # Plain expression value (no designation).
-        { p: 'assignment_expression' g: 'ii-expr' }
+        { p: 'val' g: 'ii-expr' }
       ]
       close: [
         # After designation, take \`=\` and r:-recurse so the next pass
@@ -1665,7 +1470,7 @@ const grammarText = `
           b: 1 p: 'initializer_list'
           a: '@ii-mark-nested' g: 'ii-val-list' }
         # After \`=\`, take an expression as the value.
-        { c: '@ii-needs-value' p: 'assignment_expression' g: 'ii-val' }
+        { c: '@ii-needs-value' p: 'val' g: 'ii-val' }
         { s: [] g: 'ii-end' }
       ]
     }
@@ -1689,7 +1494,7 @@ const grammarText = `
       open: [
         { s: 'PUNC_DOT' a: '@dr-take-dot' g: 'dr-dot' }
         { s: 'PUNC_LBRACKET' a: '@dr-take-lbracket'
-          p: 'assignment_expression' g: 'dr-lbracket' }
+          p: 'val' g: 'dr-lbracket' }
       ]
       close: [
         # A member's name is any identifier, a typedef's or a macro's
@@ -1738,7 +1543,7 @@ const grammarText = `
     # in its own node, as 0.5's tree did (member \`expression\`).
     generic_controlling_expression: {
       open: [
-        { p: 'assignment_expression' g: 'gce-val' }
+        { p: 'val' g: 'gce-val' }
       ]
       close: [
         { s: [] g: 'gce-end' }
@@ -1757,7 +1562,7 @@ const grammarText = `
       close: [
         { c: '@ga-need-colon' s: 'PUNC_COLON'
           a: '@ga-take-colon' r: 'generic_association' g: 'ga-colon' }
-        { c: '@ga-need-value' p: 'assignment_expression' g: 'ga-value' }
+        { c: '@ga-need-value' p: 'val' g: 'ga-value' }
         { s: [] g: 'ga-end' }
       ]
     }
@@ -1935,7 +1740,7 @@ const grammarText = `
     # bounded by the surrounding \`,\` or \`;\` or attribute-spec head.
     bitfield_width: {
       open: [
-        { s: 'PUNC_COLON' a: '@bfw-take-colon' p: 'assignment_expression' g: 'bfw-colon' }
+        { s: 'PUNC_COLON' a: '@bfw-take-colon' p: 'val' g: 'bfw-colon' }
       ]
       close: [
         { s: [] g: 'bfw-end' }
@@ -2006,7 +1811,7 @@ const grammarText = `
           b: 2 p: 'attribute_spec_c23'
           r: 'enumerator' g: 'enr-attr' }
         { c: '@enr-need-eq' s: 'PUNC_ASSIGN'
-          a: '@enr-take-eq' p: 'assignment_expression' g: 'enr-eq' }
+          a: '@enr-take-eq' p: 'val' g: 'enr-eq' }
         { s: [] g: 'enr-end' }
       ]
     }
@@ -2131,7 +1936,7 @@ const grammarText = `
         { s: 'PUNC_RPAREN' a: '@aal-take-rparen' g: 'aal-end' }
         { s: 'PUNC_COMMA' a: '@aal-take-comma'
           r: 'attribute_argument_list' g: 'aal-comma' }
-        { p: 'assignment_expression' r: 'attribute_argument_list' g: 'aal-arg' }
+        { p: 'val' r: 'attribute_argument_list' g: 'aal-arg' }
       ]
     }
 
@@ -2352,12 +2157,12 @@ const grammarText = `
         { c: '@said-need-lparen' s: 'PUNC_LPAREN'
           a: '@said-take-lparen' r: 'static_assert_declaration'
           g: 'sa-lp' }
-        { c: '@said-need-cond' p: 'assignment_expression' a: '@said-mark-cond'
+        { c: '@said-need-cond' p: 'val' a: '@said-mark-cond'
           g: 'sa-cond' }
         { c: '@said-need-comma' s: 'PUNC_COMMA'
           a: '@said-take-comma' r: 'static_assert_declaration'
           g: 'sa-comma' }
-        { c: '@said-need-msg' p: 'assignment_expression' a: '@said-mark-msg'
+        { c: '@said-need-msg' p: 'val' a: '@said-mark-msg'
           g: 'sa-msg' }
         { c: '@said-need-rparen' s: 'PUNC_RPAREN'
           a: '@said-take-rparen' r: 'static_assert_declaration'
@@ -2930,6 +2735,7 @@ const C: any = function C(jsonic: Tabnas, options: COptions): void {
           m.cmeta.rec = []
           m.cmeta.recBase = 0
           m.cmeta.ed = undefined
+          m.cmeta.links = newLinks()
         }) as any,
       },
     },
@@ -2959,8 +2765,13 @@ const C: any = function C(jsonic: Tabnas, options: COptions): void {
         m.pendingTrivia = []
       }
       // The tokens the parser takes, in order, for the armed fallback
-      // (ts/src/fallback.ts).
-      if (tkn.name !== '#ZZ') recordToken(m, tkn)
+      // (ts/src/fallback.ts), and the links between an expression's
+      // tokens (ts/src/expr-grammar.ts).
+      if (tkn.name !== '#ZZ') {
+        recordToken(m, tkn)
+        if (!m.links) m.links = newLinks()
+        linkToken(m.links, tkn)
+      }
     },
   })
 
@@ -2982,8 +2793,9 @@ const C: any = function C(jsonic: Tabnas, options: COptions): void {
   if (!opts.extended && spec && spec.rule) {
     for (const name of EXTENSION_RULES) delete spec.rule[name]
   }
-  // C's expressions start from a rule named `val`, as jsonic's do. Clear
-  // jsonic's, alternates and actions both, so that C's is the only one.
+  // C's expressions are read by @tabnas/expr, from the rule named `val`
+  // that jsonic's grammar has too. Clear jsonic's, alternates and actions
+  // both, so that expr's and C's are the only ones (ts/src/expr-grammar.ts).
   jsonic.rule('val', (rs: any) => rs.clear())
   const refs = makeGrammarRefs(opts)
   withFallback(spec, refs)
@@ -2991,6 +2803,13 @@ const C: any = function C(jsonic: Tabnas, options: COptions): void {
     ...spec,
     ref: refs,
   })
+  installExpr(jsonic)
+  // The rules expr reads an expression with, its own and the jsonic ones
+  // it pushes (an implicit list inside a paren), are below every external
+  // declaration too.
+  withRuleFallback(jsonic, [
+    'val', 'expr', 'paren', 'ternary', 'list', 'elem', 'map', 'pair',
+  ])
 
 }
 
@@ -3008,7 +2827,6 @@ C.defaults = {} as any
 // plugin builds a fresh refs map per install in C() above.
 function makeGrammarRefs(opts: Required<COptions>): Record<string, Function> {
 return {
-  ...makeExpressionRefs(),
 
 
   // Extension gate ----

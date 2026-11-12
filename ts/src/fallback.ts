@@ -365,3 +365,89 @@ export function withFallback(spec: any, refs: Record<string, Function>): void {
     },
   })
 }
+
+// The same for rules a plugin installs below the grammar, whose
+// alternates and actions are functions rather than refs: expr's `val`,
+// `expr`, `paren` and `ternary`, over which C's expressions are read. Each
+// state gets the bail first and the catch-all last; an alternate that
+// takes a token gets the fence; an alternate's error hook, in an armed
+// declaration, fails it rather than refusing the document; and an
+// action, a condition or a lifecycle action that throws in an armed
+// declaration fails it, as a ref does.
+export function withRuleFallback(tn: any, names: string[]): void {
+  const guard = (fn: Function, lifecycle: boolean): Function =>
+    function (this: any, ...args: any[]) {
+      const ctx = args[1] as Context
+      const ed = edOf(ctx)
+      const sc = ed ? innermost(ed) : undefined
+      if (lifecycle && ed && (ed.failed || (sc && sc.failed))) return undefined
+      if (!ed || (!ed.armed && !sc)) return fn.apply(this, args)
+      try {
+        return fn.apply(this, args)
+      } catch (err: any) {
+        if (err && err.constructor && err.constructor.name === 'TabnasError') throw err
+        if (sc) sc.failed = true
+        else ed.failed = true
+        ed.crashed = err
+        return undefined
+      }
+    }
+  const bailing = (_rule: Rule, ctx: Context): boolean => {
+    const ed = edOf(ctx)
+    if (!ed) return false
+    const sc = innermost(ed)
+    return ed.failed || !!(sc && sc.failed)
+  }
+  const armed = (_rule: Rule, ctx: Context): boolean => {
+    const ed = edOf(ctx)
+    if (!ed || ed.failed) return false
+    const sc = innermost(ed)
+    return sc ? !sc.failed : ed.armed
+  }
+  const fail = (_rule: Rule, ctx: Context): void => {
+    const ed = edOf(ctx)
+    if (!ed) return
+    const sc = innermost(ed)
+    if (sc) sc.failed = true
+    else ed.failed = true
+  }
+  for (const name of names) {
+    tn.rule(name, (rs: any) => {
+      for (const state of ['open', 'close']) {
+        const alts: any[] = rs.def[state]
+        if (!Array.isArray(alts) || 0 === alts.length) continue
+        for (const alt of alts) {
+          if (!alt || 'object' !== typeof alt) continue
+          for (const key of ['a', 'h']) {
+            if ('function' === typeof alt[key]) alt[key] = guard(alt[key], false)
+          }
+          const cond = 'function' === typeof alt.c ? guard(alt.c, false) : undefined
+          const takes = 0 < (alt.sN || 0) - ('number' === typeof alt.b ? alt.b : 0)
+          if (takes) {
+            alt.c = cond
+              ? (rule: Rule, ctx: Context, out: any) => !fenced(ctx) && cond(rule, ctx, out)
+              : (_rule: Rule, ctx: Context) => !fenced(ctx)
+          } else if (cond) {
+            alt.c = cond
+          }
+          if ('function' === typeof alt.e) {
+            const ef = alt.e
+            alt.e = (rule: Rule, ctx: Context, out: any) => {
+              if (armed(rule, ctx)) { fail(rule, ctx); return undefined }
+              return ef(rule, ctx, out)
+            }
+          }
+        }
+        rs[state]([{ c: bailing, g: 'c-bail' }], { append: false })
+        rs[state]([{ c: armed, a: fail, g: 'c-fail' }], { append: true })
+      }
+      for (const phase of ['bo', 'ao', 'bc', 'ac']) {
+        const acts: any[] = rs.def[phase]
+        if (!Array.isArray(acts)) continue
+        for (let i = 0; i < acts.length; i++) {
+          if ('function' === typeof acts[i]) acts[i] = guard(acts[i], true)
+        }
+      }
+    })
+  }
+}
