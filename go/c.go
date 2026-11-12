@@ -7,11 +7,11 @@
 // STATUS: complete and at parity. It builds the same tree as the
 // TypeScript, with the same rules: the lexer (matchers.go/tokens.go/
 // symbols.go), node helpers (cst.go/node.go), grammar install + ref map
-// (grammar_install.go/refs.go), C's expression rules (expression.go), the
-// armed fallback (fallback.go), the members API (members.go), and the
-// declaration, statement and extension refs (refs_newpath*.go,
-// refs_ext.go). TestCsmithCorpus matches the TypeScript golden fixtures
-// 100/100. See AGENTS.md and docs/rules.md.
+// (grammar_install.go/refs.go), C's expressions read by @tabnas/expr
+// (expr_grammar.go), the armed fallback (fallback.go), the members API
+// (members.go), and the declaration, statement and extension refs
+// (refs_newpath*.go, refs_ext.go). TestCsmithCorpus matches the
+// TypeScript golden fixtures 100/100. See AGENTS.md and docs/rules.md.
 package tabnasc
 
 import (
@@ -202,8 +202,8 @@ func C(j *tabnas.Tabnas, opts map[string]any) error {
 				"KW___EXTENSION__",
 				"KW___ATTRIBUTE__", "KW___ATTRIBUTE", "KW___DECLSPEC",
 			},
-			// The operators of C's expression rules (expression.go has
-			// their precedence).
+			// C's operators, as token sets (expr_grammar.go has their
+			// table).
 			"ASSIGN_OP": {
 				"PUNC_ASSIGN", "PUNC_PLUS_ASSIGN", "PUNC_MINUS_ASSIGN",
 				"PUNC_STAR_ASSIGN", "PUNC_SLASH_ASSIGN", "PUNC_PERCENT_ASSIGN",

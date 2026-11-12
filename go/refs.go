@@ -14,8 +14,8 @@ import tabnas "github.com/tabnas/parser/go"
 // their rule by the engine's Grammar() via the key name. Alt refs are
 // tabnas.AltCond (c:) or tabnas.AltAction (a:).
 //
-// The full ref map is ported: the extension gate, C's expression rules
-// (expression.go), the translation unit, the conditional groups and the
+// The full ref map is ported: the extension gate, the translation unit,
+// the conditional groups and the
 // external declarations with the armed fallback (fallback.go), the
 // preprocessor directive family (below), the declaration, specifier,
 // initializer and statement refs (refs_newpath*.go), and the extension

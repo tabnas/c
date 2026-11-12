@@ -395,7 +395,7 @@ are verified at the window's edge.
    every pull request is green on its own, and `ts/embed-grammar.js`
    does not copy the grammar to them.
 2. Go, to the same tree, with the same rules and refs (`go/fallback.go`,
-   `go/expression.go`, `go/members.go`), and `ts/embed-grammar.js`
+   `go/expr_grammar.go`, `go/members.go`), and `ts/embed-grammar.js`
    copies the grammar to it again.
 3. Rust, to the same tree; the 0.5 copies go.
 4. The part, the window, the manifest and the render; the release, a

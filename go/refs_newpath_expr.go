@@ -4,10 +4,11 @@ package tabnasc
 
 import tabnas "github.com/tabnas/parser/go"
 
-// registerExprSupportRefs binds the expression-support sub-rules reached from
-// the expression rules: type_name, sizeof_type_form, compound_literal_body,
-// string_atom, statement_expression, and the _Generic family. Port of the
-// c.ts phase C.2-C.7 refs; casts and compound literals are expression.go's.
+// registerExprSupportRefs binds the expression-support sub-rules an
+// expression's `val` pushes (expr_grammar.go): type_name, sizeof_type_form,
+// compound_literal_body, string_atom, statement_expression, and the
+// _Generic family. Port of the c.ts phase C.2-C.7 refs; casts and compound
+// literals are built by expr_grammar.go's evaluator.
 func registerExprSupportRefs(
 	cond func(string, tabnas.AltCond),
 	action func(string, tabnas.AltAction),
