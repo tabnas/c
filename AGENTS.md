@@ -215,24 +215,30 @@ window.
 
 The Go reader installs the same grammar document as TypeScript
 (`go/c-grammar.jsonic`, which `ts/embed-grammar.js` copies), clears
-jsonic's `val` for C's own, gives the rules below `external_declaration`
-the same fallback alternates (`withFallback` in `go/fallback.go`, on the
-parsed rule map before it becomes a `GrammarSpec`), and binds refs that
-port TypeScript's one for one. It no longer installs `@tabnas/expr`;
-`go/go.mod` still requires it, and removing the requirement is the
-maintainer's call. Two things differ by the language: a node is a
+jsonic's `val`, gives the rules below `external_declaration` the same
+fallback alternates (`withFallback` in `go/fallback.go`, on the parsed
+rule map before it becomes a `GrammarSpec`), and binds refs that port
+TypeScript's one for one. It reads expressions with `@tabnas/expr` and
+C's operator table (`go/expr_grammar.go`, the port of
+`ts/src/expr-grammar.ts`), and gives expr's rules the fallback too
+(`withRuleFallback`). Three things differ by the language: a node is a
 `map[string]any`, so a node's identity is its map (`sameNode`, `nodeID`),
 and the nodes already given their spans are recorded in the parse's
-`CMeta` (`Fixed`), where TypeScript marks the node; and a ref that panics
-in an armed declaration fails it (`failOnPanic`), where TypeScript
-catches what a ref throws.
+`CMeta` (`Fixed`), where TypeScript marks the node; a ref that panics in
+an armed declaration fails it (`failOnPanic`), where TypeScript catches
+what a ref throws; and expr's Go port binds an operator to the token the
+engine's process-wide fixed-token table holds for its source, so the
+install maps C's sources to this instance's tokens while expr installs
+(`withInstanceFixedTokens`), where TypeScript's expr reads the
+instance's own.
 
 `TestCsmithCorpus` is a hard gate and passes 100/100 against the
-TypeScript golden fixtures. Over the 16,916 documents of the conformance
-sweep (`docs/rules.md`, "What was measured"), Go and TypeScript give the
-same tree, spans included, or the same refusal at the same position; the
-three that differ are files whose non-ASCII text gives different spans,
-since TypeScript counts a position in UTF-16 units and Go in bytes.
+TypeScript golden fixtures. Over both conformance sweeps, 41,348
+documents (`docs/rules.md`, "What was measured"), Go and TypeScript give
+the same tree, spans included, or the same refusal at the same position;
+the three that differ are files whose non-ASCII text gives different
+spans, since TypeScript counts a position in UTF-16 units and Go in
+bytes.
 
 ## Conversion notes (from @jsonic/c)
 
