@@ -181,7 +181,11 @@ fn mode_for(pos: usize) -> LexMode {
 /// Run `scan` at the cursor over the text the lexer holds, cutting again
 /// over a grown window wherever it answers `Cut::Edge`, and make what it
 /// answers: a token (setting the mode it leaves), a refusal, or nothing.
-fn cut(lexer: &mut Lexer<'_>, tins: &Tins, scan: &dyn Fn(&mut Look<'_>, &Scope<'_>) -> Cut) -> Option<Token> {
+fn cut(
+    lexer: &mut Lexer<'_>,
+    tins: &Tins,
+    scan: &dyn Fn(&mut Look<'_>, &Scope<'_>) -> Cut,
+) -> Option<Token> {
     let point = lexer.point();
     let pos = point.site.pos;
     let mode = mode_for(pos);
@@ -885,7 +889,10 @@ fn string_literal(look: &mut Look<'_>, scope: &Scope<'_>) -> Cut {
     if raw {
         // `R"delim( ... )delim"`
         let mut delimiter_end = index;
-        while look.get(delimiter_end).is_some_and(|character| character != '(') {
+        while look
+            .get(delimiter_end)
+            .is_some_and(|character| character != '(')
+        {
             delimiter_end += 1;
         }
         if look.get(delimiter_end).is_none() {
@@ -943,7 +950,11 @@ fn sorted_punctuators() -> Vec<(&'static str, &'static str)> {
     sorted
 }
 
-fn punctuator(look: &mut Look<'_>, scope: &Scope<'_>, sorted: &[(&'static str, &'static str)]) -> Cut {
+fn punctuator(
+    look: &mut Look<'_>,
+    scope: &Scope<'_>,
+    sorted: &[(&'static str, &'static str)],
+) -> Cut {
     let longest = sorted.first().map_or(0, |entry| entry.1.chars().count());
     if scope.short(look, 0, longest) {
         return Cut::Edge;

@@ -460,6 +460,17 @@ compared as JSON with its keys sorted:
   read in plain mode, as a host reads C: 100 of 100 in Rust (the part's
   runs took 57 minutes, the reader's 2.3).
 
+A token's span is its offset in the passes, which `ParserEvents/1`
+counts in bytes in every runtime, and its line and column, which are the
+engine's; its end adds its length in characters. On ASCII text that is
+the reader's span in every runtime. Past ASCII it is not any reader's:
+each counts its own unit (bytes in Go, UTF-16 units in TypeScript,
+characters in Rust, `DIVERGENCE.md`, "Span offsets on non-ASCII input"),
+and alchemy has no length of a string in bytes or UTF-16 units to give
+the end in the start's unit. A token past such text has a start in bytes
+and an end that adds characters to it; the fixtures and the Csmith
+programs are ASCII, as the fixtures are for the readers' own sake.
+
 What the part holds is the stack of rules, the expression being read,
 the item being read and the registers of the nodes not yet written: over
 the declarations of the streaming gate's document (`/* text */ int xN =

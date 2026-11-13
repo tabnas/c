@@ -943,7 +943,9 @@ mod part_operator_table {
             .and_then(|parts| parts.transduce)
             .and_then(|part| part.source)
             .expect("c carries a transducer");
-        let begin = source.find("; BEGIN C_OP_TABLE").expect("a C_OP_TABLE block");
+        let begin = source
+            .find("; BEGIN C_OP_TABLE")
+            .expect("a C_OP_TABLE block");
         let end = source.find("; END C_OP_TABLE").expect("its end");
         let mut out = BTreeMap::new();
         for line in source[begin..end].lines() {
@@ -982,6 +984,9 @@ mod part_operator_table {
                 want.insert(name.clone(), entry(op));
             }
         }
-        assert_eq!(got, want, "the part's C_OP_TABLE is not the reader's op_table");
+        assert_eq!(
+            got, want,
+            "the part's C_OP_TABLE is not the reader's op_table"
+        );
     }
 }

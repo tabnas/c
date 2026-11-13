@@ -205,12 +205,24 @@ fn tokens_longer_than_the_window_parse_the_same_from_a_reader() {
         ("int c = L'aaaaa';".to_string(), false),
         (format!("/* {long} */ int x;"), false),
         (format!("// {long}\nint x;"), false),
-        (format!("int x; {}\n{} int y;", " ".repeat(300), "\t".repeat(300)), false),
+        (
+            format!("int x; {}\n{} int y;", " ".repeat(300), "\t".repeat(300)),
+            false,
+        ),
         (format!("#include <{long}.h>\nint x;"), false),
         (format!("#define A {long}\nint x = A;"), false),
-        (format!("int x;\n{}#define B 2\nint y = B;", " ".repeat(300)), false),
-        ("#define A 1\r#define B 2\rint x = A + B;".to_string(), false),
-        ("#define A 1\r\n#define B 2\r\nint x = A + B;".to_string(), false),
+        (
+            format!("int x;\n{}#define B 2\nint y = B;", " ".repeat(300)),
+            false,
+        ),
+        (
+            "#define A 1\r#define B 2\rint x = A + B;".to_string(),
+            false,
+        ),
+        (
+            "#define A 1\r\n#define B 2\r\nint x = A + B;".to_string(),
+            false,
+        ),
         ("#if 1\rint x;\r#endif\r".to_string(), false),
         ("int x; #define C 3\n".to_string(), false),
         ("int x = 1; \\\n#define D 4\nint y = D;".to_string(), false),
@@ -243,9 +255,26 @@ fn tokens_longer_than_the_window_parse_the_same_from_a_reader() {
 /// suite (`tests/csmith_test.rs`) binds them through metadata, which a
 /// parse from a reader in this engine does not take.
 const STDINT: &[&str] = &[
-    "int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t",
-    "size_t", "ssize_t", "ptrdiff_t", "intptr_t", "uintptr_t", "wchar_t", "wint_t", "time_t",
-    "clock_t", "off_t", "FILE", "va_list",
+    "int8_t",
+    "int16_t",
+    "int32_t",
+    "int64_t",
+    "uint8_t",
+    "uint16_t",
+    "uint32_t",
+    "uint64_t",
+    "size_t",
+    "ssize_t",
+    "ptrdiff_t",
+    "intptr_t",
+    "uintptr_t",
+    "wchar_t",
+    "wint_t",
+    "time_t",
+    "clock_t",
+    "off_t",
+    "FILE",
+    "va_list",
 ];
 
 #[test]
@@ -262,7 +291,10 @@ fn every_csmith_program_parses_the_same_from_a_reader() {
         .collect();
     seeds.sort();
     assert!(seeds.len() >= 100, "{} Csmith programs", seeds.len());
-    let header: String = STDINT.iter().map(|name| format!("typedef int {name};\n")).collect();
+    let header: String = STDINT
+        .iter()
+        .map(|name| format!("typedef int {name};\n"))
+        .collect();
     let parser = parser_for(true, "");
     let mut failures = Vec::new();
     let mut compared = 0;

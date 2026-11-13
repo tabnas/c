@@ -100,7 +100,12 @@ fn the_transducer_is_a_library_named_apart_from_the_render() {
             .map(str::to_string)
             .collect()
     };
-    let part = names(parts.transduce.and_then(|p| p.source).expect("a transducer"));
+    let part = names(
+        parts
+            .transduce
+            .and_then(|p| p.source)
+            .expect("a transducer"),
+    );
     let render = names(parts.render.and_then(|p| p.source).expect("a render"));
     assert!(part.iter().any(|n| n == "c-transduce"), "no c-transduce");
     for name in &part {
@@ -108,7 +113,10 @@ fn the_transducer_is_a_library_named_apart_from_the_render() {
             name == "c-transduce" || name.starts_with("c-tr-"),
             "{name} is not named c-tr-"
         );
-        assert!(!render.contains(name), "{name} is defined by the render too");
+        assert!(
+            !render.contains(name),
+            "{name} is defined by the render too"
+        );
     }
 }
 
