@@ -1,19 +1,18 @@
 ; C's transducer part: the reader's tree, the JSON events of C's concrete
 ; syntax tree, from the C grammar's rule passes with their token items
 ; (`parser-events input :tokens`), for a host that reads parser events
-; (dmog's `translate` and `run --grammar c`). Its entry is
-; `c-transduce`.
+; (dmog's `translate`). Its entry is `c-transduce`.
 ;
 ; The reader builds its tree in the actions of its rules (ts/src/c.ts and
 ; its Go and Rust ports), and in tabnas/expr's rules with C's evaluator
 ; (ts/src/expr-grammar.ts). A pass says which rule ran, in which state,
-; which alternate matched (its group) and which tokens it took, so the
-; part follows the engine's stack a frame per rule (`c-tr-enter`, `c-tr-pop`)
-; and runs, for each pass, what the reader's actions do for that rule,
-; state and alternate: each rule's handler (`c-h-<rule>`), in the phases
-; the engine runs them (before, the alternate's action, after). The
-; grammar's conditions need no port: a pass names the alternate they
-; chose.
+; which alternate matched (its groups) and which tokens it took, so the
+; part follows the engine's stack a frame per rule (`c-tr-enter`,
+; `c-tr-pop`) and runs, for each pass, what the reader's actions do for
+; that rule, state and alternate: each rule's handler (`c-tr-h-<rule>`),
+; in the phases the engine runs them (before, the alternate's action,
+; after). The grammar's conditions need no port: a pass names the
+; alternate they chose.
 ;
 ; A node the actions build is a register, written by reference as the
 ; reader writes an object, and held as a placeholder where a rule puts it
@@ -22,22 +21,25 @@
 ; the token after it, which keeps it or drops it where the reader does.
 ;
 ; Expressions are placed here, over the tokens and alternates of expr's
-; passes: each operator by its binding powers, from a copy of C's operator
-; table (`c-tr-op-table`, held to C_OP_TABLE by a test in every runtime), as
-; expr places it, holding one expression at a time; C's evaluator then
-; makes each operation C's node (`c-tr-x-eval`). The maintainer ruled on
-; 2026-11-13: C's part places each operator over expr's passes, with a
-; copy of C's operator table in alchemy text, held to the parser's tree
-; by tests.
+; passes: each operator by its binding powers, from a copy of C's
+; operator table (`c-tr-op-table`, held to C_OP_TABLE by a test in
+; every runtime), as expr places it, holding one expression at a time;
+; C's evaluator then makes each operation C's node (`c-tr-x-eval`).
+; The maintainer ruled on 2026-11-13: C's part places each operator over
+; expr's passes, with a copy of C's operator table in alchemy text, held
+; to the parser's tree by tests.
 ;
 ; What is written when: the translation unit's items as each ends (a
 ; conditional group as its #endif closes it); a function definition the
 ; rules hold to (not an armed one, which may still fall back to its
 ; tokens) from its body's `{`, its statements as each ends, and each
-; statement that holds statements as it is read (`c-tr-stream-open`); a node
-; whose children come in order is written so, and the registers of each
-; child written go. A declaration, a statement that holds no statement,
-; an expression and an armed declaration are held until they end.
+; statement that holds statements as it is read
+; (`c-tr-stream-open`); a node whose children come in order is written
+; so, and the registers of each child written go. A declaration, a
+; statement that holds no statement, an expression and an armed
+; declaration are held until they end. A subtree is written bottom up,
+; each node's events made from its children's (`c-tr-emit`), so the
+; evaluation nests four levels for each level of the tree.
 ; ---- small helpers
 
 def c-tr-not [b]

@@ -196,6 +196,19 @@ type LexMode struct {
 	ExpectHeaderName bool
 	// DirectiveName is the directive currently being parsed, or "".
 	DirectiveName string
+	// PPNewlineEnd is the row and column just past the last directive's
+	// newline: a `#` that a window of the source begins just before, after
+	// space, starts a line if a lone `\r` ended a directive there (see
+	// matchers.go, atLineStart). Zero before the first.
+	PPNewlineEnd [2]int
+}
+
+// modeAt is the mode as the cut that last changed it found it, and the row
+// and column it was cut at: a token the engine cuts again over a grown
+// window is cut from that mode (matchers.go, wrap).
+type modeAt struct {
+	ri, ci int
+	before LexMode
 }
 
 // CMeta holds all C-parser per-parse state, accessible from any matcher or
@@ -204,6 +217,8 @@ type CMeta struct {
 	Symbols *SymbolTable
 	Macros  *MacroTable
 	Mode    *LexMode
+	// ModeAt is where Mode last changed, and what it was before.
+	ModeAt *modeAt
 	// PendingTrivia buffers trivia tokens (comments, line continuations)
 	// emitted since the last non-trivia token. The sub-lex hook drains this
 	// onto each non-trivia token's leading-trivia so trivia stays attached to

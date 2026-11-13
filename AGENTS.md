@@ -98,9 +98,10 @@ const cst = new Tabnas().use(jsonic).use(C).parse('typedef int T; T x = 1;')
 | [`ts/src/tokens.ts`](ts/src/tokens.ts) | Named tokens for every keyword, extension keyword and punctuator. |
 | [`ts/src/symbols.ts`](ts/src/symbols.ts) | `SymbolTable` + `MacroTable` on `ctx.meta.cmeta`, shared by matchers and rule actions (typedef/macro disambiguation). |
 | [`docs/rules.md`](docs/rules.md) | The design of the rules-built tree (0.6): the dispatch, the fallback, the tree, the members API, and what was measured. |
-| [`ts/test/`](ts/test/) | TS tests (compiled to `dist-test/`): `c.test.ts` (parse cases), `csmith.test.ts` (replays the 100-program Csmith regression corpus against committed gzipped fixtures), `parity.test.ts` (runs the shared `test/spec/*.tsv` fixtures), `repeat.test.ts` (every repetition a replace loop, 10,000 items each), `tree.test.ts` (each subtree held once, scalar members, spans, every comment kept). |
+| [`ts/test/`](ts/test/) | TS tests (compiled to `dist-test/`): `c.test.ts` (parse cases), `csmith.test.ts` (replays the 100-program Csmith regression corpus against committed gzipped fixtures), `parity.test.ts` (runs the shared `test/spec/*.tsv` fixtures), `repeat.test.ts` (every repetition a replace loop, 10,000 items each), `tree.test.ts` (each subtree held once, scalar members, spans, every comment kept), `window.test.ts` (a parse from a reader, a window at a time, as from the text), `part.test.ts` (the part's operator table is the reader's). |
 | [`alchemy/render.alc`](alchemy/render.alc) | The **render**: the reader's tree written back as C source (entry `c-render`), an [alchemy](https://github.com/tabnas/alchemy) library a translating host links. See "Translation". |
-| [`ts/embed-translate.js`](ts/embed-translate.js) | Copies `tabnas.plugin.json` and `alchemy/render.alc` into `ts/src/translate.ts` (GENERATED: `translate()`, exported from the package), `go/translate/` (`Translate()` in `go/translate.go`) and `rs/translate/` (`translate()`, `manifest_text()` and `render_text()` in `rs/src/lib.rs`). Runs in `npm run embed` and in the build, after `embed-grammar.js`. |
+| [`alchemy/transduce.alc`](alchemy/transduce.alc) | The **transducer part**: the reader's tree as JSON events, from the rule passes of C's grammar with their token items (entry `c-transduce`), an alchemy library a host that reads parser events links. See "Translation" and `docs/rules.md`, "The part". |
+| [`ts/embed-translate.js`](ts/embed-translate.js) | Copies `tabnas.plugin.json`, `alchemy/render.alc` and `alchemy/transduce.alc` into `ts/src/translate.ts` (GENERATED: `translate()`, exported from the package), `go/translate/` (`Translate()` in `go/translate.go`) and `rs/translate/` (`translate()`, `manifest_text()` and `render_text()` in `rs/src/lib.rs`). Runs in `npm run embed` and in the build, after `embed-grammar.js`. |
 | [`test/spec/`](test/spec/) | **Shared cross-runtime fixtures** (`*.tsv`), auto-discovered and run by all three runners: `ts/test/parity.test.ts`, `go/parity_test.go` and `rs/tests/parity_test.rs`. See [`test/AGENTS.md`](test/AGENTS.md). Prefer a fixture here over a one-off in-language assertion. |
 
 ## Translation
@@ -115,6 +116,19 @@ shape is the format's own, the schema `c` (`schema`). There is no embed,
 so the target is schema-only: a host composes into the render only from
 a source of the same schema, or from a program that builds a C syntax
 tree, and refuses any other source before reading it.
+
+[`alchemy/transduce.alc`](alchemy/transduce.alc) is the transducer part
+(`transduce` in the manifest, whose `translate` object no longer says
+`whole`): an alchemy library whose entry point `c-transduce` writes the
+reader's tree as JSON events from the rule passes of C's grammar with
+their token items (`parser-events input :tokens`), so a host that reads
+parser events (dmog's `translate`) streams a C document rather than
+reading it whole. Its tree is the reader's, spans included, in every
+runtime: it places each operator by a copy of C's operator table, and
+`ts/test/part.test.ts`, `TestPartOperatorTable` in `go/part_test.go` and
+`part_operator_table` in `rs/src/expr_grammar.rs` hold the copy to
+`C_OP_TABLE`. `docs/rules.md`, "The part", is its design: what it holds,
+when it writes, and what was measured.
 
 [`alchemy/render.alc`](alchemy/render.alc) is the render, an
 [alchemy](https://github.com/tabnas/alchemy) library whose entry point
@@ -140,19 +154,20 @@ TypeScript reader keeps where it drops a token (an operator, a comma, a
 parenthesis) is a child of the node at that token's place, and the
 render writes the piece after it (`c-around`). A prefix
 operator the reader keeps raw is read as the TypeScript reader holds it
-and as the Go reader wraps it (`Val`). The manifest's `loss` list says,
-a sentence each, what a written file does not keep: the kind of white
-space, a comment after the last token, where an operator sat in the
-white space around it, which of `(f)` and `f()` a call of no arguments
-was, a `_BitInt`'s width, a parameter list after a parenthesised
-declarator, and a brace-initializer item whose expression the Rust
-reader drops. The file's header comment says how each part is written
-and why.
+and as the Go reader wraps it (`Val`), the shapes of the trees up to
+0.5. The manifest's `loss` list says, a sentence each, what a written
+file does not keep of the reader's tree from 0.6: the kind of white
+space, a comment after the last token, where an operator and the
+punctuation the expression nodes leave out sat in the white space around
+them, and the parameter list after a parenthesised declarator in a
+parameter's declaration. The file's header comment says how each part is
+written and why.
 
-`npm run embed` in `ts/` (the build runs it) copies the manifest and the
-render into every runtime: `ts/src/translate.ts`, `go/translate/` and
-`rs/translate/`, served as `translate()` in TypeScript, `Translate()` in
-Go and `translate()`, `manifest_text()` and `render_text()` in Rust. The
+`npm run embed` in `ts/` (the build runs it) copies the manifest, the
+render and the transducer part into every runtime: `ts/src/translate.ts`,
+`go/translate/` and `rs/translate/`, served as `translate()` in
+TypeScript, `Translate()` in Go and `translate()`, `manifest_text()` and
+`render_text()` in Rust, the part as each `translate`'s `transduce`. The
 translation tests (`ts/test/translate.test.ts`, `go/translate_test.go`,
 `rs/tests/translate_test.rs`) hold the copies to the files, so change the
 files at the root and run the embed. Running the render needs alchemy,
@@ -194,20 +209,44 @@ gate).
 
 ## The window setting
 
-A parse from a reader (`ParseReader`, `parse_reader`, admin ADR-30) reads
-a window of the source at a time only on a parser that declares
-`lex.window`. This grammar's matchers are not yet verified at the
-window's edge, and its own window comes with its streaming work, so its
-whole parser declares its own setting, `false`: Go's `MakeC` (through
-`makeCOn`) and Rust's `make`/`make_with` (through `make_on`) set
-`lex.window` to false after installing the plugin on jsonic's base, so a
-base that declares the window does not carry it to this grammar.
-`go/window_test.go` and `rs/tests/window_test.rs` hold the parser to it,
-and `TestMakeCOnAWindowedBase` and `window_tests` in `rs/src/lib.rs` give
-the constructor's steps a base that declares the window. TypeScript has
-no constructor of its own; a host composes
-`new Tabnas().use(jsonic).use(C)`, whose plugin functions declare no
-window.
+A parse from a reader (`parseReader`, `ParseReader`, `parse_reader`,
+admin ADR-30 and ADR-33) reads a window of the source at a time on a
+parser that declares `lex.window`, and this grammar's whole parser
+declares it: TypeScript's `make()`, Go's `MakeC` (through `makeCOn`) and
+Rust's `make`/`make_with` (through `make_on`) set it after installing the
+plugin on jsonic's base, and the plugin function, which a host may
+install beneath matchers of its own, declares nothing. C's matchers
+(`ts/src/matchers.ts`, `go/matchers.go`, `rs/src/matchers.rs`) read the
+source only through the window: each cut reads forward from the cursor,
+and one whose answer could change with more text, a scan that reaches
+the window's end, answers an edge before it makes a token or changes the
+lexer's mode; the matcher then fills the window to twice what it holds
+past the cursor and cuts again, so a long token costs its length to
+read. The engine cuts a token again over a wider window where any read
+of the cut met the window's end, so the lexer's mode (in a directive,
+the directive's name, a header name expected) is changed once however
+often a token is cut: a cut at the place the mode last changed reads the
+mode the first cut found (`modeAt`, `modeFor`, `mode_for`). A `#` opens a
+directive only at the start of a line, which the matcher reads back
+through the window; a window keeps the space after the last token the
+parser does not ignore, so a scan that reaches the window's start has
+met that token's end, and the cursor's column, or the end of the last
+directive's newline (a lone `\r` starts no column), says whether a line
+began there. The actions read only the tokens.
+
+The tests are `ts/test/window.test.ts`, `go/window_test.go` and
+`rs/tests/window_test.rs`: every row of `test/spec/`, under its `opts`,
+parses from a reader as from its text, value and errors (code, position,
+row and column) alike, in pieces of 1, 3 and 64 bytes, and in TypeScript
+and Rust also under windows of a few units (margin and block 1 and 1, 3
+and 2, 64 and 64); so do tokens of every kind longer than the window, and
+directives a window may begin just before; every Csmith program does, in
+pieces of 4 KiB (TypeScript and Rust also under a window of 64); in Go,
+whose window sizes are fixed at 64 KiB, so do tokens longer than that and
+a long document whose tokens straddle the window's blocks; and a long
+document parses in time linear in its length. `TestMakeCOnABaseWithoutTheWindow`
+and `window_tests` in `rs/src/lib.rs` give the constructor's steps a base
+that declares no window.
 
 ## Go port: the same rules and refs
 

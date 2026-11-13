@@ -558,17 +558,18 @@ pub fn make_with(options: &COptions) -> Tabnas {
     make_on(tabnas_jsonic::make(), options)
 }
 
-/// Install the C grammar on `parser`, jsonic's base, and declare this
-/// parser's own window setting: `lex.window` false, so that
-/// [`Tabnas::parse_reader`] reads a reader whole (admin ADR-30). The
-/// grammar's matchers are not yet verified at the window's edge, and C's
-/// own window comes with its streaming work; a base that declares the
-/// window must not carry it to them, so the setting comes last, after
-/// everything the base and the grammar set.
+/// Install the C grammar on `parser`, jsonic's base, and declare
+/// `lex.window`, so that [`Tabnas::parse_reader`] reads a reader a window
+/// at a time rather than whole (admin ADR-30). C's matchers read the
+/// source only through the window, filling it where a scan reaches its
+/// end (`matchers`), and its actions read only the tokens. The window is
+/// declared here, on the parser this crate makes whole, and not in [`c`],
+/// which a host may install beneath matchers of its own; the setting comes
+/// last, after everything the base and the grammar set.
 fn make_on(mut parser: Tabnas, options: &COptions) -> Tabnas {
     c(&mut parser, options).expect("c: the grammar installs on a jsonic instance");
     parser
-        .set_options(|options| options.lex.window = false)
+        .set_options(|options| options.lex.window = true)
         .expect("lex.window sets");
     parser
 }
@@ -596,16 +597,22 @@ mod reference_tests {
 #[cfg(test)]
 mod window_tests {
     /// The parser's own setting wins over its base's: a base that declares
-    /// `lex.window`, as jsonic's own constructor may, given the
-    /// constructor's steps, comes out with the window off.
+    /// no window comes out with it, and the grammar alone declares none.
     #[test]
-    fn a_windowed_base_comes_out_without_the_window() {
+    fn a_base_without_the_window_comes_out_with_it() {
         let mut base = tabnas_jsonic::make();
-        base.set_options(|options| options.lex.window = true)
+        base.set_options(|options| options.lex.window = false)
             .expect("lex.window sets");
-        assert!(base.options.lex.window);
+        assert!(!base.options.lex.window);
+        let mut alone = tabnas_jsonic::make();
+        alone
+            .set_options(|options| options.lex.window = false)
+            .expect("lex.window sets");
+        super::c(&mut alone, &super::COptions::default()).expect("c installs");
+        assert!(!alone.options.lex.window);
         let parser = super::make_on(base, &super::COptions::default());
-        assert!(!parser.options.lex.window);
+        assert!(parser.options.lex.window);
+        assert!(super::make().options.lex.window);
         assert!(super::parse_with(&parser, "int main(void) { return 0; }").is_ok());
     }
 }

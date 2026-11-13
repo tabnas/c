@@ -148,6 +148,10 @@ export interface LexMode {
   // The directive name currently being parsed, or null. Used by matchers
   // that need to know which directive they are inside.
   directiveName: string | null
+  // The row and column just past the last directive's newline: a `#` that
+  // a window of the source begins just before, after space, starts a line
+  // if a lone `\r` ended a directive there (see matchers.ts, atLineStart).
+  ppNewlineEnd?: { rI: number; cI: number }
 }
 
 // All C-parser global state lives here, accessible from any matcher or rule
@@ -156,6 +160,10 @@ export interface CMeta {
   symbols: SymbolTable
   macros: MacroTable
   mode: LexMode
+  // The mode as the cut that last changed it found it, and the row and
+  // column it was cut at: a token the engine cuts again over a grown window
+  // is cut from that mode (see matchers.ts, modeAt).
+  modeAt?: { rI: number; cI: number; before: LexMode }
   // Buffer of trivia tokens (comments, line continuations) emitted since
   // the last non-trivia token. The sub-lex hook drains this buffer onto
   // `tkn.use.leading` of each non-trivia token, so trivia stays attached

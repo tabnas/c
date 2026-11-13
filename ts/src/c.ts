@@ -6838,12 +6838,27 @@ function reclassifyAsTypedef(ctx: Context, name: string): void {
   if (lex.pnt && Array.isArray(lex.pnt.token)) for (const tkn of lex.pnt.token) fix(tkn)
 }
 
+// Build a C parser whole: jsonic's base with the plugin installed, as
+// `new Tabnas().use(jsonic).use(C, options)` builds it, and with
+// `lex.window` declared, so that `tn.parseReader` reads a reader a window
+// at a time rather than whole (admin ADR-30). C's matchers read the source
+// only through the window, filling it where a scan reaches its end
+// (matchers.ts), and its actions read only the tokens. The window is
+// declared here, on the parser this package makes whole, and not in `C`,
+// which a host may install beneath matchers of its own. It is the
+// counterpart of Go's `MakeC` and Rust's `make_with`.
+function make(options: Partial<COptions> = {}): Tabnas {
+  const tn = new Tabnas().use(jsonic).use(C, options)
+  tn.options({ lex: { window: true } })
+  return tn
+}
+
 // VERSION is this package's version. It MUST equal package.json "version":
 // the release orchestrator rewrites both, and the version test fails the
 // build if they drift. Mirrors `const VERSION` in go/c.go.
 const VERSION = '0.6.0'
 
-export { C, VERSION }
+export { C, VERSION, make }
 export { translate } from './translate.js'
 export { member, memberNames } from './members.js'
 export type { TranslationPart, TranslationParts } from './translate.js'

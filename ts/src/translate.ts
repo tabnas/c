@@ -58,11 +58,8 @@ const TRANSLATION: TranslationParts = Object.freeze({
     "loss": [
       "White space is written as spaces and line feeds, each token where its span puts it, so comments and layout come back with every token's line, column and offset: a tab, a form feed, a vertical tab and a carriage return are each written as a space, which the reader counts as one column and one offset as it counts them, and white space after the last token is not written.",
       "A comment after the last token is not in the tree, which keeps a comment only as a token before another, so it is not written.",
-      "An operator, which the tree keeps as a node's op and not as a token, and the punctuation some of the reader's paths drop (a call's parentheses and the commas between its arguments, a subscript's brackets, a conditional's ? and :, a comma expression's commas, and the * of a pointer inside parentheses, kept as an empty token) have no place in the tree: each is written right after the text before it, with a space only where two pieces would read as one token, or, where the next token begins a later line and the line before has no room for it, just before that token.",
-      "The reader gives an expression in parentheses and a call of no arguments one shape, a call_expression whose argument_list is empty, so an identifier alone is written as a call, f(), where that keeps the next token in place, and in parentheses, (f), where it does not, and any other expression in parentheses: a parenthesised identifier can come back as a call and a call as a parenthesised identifier, and either reads back as the same tree.",
-      "A _BitInt's width is not in the tree, since the reader drops the parenthesised width, so the type is written _BitInt() with nothing between the parentheses, which reads back as the same tree and which a compiler refuses.",
-      "The parameter list after a parenthesised declarator (the (int) of int (*fp)(int), or of an abstract int (*)(int)) is not in the tree, so it is not written, and the declarator reads back as the same tree, a pointer rather than a pointer to a function.",
-      "A prefix operator standing alone as a brace-initializer item ({-1L, &x}) is kept as a raw operator array: the TypeScript reader keeps the operator's position, so it is written in place, and the Go reader, which wraps the array in a Val member, keeps none, so it is written as other operators are. Where the Rust reader drops such an item's expression (DIVERGENCE.md), the item is written empty, and the text does not read back as the same tree."
+      "An operator, which the tree keeps as a node's op and not as a token, and the punctuation the reader's expression nodes leave out (an expression's parentheses, a call's parentheses and the commas between its arguments, a subscript's brackets, a conditional's ? and :, a comma expression's commas, and the * of a pointer inside parentheses, kept as an empty token) have no place in the tree: each is written right after the text before it, with a space only where two pieces would read as one token, or, where the next token begins a later line and the line before has no room for it, just before that token.",
+      "The parameter list after a parenthesised declarator in a parameter's declaration (the (int, char) of void g(int (*cb)(int, char))) is not in the tree, so it is not written, and the parameter reads back as the same tree, a pointer rather than a pointer to a function."
     ]
   }
 }
@@ -1176,19 +1173,18 @@ def c-render [input]
   transduce: Object.freeze({ entry: "c-transduce", source: `; C's transducer part: the reader's tree, the JSON events of C's concrete
 ; syntax tree, from the C grammar's rule passes with their token items
 ; (\`parser-events input :tokens\`), for a host that reads parser events
-; (dmog's \`translate\` and \`run --grammar c\`). Its entry is
-; \`c-transduce\`.
+; (dmog's \`translate\`). Its entry is \`c-transduce\`.
 ;
 ; The reader builds its tree in the actions of its rules (ts/src/c.ts and
 ; its Go and Rust ports), and in tabnas/expr's rules with C's evaluator
 ; (ts/src/expr-grammar.ts). A pass says which rule ran, in which state,
-; which alternate matched (its group) and which tokens it took, so the
-; part follows the engine's stack a frame per rule (\`c-tr-enter\`, \`c-tr-pop\`)
-; and runs, for each pass, what the reader's actions do for that rule,
-; state and alternate: each rule's handler (\`c-h-<rule>\`), in the phases
-; the engine runs them (before, the alternate's action, after). The
-; grammar's conditions need no port: a pass names the alternate they
-; chose.
+; which alternate matched (its groups) and which tokens it took, so the
+; part follows the engine's stack a frame per rule (\`c-tr-enter\`,
+; \`c-tr-pop\`) and runs, for each pass, what the reader's actions do for
+; that rule, state and alternate: each rule's handler (\`c-tr-h-<rule>\`),
+; in the phases the engine runs them (before, the alternate's action,
+; after). The grammar's conditions need no port: a pass names the
+; alternate they chose.
 ;
 ; A node the actions build is a register, written by reference as the
 ; reader writes an object, and held as a placeholder where a rule puts it
@@ -1197,22 +1193,25 @@ def c-render [input]
 ; the token after it, which keeps it or drops it where the reader does.
 ;
 ; Expressions are placed here, over the tokens and alternates of expr's
-; passes: each operator by its binding powers, from a copy of C's operator
-; table (\`c-tr-op-table\`, held to C_OP_TABLE by a test in every runtime), as
-; expr places it, holding one expression at a time; C's evaluator then
-; makes each operation C's node (\`c-tr-x-eval\`). The maintainer ruled on
-; 2026-11-13: C's part places each operator over expr's passes, with a
-; copy of C's operator table in alchemy text, held to the parser's tree
-; by tests.
+; passes: each operator by its binding powers, from a copy of C's
+; operator table (\`c-tr-op-table\`, held to C_OP_TABLE by a test in
+; every runtime), as expr places it, holding one expression at a time;
+; C's evaluator then makes each operation C's node (\`c-tr-x-eval\`).
+; The maintainer ruled on 2026-11-13: C's part places each operator over
+; expr's passes, with a copy of C's operator table in alchemy text, held
+; to the parser's tree by tests.
 ;
 ; What is written when: the translation unit's items as each ends (a
 ; conditional group as its #endif closes it); a function definition the
 ; rules hold to (not an armed one, which may still fall back to its
 ; tokens) from its body's \`{\`, its statements as each ends, and each
-; statement that holds statements as it is read (\`c-tr-stream-open\`); a node
-; whose children come in order is written so, and the registers of each
-; child written go. A declaration, a statement that holds no statement,
-; an expression and an armed declaration are held until they end.
+; statement that holds statements as it is read
+; (\`c-tr-stream-open\`); a node whose children come in order is written
+; so, and the registers of each child written go. A declaration, a
+; statement that holds no statement, an expression and an armed
+; declaration are held until they end. A subtree is written bottom up,
+; each node's events made from its children's (\`c-tr-emit\`), so the
+; evaluation nests four levels for each level of the tree.
 ; ---- small helpers
 
 def c-tr-not [b]
