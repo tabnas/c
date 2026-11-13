@@ -135,11 +135,13 @@ no `)`.
 
 ## Expressions are read by expr
 
-C reads its expressions with `@tabnas/expr` (0.6.1 or later), in every
+C reads its expressions with `@tabnas/expr` (0.6.2 or later), in every
 runtime: the maintainer ruled that C uses expr, and that expr is fixed
-where it falls short of C. `ts/src/expr-grammar.ts` installs it over
-C's grammar with C's operator table and the options expr has for a
-language like C (expr's `ts/doc/reference.md`):
+where it falls short of C.
+`ts/src/expr-grammar.ts` installs it over C's grammar with C's operator
+table and the options expr has for a language like C (expr's
+`ts/doc/reference.md`), and `go/expr_grammar.go` and
+`rs/src/expr_grammar.rs` are its ports:
 
 - a binding power on a call's and a subscript's parenthesis, so
   `a.b[1]` subscripts `a.b` and `a.b(1)` calls it;
@@ -430,7 +432,7 @@ runtime, and a drift between the two tables fails the gate.
    `go/expr_grammar.go`, `go/members.go`), and `ts/embed-grammar.js`
    copies the grammar to it again.
 3. Rust, to the same tree, with the same rules and refs
-   (`rs/src/fallback.rs`, `rs/src/expression.rs`, `rs/src/members.rs`);
+   (`rs/src/fallback.rs`, `rs/src/expr_grammar.rs`, `rs/src/members.rs`);
    the 0.5 copies go.
 4. The part, the window, the manifest and the render; the release, a
    minor version, 0.6.0, since the tree changes.
