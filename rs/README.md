@@ -15,8 +15,9 @@ that goes.
 The plugin layers on the relaxed-JSON grammar of
 [`tabnas-jsonic`](https://github.com/tabnas/jsonic), the dialect the
 grammar document itself is written in, which supplies the `val` rule the
-C grammar starts its expressions from. C's expressions are the grammar's
-own rules.
+C grammar starts its expressions from.
+[`tabnas-expr`](https://github.com/tabnas/expr) reads the expressions,
+with C's operator table.
 
 This is the Rust port of the canonical TypeScript implementation,
 [`@tabnas/c`](https://www.npmjs.com/package/@tabnas/c); the TypeScript
@@ -238,8 +239,7 @@ cargo add tabnas-c tabnas-parser tabnas-jsonic
 ```
 
 In this repository, `rs/Cargo.toml` takes the engine, the jsonic base
-grammar, and the expr operator plugin, which the crate no longer uses, by
-path, with the fixture runner as
+grammar, and the expr operator plugin by path, with the fixture runner as
 a test-only path dependency, so clone `parser`, `json`, `jsonic`, `expr`
 and `support` next to this repository before building. The release
 workflow swaps the three runtime paths for crates.io versions, and drops

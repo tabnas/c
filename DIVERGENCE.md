@@ -15,13 +15,14 @@ Measured 2026-09-21 by running all three: the canonical under Node
 (type-stripped `ts/src/c.ts`), the Go port through a small driver, and
 the Rust port through `cargo test`.
 
-From 0.6 every runtime builds every declaration and expression with the
-canonical's rules ([`docs/rules.md`](docs/rules.md)). That closed the two
-divergences this record kept besides the one below: a ternary used as a
-whole declaration initializer, whose node held itself up to 0.5, and an
-initializer item whose expression `@tabnas/expr` left un-evaluated. All
-three runtimes return the same tree for both, and the register holds no
-row.
+From 0.6 every runtime builds every declaration with the canonical's
+rules and reads every expression with `@tabnas/expr` and C's operator
+table ([`docs/rules.md`](docs/rules.md)). That closed the two divergences
+this record kept besides the one below: a ternary used as a whole
+declaration initializer, whose node held itself up to 0.5, and an
+initializer item whose expression 0.5's evaluator left as expr's own
+operation. All three runtimes return the same tree for both, and the
+register holds no row.
 
 ## 1. Source nested deeper than the realize cap
 
@@ -60,11 +61,19 @@ branch, two levels a line: 127 such lines in a row realize past the cap,
 where up to 0.5 the lines stayed flat and this port returned a tree
 (`unterminated_conditionals_nest_to_the_cap`). No compiler accepts them.
 
-Measured 2026-11-11 with `extended: true` on the 22 shapes of
-`every_recursive_construct_stops_at_the_cap`, each 2000 deep: the
-canonical's parse returns a tree for all 22, of which `JSON.stringify`
-writes 17 and throws `RangeError` on 5; the Go port returns a tree for
-all 22, each in under half a second; this port reports `cancel` for 19
+In this port `tabnas-expr` also bounds the parse's rule stack, at 1,024
+frames (its `RULE_LIMIT`), and refuses a parse past it with the same
+`cancel`, at the token it reached. The nesting that reaches it is past
+the cap already: `int x = ((( ... 1 ... )));` reaches it about 340 deep
+and `if (a)` about 510 deep, and the cap has stopped each by 250 and 300
+levels.
+
+Measured 2026-11-12 with `extended: true` on the 22 shapes of
+`every_recursive_construct_stops_at_the_cap`, each 2000 deep, with the
+expressions read by expr: the canonical's parse returns a tree for all
+22, of which `JSON.stringify` writes 18 and throws `RangeError` on 4; the
+Go port returns a tree for all 22, each in under a fifth of a second; this
+port reports `cancel` for 19
 and returns the canonical's tree for the other 3, a declarator nested in
 parentheses past one level, which every runtime reads as an unknown
 declaration, flat. Up to 0.5 the canonical returned a tree for 15 and

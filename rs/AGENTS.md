@@ -9,9 +9,9 @@ is specific to the crate.
 
 `tabnas-c`, lib `tabnas_c`. A plugin for the `tabnas` engine that
 installs the C grammar on an instance that already carries the jsonic
-base grammar. From 0.6 every declaration and expression is built by the
-grammar's own rules, as in TypeScript and Go (`../docs/rules.md`); the
-manifest still declares `tabnas-expr`, which nothing uses.
+base grammar. From 0.6 every declaration is built by the grammar's own
+rules, and `tabnas-expr` reads every expression with C's operator table,
+as in TypeScript and Go (`../docs/rules.md`).
 
 TypeScript is canonical. `ts/src/c.ts` defines behaviour, option names
 and defaults; `ts/c-grammar.jsonic` defines the rule chain and is copied
@@ -31,7 +31,7 @@ root.
 | `src/state.rs` | per-parse state: symbol table, macro table, lex mode, the arena itself |
 | `src/rt.rs` | the runtime the ported handlers are written against: rule nodes, the `k`/`u` bags, the lookahead walk |
 | `src/refs*.rs` | the grammar's `@name` handlers, split the way `ts/src/c.ts` groups them |
-| `src/expression.rs` | C's expression rules' handlers: precedence climbing as replace loops, the postfix chain, casts, calls, the juxtaposition check (port of `ts/src/expression.ts`) |
+| `src/expr_grammar.rs` | C's expressions: the operator table `tabnas-expr` reads them with, the evaluator that makes C's nodes from expr's operations, the links between an operation's tokens, and `val`'s own alternates: sizeof's type form, statement expressions, `_Generic`, brace lists, a cast's type name and C's atoms (port of `ts/src/expr-grammar.ts`) |
 | `src/fallback.rs` | the armed fallback: the token record, the chomp's end, the fence, the bail and catch-all alternates every rule below `external_declaration` gets, and the local scope `asm_operand` catches a failure in (port of `ts/src/fallback.ts`) |
 | `src/members.rs` | `member(node, name)`, the named members the tree no longer holds, read from a node's children (port of `ts/src/members.ts`) |
 | `src/trivia.rs` | the sub-lex hook that buffers comments onto the next token |
@@ -62,13 +62,10 @@ matching how TypeScript never relinks `rule.child`. Put those together
 and a rule that builds its node on a LATER link of an `r:` chain hands
 the parent nothing: the frozen link still names the cell the parent
 itself is holding, so the parent reads its own node back as the child's.
-`cast_or_compound_literal` is the one rule here that works that way, and
-the canonical's own `@cocl-finalize` writes the node onto the frozen
-link (`parent.child.node = node`) for the same reason. That write is not
-available here, because the cell is shared with the ancestors: the rule
-takes a private cell in its open action instead, and `@cocl-finalize`
-writes THROUGH it. `test/spec/cast.tsv` is the fixture that fails if
-either half goes.
+No rule of C's grammar builds its node that way. `tabnas-expr`'s rules
+do, a cast's among them, and write the node they build onto the link the
+parent reads; `test/spec/cast.tsv` is the fixture that fails if a cast's
+node does not reach the context that pushed `val`.
 
 **The engine's lookahead buffer has a different shape.** In the
 canonical engine and in Go, `ctx.t` is an array that never shrinks:

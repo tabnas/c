@@ -408,6 +408,17 @@ is written as its passes arrive: it opens at its `#if` and closes at its
 `whole`, and the whole parser declares `lex.window` once its matchers
 are verified at the window's edge.
 
+No pass opens or closes an expression's node: expr's rules rewrite an
+operation in place as each operator arrives, and C's evaluator builds
+C's nodes once the expression ends. The maintainer ruled on 2026-11-13:
+C's part places each operator over expr's passes, with a copy of C's
+operator table in alchemy text, held to the parser's tree by tests. The
+part holds one expression at a time and places its operators from the
+tokens and alternates of expr's passes; expr is unchanged for it. The
+copy is a second statement of C's precedence, so the part's tree must
+equal the parser's over every fixture and every Csmith program, in every
+runtime, and a drift between the two tables fails the gate.
+
 ## Order
 
 1. TypeScript: the rules, the tree, the API, the fallback, the tests and

@@ -87,7 +87,7 @@ const cst = new Tabnas().use(jsonic).use(C).parse('typedef int T; T x = 1;')
 |---|---|
 | [`ts/`](ts/) | **Canonical** implementation — the `@tabnas/c` package. |
 | [`go/`](go/) | **Go port**, at parity with the canonical. A hand-translation of the TypeScript: lexer (`tokens.go`/`symbols.go`/`matchers.go`), node helpers (`cst.go`/`node.go`), grammar parse/install + ref map (`grammar_install.go`/`refs.go`: the translation unit, conditional groups, external declarations and their end, the preprocessor directives), C's expressions, read by `@tabnas/expr` with C's operator table (`expr_grammar.go`), the armed fallback (`fallback.go`), the members API (`members.go`, `Member`), what a declaration binds read from its tokens (`declare.go`), the declaration, specifier, struct/union/enum, initializer and statement refs (`refs_newpath*.go`), and the extension constructs (`refs_ext.go`). `tabnasc.Parse`/`MakeC`/`ParseMeta` build the same tree as TypeScript; `go test` runs the shared fixtures (`parity_test.go`), the Csmith corpus against the TypeScript golden fixtures (`csmith_test.go`, 100/100), the repetition test (`repeat_test.go`) and the tree's invariants (`tree_test.go`). The upstream `@jsonic/c` is TypeScript-only, so this is a from-scratch hand-translation. |
-| [`rs/`](rs/) | **Rust port** — crate `tabnas-c` (lib `tabnas_c`), a hand-translation of the TypeScript onto the Rust `tabnas` engine over `tabnas-jsonic`, taken as path dependencies on sibling checkouts (the manifest still declares `tabnas-expr`, which the crate no longer uses). C's expression rules' refs are `src/expression.rs`, the armed fallback `src/fallback.rs` and `member(node, name)` `src/members.rs`. `cargo test` runs the shared `test/spec/*.tsv` fixtures (`tests/parity_test.rs`), the Csmith corpus and every Csmith tree's invariants (`tests/csmith_test.rs`), the tree's invariants over the fixtures (`tests/tree_test.rs`), the repetitions (`tests/repeat_test.rs`) and the path-dispatch catalogue (`tests/path_dispatch_test.rs`); the inputs where it answers differently from the canonical are recorded in [`DIVERGENCE.md`](DIVERGENCE.md) and pinned by `test/divergent.tsv` and named tests. See [`rs/AGENTS.md`](rs/AGENTS.md). |
+| [`rs/`](rs/) | **Rust port** — crate `tabnas-c` (lib `tabnas_c`), a hand-translation of the TypeScript onto the Rust `tabnas` engine over `tabnas-jsonic` and `tabnas-expr`, taken as path dependencies on sibling checkouts. C's expressions, read by `tabnas-expr` with C's operator table, are `src/expr_grammar.rs`, the armed fallback `src/fallback.rs` and `member(node, name)` `src/members.rs`. `cargo test` runs the shared `test/spec/*.tsv` fixtures (`tests/parity_test.rs`), the Csmith corpus and every Csmith tree's invariants (`tests/csmith_test.rs`), the tree's invariants over the fixtures (`tests/tree_test.rs`), the repetitions (`tests/repeat_test.rs`) and the path-dispatch catalogue (`tests/path_dispatch_test.rs`); the inputs where it answers differently from the canonical are recorded in [`DIVERGENCE.md`](DIVERGENCE.md) and pinned by `test/divergent.tsv` and named tests. See [`rs/AGENTS.md`](rs/AGENTS.md). |
 | [`ts/c-grammar.jsonic`](ts/c-grammar.jsonic) | **Single source of truth** for the declarative grammar (rule shapes for the whole C surface), authored in jsonic-DSL syntax. |
 | [`ts/embed-grammar.js`](ts/embed-grammar.js) | Embeds `c-grammar.jsonic` into `src/c.ts` (between `BEGIN/END EMBEDDED` markers) as the `grammarText` string literal, **and** copies it verbatim to `go/c-grammar.jsonic` for `//go:embed`. The grammar contains backticks, so the Go side embeds from the file rather than inlining a raw string (unlike the smaller ports). Runs as the first half of `npm run build`. |
 | [`ts/src/c.ts`](ts/src/c.ts) | Plugin entry: token catalog wiring, lex matchers, grammar install, and the `@`-named ref map (conditions/actions bound by name from the grammar), the external declaration's dispatch and finishing (the names it binds) among them. |
@@ -297,9 +297,8 @@ testing unreleased ones. `cd go && go test ./...` runs the unit tests, the
 shared `test/spec/*.tsv` fixtures (`TestSpec`) and the Csmith parity gate
 (`TestCsmithCorpus`).
 
-The Rust half takes the engine and `jsonic` as path dependencies on
-sibling checkouts (the manifest also declares `expr`, which the crate no
-longer uses), with `support` as a path dev-dependency and `json`
+The Rust half takes the engine, `jsonic` and `expr` as path dependencies
+on sibling checkouts, with `support` as a path dev-dependency and `json`
 arriving through `jsonic` (`rs/Cargo.toml`), so nothing has to be
 published; `cd rs && cargo test --all-targets && cargo test --doc` runs
 the unit tests, the shared fixtures (`tests/parity_test.rs`), the Csmith
@@ -600,8 +599,8 @@ to parse surfaces one of the base codes inherited from the engine and
 One fixture file pins a code: `test/spec/unfinished.tsv` holds the
 engine's `unexpected` for a construct whose closing token never comes, in
 both modes. Every other row asserts a successful parse. The engine's own
-`cancel` is what the Rust port reports when its realize cap is hit
-(`rs/tests/limits_test.rs`). If you add rejection behaviour, pin it with
+`cancel` is what the Rust port reports when its realize cap is hit, or
+`tabnas-expr`'s bound on the parse's rule stack (`rs/tests/limits_test.rs`). If you add rejection behaviour, pin it with
 an `ERROR:<code>` fixture row so all three runtimes agree on the code, not
 merely on failing.
 
