@@ -366,21 +366,22 @@ With the Rust reader of this change:
   repetitions of `rs/tests/repeat_test.rs` reach the depth one item
   needs.
 - **Against the TypeScript reader**: over both sweeps, 41,348 documents,
-  the Rust reader builds the same tree for every one.
+  the Rust reader builds the same tree, or refuses at the same token, for
+  every one, both reading their expressions with expr.
 - **Nesting**: this port realizes no tree deeper than its cap
-  (`DIVERGENCE.md`), so a parse past it reports `cancel`. An unterminated
-  `#if` nests the rest of the document in its group, two levels a line,
-  so 127 such lines in a row realize past the cap, where 0.5 left them
-  flat and returned a tree. No compiler accepts them.
-- **Speed**: in an optimized build the first ten Csmith programs, 1.4 MB,
-  parse in 7.0 s, where 0.5's reader takes 4.3 s: C's expressions are
-  rules, each operand a stack of them. Over the same programs the
-  TypeScript reader takes 6.4 s, where 0.5's took 2.0 s, and the Go
-  reader 10.7 s with its process's start, where 0.5's took 27.6 s. In the crate's
-  test builds the engine is optimized and its debug assertion over the
-  rule stack is off (`rs/Cargo.toml`): that check compares every frame on
-  every step, and over stacks that deep it took the Csmith grader past an
-  hour.
+  (`DIVERGENCE.md`), so a parse past it reports `cancel`, as it does past
+  expr's bound on the rule stack, which nesting reaches only past the cap.
+  An unterminated `#if` nests the rest of the document in its group, two
+  levels a line, so 127 such lines in a row realize past the cap, where
+  0.5 left them flat and returned a tree. No compiler accepts them.
+- **Speed**: the first ten Csmith programs, 1.4 MB, in extended mode with
+  the stdint names bound, the parse alone in a running process: 6.6 s in
+  an optimized Rust build, 5.2 s in TypeScript and 5.0 s in Go, each
+  reading its expressions with expr. 0.5's readers took 4.3 s, 2.0 s and
+  27.6 s (Go's with its process's start). In the crate's test builds the
+  engine is optimized and its debug assertion over the rule stack is off
+  (`rs/Cargo.toml`): that check compares every frame on every step, and
+  over stacks that deep it took the Csmith grader past an hour.
 
 The maintainer approved the two changes to what is accepted or refused:
 valid C that 0.5 refuses only by its rule path's defects (a
