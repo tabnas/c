@@ -457,8 +457,13 @@ compared as JSON with its keys sorted:
   Go and Rust;
 - the 100 Csmith programs, each after a header that declares csmith.h's
   stdint names as typedef names (`typedef int int8_t;` and so on) and
-  read in plain mode, as a host reads C: 100 of 100 in Rust (the part's
-  runs took 57 minutes, the reader's 2.3).
+  read in plain mode, as a host reads C: 100 of 100 in Rust, Go and
+  TypeScript. The part's runs took 57 minutes in Rust, 3.5 hours in Go and
+  7.8 hours in TypeScript, the reader's 2 to 3 minutes in each; the Go and
+  TypeScript runs were split over processes, their times summed;
+- from a reader, a window at a time (`make()`, `MakeC`, `make_with`): the
+  fixture rows in Rust and Go, and programs past the window, seed-011 and
+  seed-074 in Rust and Go and seed-043 in TypeScript.
 
 A token's span is its offset in the passes, which `ParserEvents/1`
 counts in bytes in every runtime, and its line and column, which are the
