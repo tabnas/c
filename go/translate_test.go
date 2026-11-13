@@ -42,6 +42,69 @@ func TestTranslationParts(t *testing.T) {
 	}
 }
 
+// The transducer part the manifest names is the one the package carries.
+func TestTranslationTransduce(t *testing.T) {
+	inCheckout(t)
+	var spec struct {
+		Translate struct {
+			Transduce string  `json:"transduce"`
+			Whole     *string `json:"whole"`
+		} `json:"translate"`
+	}
+	if err := json.Unmarshal([]byte(Translate().Manifest), &spec); err != nil {
+		t.Fatal(err)
+	}
+	if spec.Translate.Transduce != "alchemy/transduce.alc" {
+		t.Fatalf("translate.transduce is %q", spec.Translate.Transduce)
+	}
+	if spec.Translate.Whole != nil {
+		t.Fatalf("c streams through its part, and the manifest says it is read whole: %q", *spec.Translate.Whole)
+	}
+	parts := Translate()
+	if parts.Transduce == nil || parts.Transduce.Entry != "c-transduce" {
+		t.Fatalf("transduce entry is %#v", parts.Transduce)
+	}
+	transduce, err := os.ReadFile("../" + spec.Translate.Transduce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parts.Transduce.Source != string(transduce) {
+		t.Fatalf("embedded transducer differs from %s: run npm run embed in ts", spec.Translate.Transduce)
+	}
+}
+
+// A host links the transducer beside the render and other formats' parts
+// in one namespace, so its entry is c-transduce and every other definition
+// is named c-tr-, a name the render does not use.
+func TestTranslationTransduceIsALibrary(t *testing.T) {
+	parts := Translate()
+	if parts.Transduce == nil {
+		t.Fatal("c carries no transducer")
+	}
+	names := func(source string) map[string]bool {
+		out := map[string]bool{}
+		for _, line := range strings.Split(source, "\n") {
+			if rest, ok := strings.CutPrefix(line, "def "); ok {
+				out[strings.Fields(rest)[0]] = true
+			}
+		}
+		return out
+	}
+	part := names(parts.Transduce.Source)
+	if !part["c-transduce"] {
+		t.Fatal("the transducer defines no c-transduce")
+	}
+	render := names(parts.Render.Source)
+	for name := range part {
+		if name != "c-transduce" && !strings.HasPrefix(name, "c-tr-") {
+			t.Fatalf("%s is not named c-tr-", name)
+		}
+		if render[name] {
+			t.Fatalf("%s is defined by the render too", name)
+		}
+	}
+}
+
 // An embed takes a plain tree into a format's own schema. c's render
 // writes the syntax tree the reader builds and nothing else, so its
 // manifest names no embed and the package carries none; a manifest that

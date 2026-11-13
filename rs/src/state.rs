@@ -221,6 +221,10 @@ pub struct LexMode {
     pub expect_header_name: bool,
     /// The directive name currently being parsed, or `None`.
     pub directive_name: Option<String>,
+    /// The position just past the last directive's newline: a `#` that a
+    /// window of the source begins just before, after space, starts a line
+    /// if a lone `\r` ended a directive there (`matchers::at_line_start`).
+    pub pp_newline_end: Option<usize>,
 }
 
 /// Everything a C parse keeps beside the engine's own state.
@@ -229,6 +233,10 @@ pub struct CState {
     pub symbols: SymbolTable,
     pub macros: MacroTable,
     pub mode: LexMode,
+    /// Where `mode` last changed, as a position in the source, and what it
+    /// was there: a token the engine cuts again over a grown window is cut
+    /// from that mode (`matchers::mode_for`).
+    pub mode_at: Option<(usize, LexMode)>,
     /// Trivia tokens emitted since the last non-trivia token, as arena
     /// ids. The lex subscriber drains this onto the next token.
     pub pending_trivia: Vec<usize>,
@@ -257,20 +265,6 @@ pub struct CState {
     /// fails the parse instead of handing back a tree with a hole in
     /// it. See `crate::REALIZE_DEPTH_CAP`.
     pub gave_up: bool,
-    /// The whole source as characters, with the address and length it
-    /// was built from.
-    ///
-    /// The canonical matchers index the source with `charCodeAt`, which
-    /// costs nothing. A Rust `&str` cannot be indexed by character, so
-    /// the matchers here work over a `[char]`, and building that per
-    /// call, for every matcher, at every token, made the parse cost grow
-    /// with the SQUARE of the input: 40 KB of C took a minute. It is
-    /// built once per parse instead and handed out as a shared slice.
-    ///
-    /// The key is the source's address and length. Two live sources
-    /// cannot share both, and `reset` clears this at the start of every
-    /// parse, so a stale entry cannot outlive the text it came from.
-    pub source_chars: Option<(usize, usize, std::rc::Rc<Vec<char>>)>,
     /// The record of the tokens the lexer gave the parser, as arena ids,
     /// from the first the current external declaration has not taken
     /// (`rec_base` is the count of tokens taken before it), and that
@@ -291,6 +285,7 @@ impl CState {
             symbols: SymbolTable::new(),
             macros: MacroTable::default(),
             mode: LexMode::default(),
+            mode_at: None,
             pending_trivia: Vec::new(),
             nodes: Vec::new(),
             tokens: Vec::new(),
@@ -299,7 +294,6 @@ impl CState {
             no_token: None,
             active: false,
             gave_up: false,
-            source_chars: None,
             rec: Vec::new(),
             rec_base: 0,
             ed: None,

@@ -893,3 +893,100 @@ pub fn child_is_expr(rule: &Rule) -> bool {
         .is_some_and(|child| is_expression_rule(child.name.as_str()))
         && child_node_id(rule).is_some()
 }
+
+// The part's copy of C's operator table holds to the reader's.
+//
+// C's transducer part (alchemy/transduce.alc) places each operator of an
+// expression itself, over expr's passes, by a copy of C's operator table
+// in alchemy text: the maintainer ruled so on 2026-11-13. The copy is a
+// second statement of C's precedence, so this test holds it to the table
+// the reader gives expr, `op_table`, entry for entry, and a drift between
+// the two fails here. Each entry of the copy is `[name kind src left
+// right]`: the kind (infix, prefix, suffix, ternary, paren, cast), the
+// operator's token (an opener for a paren or a cast, the first token of a
+// ternary), and its binding powers, -1 where the table gives none.
+#[cfg(test)]
+mod part_operator_table {
+    use std::collections::BTreeMap;
+
+    use super::op_table;
+
+    fn entry(op: &tabnas_expr::OpDef) -> String {
+        let kind = if op.cast {
+            "cast"
+        } else if op.paren {
+            "paren"
+        } else if op.ternary {
+            "ternary"
+        } else if op.infix {
+            "infix"
+        } else if op.prefix {
+            "prefix"
+        } else if op.suffix {
+            "suffix"
+        } else {
+            "?"
+        };
+        let src = match kind {
+            "cast" | "paren" => op.osrc.clone(),
+            _ => op.src.first().cloned().unwrap_or_default(),
+        };
+        format!(
+            "{kind} {src} {} {}",
+            op.left.unwrap_or(-1),
+            op.right.unwrap_or(-1)
+        )
+    }
+
+    fn part_table() -> BTreeMap<String, String> {
+        let source = crate::translate()
+            .and_then(|parts| parts.transduce)
+            .and_then(|part| part.source)
+            .expect("c carries a transducer");
+        let begin = source
+            .find("; BEGIN C_OP_TABLE")
+            .expect("a C_OP_TABLE block");
+        let end = source.find("; END C_OP_TABLE").expect("its end");
+        let mut out = BTreeMap::new();
+        for line in source[begin..end].lines() {
+            let line = line.trim();
+            let Some(inner) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) else {
+                continue;
+            };
+            let mut quoted = inner.split('"').skip(1).step_by(2);
+            let (Some(name), Some(kind), Some(src)) = (quoted.next(), quoted.next(), quoted.next())
+            else {
+                continue;
+            };
+            let powers: Vec<i64> = inner
+                .rsplit('"')
+                .next()
+                .unwrap_or_default()
+                .split_whitespace()
+                .map(|n| n.parse().expect("a binding power"))
+                .collect();
+            assert_eq!(powers.len(), 2, "{line} gives two binding powers");
+            out.insert(
+                name.to_string(),
+                format!("{kind} {src} {} {}", powers[0], powers[1]),
+            );
+        }
+        assert!(!out.is_empty(), "the C_OP_TABLE block holds no entry");
+        out
+    }
+
+    #[test]
+    fn the_parts_copy_is_the_readers_table() {
+        let got = part_table();
+        let mut want = BTreeMap::new();
+        for (name, op) in &op_table().op {
+            if let Some(op) = op {
+                want.insert(name.clone(), entry(op));
+            }
+        }
+        assert_eq!(
+            got, want,
+            "the part's C_OP_TABLE is not the reader's op_table"
+        );
+    }
+}

@@ -400,27 +400,93 @@ pin both.
 
 ## The part
 
-C's transducer part reads the rule passes with token items
-(`parser-events input :tokens`) and holds one external declaration at a
-time: a binary chain's root is known last, and an armed declaration may
-still become unknown. It writes each node from the passes of the rule
-that builds it, a node's span from its first token's offset, row and
-column, and each comment where the reader puts it. A conditional group
-is written as its passes arrive: it opens at its `#if` and closes at its
-`#endif`. Once the part streams, the manifest's `translate` object loses
-`whole`, and the whole parser declares `lex.window` once its matchers
-are verified at the window's edge.
+C's transducer part, `alchemy/transduce.alc` (entry `c-transduce`),
+writes the reader's tree as JSON events from the rule passes of C's
+grammar with their token items (`parser-events input :tokens`), for a
+host that reads parser events. It follows the engine's stack a frame per
+rule and runs, for each pass, what the reader's actions do for that
+rule, state and alternate: a pass names the alternate its conditions
+chose, so the grammar's conditions need no port. A node the actions
+build is a register, written by reference as the reader writes an
+object; a frame keeps the registers it made, and its end hands them to
+the rule below it. Comments come as token items, and each joins the
+token after it, which keeps it or drops it where the reader does.
 
 No pass opens or closes an expression's node: expr's rules rewrite an
 operation in place as each operator arrives, and C's evaluator builds
 C's nodes once the expression ends. The maintainer ruled on 2026-11-13:
 C's part places each operator over expr's passes, with a copy of C's
 operator table in alchemy text, held to the parser's tree by tests. The
-part holds one expression at a time and places its operators from the
-tokens and alternates of expr's passes; expr is unchanged for it. The
-copy is a second statement of C's precedence, so the part's tree must
-equal the parser's over every fixture and every Csmith program, in every
-runtime, and a drift between the two tables fails the gate.
+part holds one expression at a time and places each operator by its
+binding powers from the tokens and the alternates' groups of expr's
+passes, then makes each operation C's node as the reader's evaluator
+does. The copy is a second statement of C's precedence: a test in every
+runtime (`ts/test/part.test.ts`, `TestPartOperatorTable` in
+`go/part_test.go`, `part_operator_table` in `rs/src/expr_grammar.rs`)
+holds it to `C_OP_TABLE` entry for entry, and fails on a drift. expr's
+TypeScript and Rust named an alternate's groups as the part reads them;
+expr 0.6.3 gave Go's alternates the same groups, and pinned them in
+`test/passes/groups.tsv`, which all three of expr's runtimes run.
+
+What it writes when:
+
+- the translation unit's items as each ends, so a conditional group is
+  written as its `#endif` closes it;
+- a function definition the rules hold to (not an armed one, which may
+  still become an unknown declaration) from its body's `{`: the external
+  declaration's opening, its specifiers and declarator, then the body,
+  each statement as it ends, and each statement that holds statements
+  (a compound statement, `if`, `while`, `do`, `for`, `switch`, a labeled
+  statement) as it is read;
+- a declaration, a statement that holds no statement, an expression and
+  an armed declaration once it ends.
+
+A subtree is written bottom up, each node's events made from its
+children's, so the evaluation nests four levels for each level of the
+tree: the deepest Csmith tree, 147 nodes, nests 588, within alchemy's
+1,000 (`MAX_EVAL_DEPTH`). Written top down, a node asking for its first
+token's span below it, seed-081's tree, 129 nodes deep, failed with
+`recursion`.
+
+Measured on 2026-11-13, the part's tree is the reader's, spans included,
+compared as JSON with its keys sorted:
+
+- the 224 rows of `test/spec/` a parse from the start rule reads (the
+  rows that start at `val` are left out, as a host reads a document from
+  the start rule), under each row's options: 224 of 224 in TypeScript,
+  Go and Rust;
+- the 100 Csmith programs, each after a header that declares csmith.h's
+  stdint names as typedef names (`typedef int int8_t;` and so on) and
+  read in plain mode, as a host reads C: 100 of 100 in Rust, Go and
+  TypeScript. The part's runs took 57 minutes in Rust, 3.5 hours in Go and
+  7.8 hours in TypeScript, the reader's 2 to 3 minutes in each; the Go and
+  TypeScript runs were split over processes, their times summed;
+- from a reader, a window at a time (`make()`, `MakeC`, `make_with`): the
+  fixture rows in Rust and Go, and programs past the window, seed-011 and
+  seed-074 in Rust and Go and seed-043 in TypeScript.
+
+A token's span is its offset in the passes, which `ParserEvents/1`
+counts in bytes in every runtime, and its line and column, which are the
+engine's; its end adds its length in characters. On ASCII text that is
+the reader's span in every runtime. Past ASCII it is not any reader's:
+each counts its own unit (bytes in Go, UTF-16 units in TypeScript,
+characters in Rust, `DIVERGENCE.md`, "Span offsets on non-ASCII input"),
+and alchemy has no length of a string in bytes or UTF-16 units to give
+the end in the start's unit. A token past such text has a start in bytes
+and an end that adds characters to it; the fixtures and the Csmith
+programs are ASCII, as the fixtures are for the readers' own sake.
+
+What the part holds is the stack of rules, the expression being read,
+the item being read and the registers of the nodes not yet written: over
+the declarations of the streaming gate's document (`/* text */ int xN =
+N;`), 8.5 KB at most for 300 items and for 3,000; over a function of
+2 statements an item, 18.7 KB for 300 items and for 3,000. A held
+declaration is held whole: over a Csmith program, a global array's
+initializer of some thousand items is the most it holds, 337 KB in
+seed-075, and an armed declaration in extended mode, a function
+definition among them, is held to its end. From a reader, a window at a
+time (`make()`), the part's first event comes once the engine has read
+its window's margin ahead: at 69,632 bytes of a 600,780-byte document.
 
 ## Order
 
@@ -435,5 +501,6 @@ runtime, and a drift between the two tables fails the gate.
 3. Rust, to the same tree, with the same rules and refs
    (`rs/src/fallback.rs`, `rs/src/expr_grammar.rs`, `rs/src/members.rs`);
    the 0.5 copies go.
-4. The part, the window, the manifest and the render; the release, a
-   minor version, 0.6.0, since the tree changes.
+4. The release, a minor version, 0.6.0, since the tree changes.
+5. The part, the window and the manifest: the release, a patch, 0.6.1,
+   since it adds to the API and the manifest and changes no tree.

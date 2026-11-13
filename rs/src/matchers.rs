@@ -10,13 +10,27 @@
 //! canonical ones index by character code and because `\d`, `\w`, `\s`
 //! and `\b` in the `regex` crate are Unicode aware where JavaScript's
 //! are not. Nothing in this file widens a class past ASCII.
+//!
+//! Each token is cut from the text the lexer holds: the whole source, or
+//! in a parse from a reader a window of it (`lex.window`, admin ADR-30).
+//! A scan reads the characters from the cursor ([`Look`], over
+//! `Lexer::window`) as far as it needs, forward to what ends its token,
+//! so one that stops inside the window gives what the whole text gives.
+//! One whose answer could change with more text, a scan that reaches the
+//! window's end, answers [`Cut::Edge`] before it makes a token, moves the
+//! cursor or changes the lexer's mode; the matcher then asks the window
+//! for twice what it holds past the cursor (`Lexer::fill`) and cuts again
+//! over the grown text. Where the window does not grow, the source ends
+//! there, and the cut is made with the end of the window taken for the end
+//! of the source (`last`). A long token so costs its length to read, not
+//! its square. In a whole text every cut is the last.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use tabnas::{Context, ImperativeLexMatcher, Lexer, Rule, Tin, Token, Value};
 
-use crate::state::with_state;
+use crate::state::{with_state, LexMode};
 use crate::tokens::{is_reserved, keyword_token_name_unchecked};
 
 /// Token identities the matchers emit, resolved once at install time.
@@ -63,50 +77,158 @@ fn bad(lexer: &Lexer<'_>, code: &str, from_chars: usize, to_chars: usize) -> Opt
     Some(lexer.bad_span(code, base + from_chars, base + to_chars))
 }
 
-/// The remaining source as characters, so the scanners can index it the
-/// way the canonical matchers index the source with `charCodeAt`.
-///
-/// The characters are the WHOLE source, built once per parse and shared
-/// (see `CState::source_chars`); this is a handle onto the tail of it,
-/// so taking one costs a reference count rather than a copy of
-/// everything left to read.
-struct Tail {
-    all: std::rc::Rc<Vec<char>>,
-    from: usize,
+/// The characters from the cursor to the end of the text the lexer holds,
+/// decoded as far as a scan reads them, so that a cut costs what it reads
+/// and not what is left of the source.
+pub(crate) struct Look<'a> {
+    chars: std::str::Chars<'a>,
+    read: Vec<char>,
 }
 
-impl std::ops::Deref for Tail {
-    type Target = [char];
+impl<'a> Look<'a> {
+    fn new(text: &'a str) -> Self {
+        Look {
+            chars: text.chars(),
+            read: Vec::new(),
+        }
+    }
 
-    fn deref(&self) -> &[char] {
-        self.all.get(self.from..).unwrap_or(&[])
+    /// The character at `index`, or `None` past the text.
+    fn get(&mut self, index: usize) -> Option<char> {
+        while self.read.len() <= index {
+            self.read.push(self.chars.next()?);
+        }
+        Some(self.read[index])
+    }
+
+    /// The character at `index`, or `'\0'` past the text.
+    fn at(&mut self, index: usize) -> char {
+        self.get(index).unwrap_or('\0')
+    }
+
+    /// The characters from `from` up to `to`, or to the end of the text.
+    fn slice(&mut self, from: usize, to: usize) -> &[char] {
+        let _ = self.get(to.saturating_sub(1));
+        let end = to.min(self.read.len());
+        &self.read[from.min(end)..end]
+    }
+
+    /// How many characters the text holds: all of them, decoded.
+    fn count(&mut self) -> usize {
+        self.read.extend(self.chars.by_ref());
+        self.read.len()
     }
 }
 
-fn chars(lexer: &Lexer<'_>) -> Tail {
-    let source = lexer.source();
-    let key = (source.as_ptr() as usize, source.len());
-    let all = with_state(|state| {
-        if let Some((address, length, cached)) = &state.source_chars {
-            if (*address, *length) == key {
-                return std::rc::Rc::clone(cached);
+/// What a scan answers.
+pub(crate) enum Cut {
+    /// Not this matcher's token.
+    No,
+    /// The scan read to the end of a window that may grow: cut again over
+    /// more text.
+    Edge,
+    /// A token named so, of so many characters, and the lexer mode after
+    /// it where it changes the mode.
+    Hit(String, usize, Option<LexMode>),
+    /// A refusal with its code, over `[from, to)` characters from the
+    /// cursor.
+    Bad(&'static str, usize, usize),
+}
+
+/// What a scan reads beside the characters at the cursor.
+pub(crate) struct Scope<'a> {
+    /// Whether the end of the text the lexer holds is the source's.
+    last: bool,
+    /// The lexer mode the cut is made in.
+    mode: &'a LexMode,
+    /// The text the lexer holds before the cursor, and whether it is a
+    /// window of a source read from a reader.
+    before: &'a str,
+    windowed: bool,
+    /// The cursor's position in the source, in characters, and its column.
+    pos: usize,
+    ci: usize,
+}
+
+impl Scope<'_> {
+    /// Whether fewer than `n` characters lie at and past `index` while the
+    /// source may have more: a scan that needs them answers `Cut::Edge`.
+    fn short(&self, look: &mut Look<'_>, index: usize, n: usize) -> bool {
+        !self.last && n > 0 && look.get(index + n - 1).is_none()
+    }
+}
+
+fn hit(name: &str, consumed: usize) -> Cut {
+    Cut::Hit(name.to_string(), consumed, None)
+}
+
+/// The lexer mode for a cut at the cursor. The engine cuts a token again
+/// over a grown window where a read met the window's end, so a cut at the
+/// place the mode last changed is a cut of that token again, and it reads
+/// the mode the first cut found: the change is made once, whatever the
+/// number of cuts.
+fn mode_for(pos: usize) -> LexMode {
+    with_state(|state| {
+        if let Some((at, before)) = &state.mode_at {
+            if *at == pos {
+                state.mode = before.clone();
             }
         }
-        let built = std::rc::Rc::new(source.chars().collect::<Vec<char>>());
-        state.source_chars = Some((key.0, key.1, std::rc::Rc::clone(&built)));
-        built
-    });
-    Tail {
-        all,
-        // `Site::pos` is the cursor's position in Unicode scalar values,
-        // which is what indexes the vector; `Site::si` is its byte
-        // position, which does not.
-        from: lexer.point().site.pos,
-    }
+        state.mode.clone()
+    })
 }
 
-fn at(text: &[char], index: usize) -> char {
-    text.get(index).copied().unwrap_or('\0')
+/// Run `scan` at the cursor over the text the lexer holds, cutting again
+/// over a grown window wherever it answers `Cut::Edge`, and make what it
+/// answers: a token (setting the mode it leaves), a refusal, or nothing.
+fn cut(
+    lexer: &mut Lexer<'_>,
+    tins: &Tins,
+    scan: &dyn Fn(&mut Look<'_>, &Scope<'_>) -> Cut,
+) -> Option<Token> {
+    let point = lexer.point();
+    let pos = point.site.pos;
+    let mode = mode_for(pos);
+    let windowed = lexer.windowed();
+    let mut last = !windowed;
+    loop {
+        let (answer, held) = {
+            let source = lexer.source();
+            let window = lexer.window();
+            let before = &source[..source.len() - window.len()];
+            let scope = Scope {
+                last,
+                mode: &mode,
+                before,
+                windowed,
+                pos,
+                ci: point.site.ci,
+            };
+            let mut look = Look::new(window);
+            let answer = scan(&mut look, &scope);
+            (answer, window.len())
+        };
+        match answer {
+            Cut::Edge => {
+                let chars = lexer.window().chars().count();
+                lexer.fill((chars + 1).max(2 * chars));
+                if lexer.window().len() <= held {
+                    last = true;
+                }
+            }
+            Cut::No => return None,
+            Cut::Bad(code, from, to) => return bad(lexer, code, from, to),
+            Cut::Hit(name, consumed, after) => {
+                if let Some(after) = after {
+                    with_state(|state| {
+                        state.mode_at = Some((pos, state.mode.clone()));
+                        state.mode = after;
+                    });
+                }
+                return emit(lexer, tins, &name, consumed);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -115,173 +237,213 @@ fn at(text: &[char], index: usize) -> char {
 
 /// C whitespace, minus the newline that terminates a preprocessor
 /// directive.
-fn whitespace(lexer: &mut Lexer<'_>, tins: &Tins) -> Option<Token> {
-    let text = chars(lexer);
-    let first = at(&text, 0);
-    if text.is_empty() || !matches!(first, ' ' | '\t' | '\u{0b}' | '\u{0c}' | '\r' | '\n') {
-        return None;
+fn whitespace(look: &mut Look<'_>, scope: &Scope<'_>) -> Cut {
+    let Some(first) = look.get(0) else {
+        return if scope.last { Cut::No } else { Cut::Edge };
+    };
+    if !matches!(first, ' ' | '\t' | '\u{0b}' | '\u{0c}' | '\r' | '\n') {
+        return Cut::No;
     }
-    let in_directive = with_state(|state| state.mode.in_directive);
     let mut index = 0;
-    while index < text.len() {
-        match text[index] {
-            ' ' | '\t' | '\u{0b}' | '\u{0c}' | '\r' => index += 1,
-            '\n' => {
-                if in_directive {
+    loop {
+        match look.get(index) {
+            Some(' ' | '\t' | '\u{0b}' | '\u{0c}' | '\r') => index += 1,
+            Some('\n') => {
+                if scope.mode.in_directive {
                     break;
                 }
                 index += 1;
             }
-            _ => break,
+            Some(_) => break,
+            None => {
+                if !scope.last {
+                    return Cut::Edge;
+                }
+                break;
+            }
         }
     }
     if index == 0 {
-        return None;
+        return Cut::No;
     }
-    emit(lexer, tins, "#SP", index)
+    hit("#SP", index)
 }
 
 // ---------------------------------------------------------------------
 // Line continuation
 // ---------------------------------------------------------------------
 
-fn line_cont(lexer: &mut Lexer<'_>, tins: &Tins) -> Option<Token> {
-    let text = chars(lexer);
-    if at(&text, 0) != '\\' {
-        return None;
+fn line_cont(look: &mut Look<'_>, scope: &Scope<'_>) -> Cut {
+    if scope.short(look, 0, 1) {
+        return Cut::Edge;
     }
-    let consumed = if at(&text, 1) == '\n' {
+    if look.at(0) != '\\' {
+        return Cut::No;
+    }
+    if scope.short(look, 0, 3) {
+        return Cut::Edge;
+    }
+    let consumed = if look.at(1) == '\n' {
         2
-    } else if at(&text, 1) == '\r' && at(&text, 2) == '\n' {
+    } else if look.at(1) == '\r' && look.at(2) == '\n' {
         3
-    } else if at(&text, 1) == '\r' {
+    } else if look.at(1) == '\r' {
         2
     } else {
-        return None;
+        return Cut::No;
     };
-    emit(lexer, tins, "TRIVIA_LINE_CONT", consumed)
+    hit("TRIVIA_LINE_CONT", consumed)
 }
 
 // ---------------------------------------------------------------------
 // Comments
 // ---------------------------------------------------------------------
 
-fn line_comment(lexer: &mut Lexer<'_>, tins: &Tins) -> Option<Token> {
-    let text = chars(lexer);
-    if at(&text, 0) != '/' || at(&text, 1) != '/' {
-        return None;
+fn line_comment(look: &mut Look<'_>, scope: &Scope<'_>) -> Cut {
+    if scope.short(look, 0, 2) {
+        return Cut::Edge;
+    }
+    if look.at(0) != '/' || look.at(1) != '/' {
+        return Cut::No;
     }
     let mut index = 2;
-    while index < text.len() && !matches!(text[index], '\n' | '\r') {
-        index += 1;
+    loop {
+        match look.get(index) {
+            Some('\n' | '\r') => break,
+            Some(_) => index += 1,
+            None => {
+                if !scope.last {
+                    return Cut::Edge;
+                }
+                break;
+            }
+        }
     }
-    emit(lexer, tins, "TRIVIA_LINE_COMMENT", index)
+    hit("TRIVIA_LINE_COMMENT", index)
 }
 
-fn block_comment(lexer: &mut Lexer<'_>, tins: &Tins) -> Option<Token> {
-    let text = chars(lexer);
-    if at(&text, 0) != '/' || at(&text, 1) != '*' {
-        return None;
+fn block_comment(look: &mut Look<'_>, scope: &Scope<'_>) -> Cut {
+    if scope.short(look, 0, 2) {
+        return Cut::Edge;
+    }
+    if look.at(0) != '/' || look.at(1) != '*' {
+        return Cut::No;
     }
     let mut index = 2;
-    while index + 1 < text.len() {
-        if text[index] == '*' && text[index + 1] == '/' {
-            return emit(lexer, tins, "TRIVIA_BLOCK_COMMENT", index + 2);
+    while look.get(index + 1).is_some() {
+        if look.at(index) == '*' && look.at(index + 1) == '/' {
+            return hit("TRIVIA_BLOCK_COMMENT", index + 2);
         }
         index += 1;
     }
+    if !scope.last {
+        return Cut::Edge;
+    }
     // The canonical matcher reports the span from the opener to the end
-    // of the WHOLE source, so the end offset is absolute there.
-    let end = lexer.source().chars().count();
-    let base = lexer.point().site.pos;
-    Some(lexer.bad_span("unterminated_comment", base, end))
+    // of the WHOLE source.
+    Cut::Bad("unterminated_comment", 0, look.count())
 }
 
 // ---------------------------------------------------------------------
 // Preprocessor boundaries
 // ---------------------------------------------------------------------
 
-/// True when only whitespace separates this offset from the start of a
-/// logical line.
-fn at_line_start(before: &str) -> bool {
-    for character in before.chars().rev() {
+/// True when only spaces and tabs separate the cursor from the start of a
+/// logical line. The scan reads back through the text the lexer holds. A
+/// window keeps the space after the last token the parser does not
+/// ignore, so a scan that reaches the window's start has met that token's
+/// end: the source's start, the cursor's column (a line the line's `\n`
+/// began), or else the directive newline that ended there (a lone `\r`,
+/// which starts no column) say whether a line began there.
+fn at_line_start(scope: &Scope<'_>) -> bool {
+    let mut spaces = 0;
+    for character in scope.before.chars().rev() {
         match character {
             '\n' | '\r' => return true,
-            ' ' | '\t' => continue,
+            ' ' | '\t' => spaces += 1,
             _ => return false,
         }
     }
-    true
+    if !scope.windowed || scope.ci == spaces + 1 {
+        return true;
+    }
+    let low = scope.pos - spaces;
+    low == 0 || scope.mode.pp_newline_end == Some(low)
 }
 
-fn pp_directive_open(lexer: &mut Lexer<'_>, tins: &Tins) -> Option<Token> {
-    let text = chars(lexer);
-    let consumed = if at(&text, 0) == '#' {
+fn pp_directive_open(look: &mut Look<'_>, scope: &Scope<'_>) -> Cut {
+    if scope.short(look, 0, 2) {
+        return Cut::Edge;
+    }
+    let consumed = if look.at(0) == '#' {
         1
-    } else if at(&text, 0) == '%' && at(&text, 1) == ':' {
+    } else if look.at(0) == '%' && look.at(1) == ':' {
         2
     } else {
-        return None;
+        return Cut::No;
     };
-    let position = lexer.point().site.si;
-    if !at_line_start(&lexer.source()[..position]) {
-        return None;
+    if !at_line_start(scope) {
+        return Cut::No;
     }
-    with_state(|state| {
-        state.mode.in_directive = true;
-        state.mode.directive_name = None;
-        state.mode.expect_header_name = false;
-    });
-    emit(lexer, tins, "PP_HASH", consumed)
+    let mut mode = scope.mode.clone();
+    mode.in_directive = true;
+    mode.directive_name = None;
+    mode.expect_header_name = false;
+    Cut::Hit("PP_HASH".to_string(), consumed, Some(mode))
 }
 
-fn pp_newline(lexer: &mut Lexer<'_>, tins: &Tins) -> Option<Token> {
-    if !with_state(|state| state.mode.in_directive) {
-        return None;
+fn pp_newline(look: &mut Look<'_>, scope: &Scope<'_>) -> Cut {
+    if !scope.mode.in_directive {
+        return Cut::No;
     }
-    let text = chars(lexer);
-    let first = at(&text, 0);
+    if scope.short(look, 0, 2) {
+        return Cut::Edge;
+    }
+    let first = look.at(0);
     if first != '\n' && first != '\r' {
-        return None;
+        return Cut::No;
     }
-    let consumed = if first == '\r' && at(&text, 1) == '\n' {
+    let consumed = if first == '\r' && look.at(1) == '\n' {
         2
     } else {
         1
     };
-    with_state(|state| {
-        state.mode.in_directive = false;
-        state.mode.directive_name = None;
-        state.mode.expect_header_name = false;
-    });
-    emit(lexer, tins, "PP_NEWLINE", consumed)
+    let mut mode = scope.mode.clone();
+    mode.in_directive = false;
+    mode.directive_name = None;
+    mode.expect_header_name = false;
+    mode.pp_newline_end = Some(scope.pos + consumed);
+    Cut::Hit("PP_NEWLINE".to_string(), consumed, Some(mode))
 }
 
-fn header_name(lexer: &mut Lexer<'_>, tins: &Tins) -> Option<Token> {
-    let armed = with_state(|state| state.mode.in_directive && state.mode.expect_header_name);
-    if !armed {
-        return None;
+fn header_name(look: &mut Look<'_>, scope: &Scope<'_>) -> Cut {
+    if !(scope.mode.in_directive && scope.mode.expect_header_name) {
+        return Cut::No;
     }
-    let text = chars(lexer);
-    let close = match at(&text, 0) {
+    if scope.short(look, 0, 1) {
+        return Cut::Edge;
+    }
+    let close = match look.at(0) {
         '<' => '>',
         '"' => '"',
-        _ => return None,
+        _ => return Cut::No,
     };
     let mut index = 1;
-    while index < text.len() {
-        let character = text[index];
+    while let Some(character) = look.get(index) {
         if character == '\n' {
-            return bad(lexer, "unterminated_header_name", 0, index);
+            return Cut::Bad("unterminated_header_name", 0, index);
         }
         if character == close {
-            index += 1;
-            with_state(|state| state.mode.expect_header_name = false);
-            return emit(lexer, tins, "LIT_HEADER_NAME", index);
+            let mut mode = scope.mode.clone();
+            mode.expect_header_name = false;
+            return Cut::Hit("LIT_HEADER_NAME".to_string(), index + 1, Some(mode));
         }
         index += 1;
     }
-    bad(lexer, "unterminated_header_name", 0, text.len())
+    if !scope.last {
+        return Cut::Edge;
+    }
+    Cut::Bad("unterminated_header_name", 0, index)
 }
 
 // ---------------------------------------------------------------------
@@ -296,57 +458,98 @@ fn is_id_part(character: char) -> bool {
     character.is_ascii_alphanumeric() || character == '_' || character == '$'
 }
 
-fn identifier(lexer: &mut Lexer<'_>, tins: &Tins) -> Option<Token> {
-    let text = chars(lexer);
-    if text.is_empty() || !is_id_start(text[0]) {
-        return None;
+fn identifier(look: &mut Look<'_>, scope: &Scope<'_>) -> Cut {
+    if scope.short(look, 0, 1) {
+        return Cut::Edge;
+    }
+    if !is_id_start(look.at(0)) {
+        return Cut::No;
     }
     let mut index = 1;
-    while index < text.len() && is_id_part(text[index]) {
-        index += 1;
+    loop {
+        match look.get(index) {
+            Some(character) if is_id_part(character) => index += 1,
+            Some(_) => break,
+            None => {
+                if !scope.last {
+                    return Cut::Edge;
+                }
+                break;
+            }
+        }
     }
-    let word: String = text[..index].iter().collect();
+    let word: String = look.slice(0, index).iter().collect();
+    let mode = scope.mode;
 
     if is_reserved(&word) {
         let name = keyword_token_name_unchecked(&word);
-        with_state(|state| {
-            if state.mode.in_directive && state.mode.directive_name.is_none() {
-                state.mode.directive_name = Some(word.clone());
-            }
-        });
-        return emit(lexer, tins, &name, index);
+        if mode.in_directive && mode.directive_name.is_none() {
+            let mut after = mode.clone();
+            after.directive_name = Some(word);
+            return Cut::Hit(name, index, Some(after));
+        }
+        return Cut::Hit(name, index, None);
     }
 
-    let names_directive = with_state(|state| {
-        if state.mode.in_directive && state.mode.directive_name.is_none() {
-            state.mode.directive_name = Some(word.clone());
-            if word == "include" || word == "embed" || word == "include_next" {
-                state.mode.expect_header_name = true;
-            }
-            true
-        } else {
-            false
+    if mode.in_directive && mode.directive_name.is_none() {
+        let mut after = mode.clone();
+        if word == "include" || word == "embed" || word == "include_next" {
+            after.expect_header_name = true;
         }
-    });
-    if names_directive {
-        return emit(lexer, tins, "ID", index);
+        after.directive_name = Some(word);
+        return Cut::Hit("ID".to_string(), index, Some(after));
     }
 
     let name = with_state(|state| {
-        if !state.mode.in_directive && state.symbols.is_typedef(&word) {
+        if !mode.in_directive && state.symbols.is_typedef(&word) {
             "TYPEDEF_NAME"
-        } else if !state.mode.in_directive && state.macros.has(&word) {
+        } else if !mode.in_directive && state.macros.has(&word) {
             "MACRO_NAME"
         } else {
             "ID"
         }
     });
-    emit(lexer, tins, name, index)
+    hit(name, index)
 }
 
 // ---------------------------------------------------------------------
 // Numeric literals
 // ---------------------------------------------------------------------
+
+/// The characters of a number from the cursor, as a preprocessing number
+/// runs: a digit, or a `.` and a digit, then digits, letters, `_`, `.`,
+/// `'`, and a sign after an exponent's letter; `None` where the run
+/// reaches the end of the text. A number's pattern matches within them and
+/// looks at most one character past its match.
+fn number_run(look: &mut Look<'_>) -> Option<usize> {
+    let mut index = 0;
+    loop {
+        let character = look.get(index)?;
+        if character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '\'') {
+            index += 1;
+            continue;
+        }
+        if matches!(character, '+' | '-')
+            && index > 0
+            && matches!(look.at(index - 1), 'e' | 'E' | 'p' | 'P')
+        {
+            index += 1;
+            continue;
+        }
+        return Some(index);
+    }
+}
+
+/// The characters a number's scan reads: its run and the character after
+/// it, or an edge where the run reaches the end of a window that may grow.
+fn number_text<'l>(look: &'l mut Look<'_>, scope: &Scope<'_>) -> Result<&'l [char], Cut> {
+    let run = match number_run(look) {
+        Some(run) => run,
+        None if scope.last => look.count(),
+        None => return Err(Cut::Edge),
+    };
+    Ok(look.slice(0, run + 1))
+}
 
 /// Digits of a run that may carry C23 `'` separators: one leading digit
 /// accepted by `first`, then any number of `'` or digits accepted by
@@ -428,26 +631,33 @@ fn scan_integer(text: &[char]) -> Option<(usize, usize)> {
     Some((number, index))
 }
 
-fn integer(lexer: &mut Lexer<'_>, tins: &Tins) -> Option<Token> {
-    let text = chars(lexer);
-    if !at(&text, 0).is_ascii_digit() {
-        return None;
+fn integer(look: &mut Look<'_>, scope: &Scope<'_>) -> Cut {
+    if scope.short(look, 0, 1) {
+        return Cut::Edge;
     }
-    let (number, whole) = scan_integer(&text)?;
-    let hex = at(&text, 0) == '0' && matches!(at(&text, 1), 'x' | 'X');
-    let after = at(&text, whole);
+    if !look.at(0).is_ascii_digit() {
+        return Cut::No;
+    }
+    let text = match number_text(look, scope) {
+        Ok(text) => text,
+        Err(edge) => return edge,
+    };
+    let Some((_, whole)) = scan_integer(text) else {
+        return Cut::No;
+    };
+    let hex = at(text, 0) == '0' && matches!(at(text, 1), 'x' | 'X');
+    let after = at(text, whole);
     if after == '.' || after == 'e' || after == 'E' {
         // For a hex literal only `p`/`P` introduces an exponent, so a
         // trailing `e` stays part of the integer.
         if !hex {
-            return None;
+            return Cut::No;
         }
     }
     if hex && (after == '.' || after == 'p' || after == 'P') {
-        return None;
+        return Cut::No;
     }
-    let _ = number;
-    emit(lexer, tins, "LIT_INT", whole)
+    hit("LIT_INT", whole)
 }
 
 /// `FLOAT_HEX_RE`.
@@ -568,15 +778,23 @@ fn float_suffix(text: &[char], from: usize) -> usize {
     index - from
 }
 
-fn float(lexer: &mut Lexer<'_>, tins: &Tins) -> Option<Token> {
-    let text = chars(lexer);
-    let first = at(&text, 0);
-    let starts_digit = first.is_ascii_digit();
-    let starts_dot = first == '.' && at(&text, 1).is_ascii_digit();
-    if !starts_digit && !starts_dot {
-        return None;
+fn float(look: &mut Look<'_>, scope: &Scope<'_>) -> Cut {
+    if scope.short(look, 0, 2) {
+        return Cut::Edge;
     }
-    let length = scan_float_hex(&text).or_else(|| scan_float_dec(&text))?;
+    let first = look.at(0);
+    let starts_digit = first.is_ascii_digit();
+    let starts_dot = first == '.' && look.at(1).is_ascii_digit();
+    if !starts_digit && !starts_dot {
+        return Cut::No;
+    }
+    let text = match number_text(look, scope) {
+        Ok(text) => text,
+        Err(edge) => return edge,
+    };
+    let Some(length) = scan_float_hex(text).or_else(|| scan_float_dec(text)) else {
+        return Cut::No;
+    };
     let matched = &text[..length];
     let hex = matched.len() >= 2 && matched[0] == '0' && matches!(matched[1], 'x' | 'X');
     let has_float_mark = matched.iter().any(|character| {
@@ -586,14 +804,19 @@ fn float(lexer: &mut Lexer<'_>, tins: &Tins) -> Option<Token> {
         )
     });
     if !has_float_mark && !hex {
-        return None;
+        return Cut::No;
     }
-    emit(lexer, tins, "LIT_FLOAT", length)
+    hit("LIT_FLOAT", length)
 }
 
 // ---------------------------------------------------------------------
 // Character and string literals
 // ---------------------------------------------------------------------
+
+/// The character at `index` of `text`, or `'\0'` past it.
+fn at(text: &[char], index: usize) -> char {
+    text.get(index).copied().unwrap_or('\0')
+}
 
 /// `^(L|u8|u|U)?'`, returning the prefix length.
 fn char_prefix(text: &[char]) -> Option<usize> {
@@ -608,24 +831,31 @@ fn char_prefix(text: &[char]) -> Option<usize> {
     None
 }
 
-fn char_literal(lexer: &mut Lexer<'_>, tins: &Tins) -> Option<Token> {
-    let text = chars(lexer);
-    let mut index = char_prefix(&text)?;
-    while index < text.len() {
-        let character = text[index];
+fn char_literal(look: &mut Look<'_>, scope: &Scope<'_>) -> Cut {
+    // The longest prefix and its quote: `u8'`.
+    if scope.short(look, 0, 3) {
+        return Cut::Edge;
+    }
+    let Some(mut index) = char_prefix(look.slice(0, 3)) else {
+        return Cut::No;
+    };
+    while let Some(character) = look.get(index) {
         if character == '\n' {
-            return bad(lexer, "unterminated_char", 0, index);
+            return Cut::Bad("unterminated_char", 0, index);
         }
         if character == '\\' {
             index += 2;
             continue;
         }
         if character == '\'' {
-            return emit(lexer, tins, "LIT_CHAR", index + 1);
+            return hit("LIT_CHAR", index + 1);
         }
         index += 1;
     }
-    bad(lexer, "unterminated_char", 0, text.len())
+    if !scope.last {
+        return Cut::Edge;
+    }
+    Cut::Bad("unterminated_char", 0, look.count())
 }
 
 /// `^(u8|u|U|L)?(R)?"`, returning the prefix length and whether the
@@ -647,51 +877,63 @@ fn string_prefix(text: &[char]) -> Option<(usize, bool)> {
     None
 }
 
-fn string_literal(lexer: &mut Lexer<'_>, tins: &Tins) -> Option<Token> {
-    let text = chars(lexer);
-    let (prefix, raw) = string_prefix(&text)?;
+fn string_literal(look: &mut Look<'_>, scope: &Scope<'_>) -> Cut {
+    // The longest prefix and its quote: `u8R"`.
+    if scope.short(look, 0, 4) {
+        return Cut::Edge;
+    }
+    let Some((prefix, raw)) = string_prefix(look.slice(0, 4)) else {
+        return Cut::No;
+    };
     let mut index = prefix;
     if raw {
         // `R"delim( ... )delim"`
         let mut delimiter_end = index;
-        while delimiter_end < text.len() && text[delimiter_end] != '(' {
+        while look
+            .get(delimiter_end)
+            .is_some_and(|character| character != '(')
+        {
             delimiter_end += 1;
         }
-        if delimiter_end >= text.len() {
-            return bad(lexer, "unterminated_string", 0, text.len());
+        if look.get(delimiter_end).is_none() {
+            if !scope.last {
+                return Cut::Edge;
+            }
+            return Cut::Bad("unterminated_string", 0, look.count());
         }
-        let delimiter: String = text[index..delimiter_end].iter().collect();
+        let delimiter: String = look.slice(index, delimiter_end).iter().collect();
         let closer: Vec<char> = format!("){delimiter}\"").chars().collect();
         let mut scan = delimiter_end + 1;
-        let close = loop {
-            if scan + closer.len() > text.len() {
-                break None;
+        loop {
+            if look.get(scan + closer.len() - 1).is_none() {
+                if !scope.last {
+                    return Cut::Edge;
+                }
+                return Cut::Bad("unterminated_string", 0, look.count());
             }
-            if text[scan..scan + closer.len()] == closer[..] {
-                break Some(scan);
+            if look.slice(scan, scan + closer.len()) == &closer[..] {
+                return hit("LIT_STRING", scan + closer.len());
             }
             scan += 1;
-        };
-        let Some(close) = close else {
-            return bad(lexer, "unterminated_string", 0, text.len());
-        };
-        return emit(lexer, tins, "LIT_STRING", close + closer.len());
+        }
     }
-    while index < text.len() {
-        let character = text[index];
+    while let Some(character) = look.get(index) {
         if character == '\n' {
-            return bad(lexer, "unterminated_string", 0, index);
+            return Cut::Bad("unterminated_string", 0, index);
         }
         if character == '\\' {
             index += 2;
             continue;
         }
         if character == '"' {
-            return emit(lexer, tins, "LIT_STRING", index + 1);
+            return hit("LIT_STRING", index + 1);
         }
         index += 1;
     }
-    bad(lexer, "unterminated_string", 0, text.len())
+    if !scope.last {
+        return Cut::Edge;
+    }
+    Cut::Bad("unterminated_string", 0, look.count())
 }
 
 // ---------------------------------------------------------------------
@@ -709,19 +951,21 @@ fn sorted_punctuators() -> Vec<(&'static str, &'static str)> {
 }
 
 fn punctuator(
-    lexer: &mut Lexer<'_>,
-    tins: &Tins,
+    look: &mut Look<'_>,
+    scope: &Scope<'_>,
     sorted: &[(&'static str, &'static str)],
-) -> Option<Token> {
-    let remaining = lexer.remaining();
+) -> Cut {
+    let longest = sorted.first().map_or(0, |entry| entry.1.chars().count());
+    if scope.short(look, 0, longest) {
+        return Cut::Edge;
+    }
+    let ahead: String = look.slice(0, longest).iter().collect();
     for (name, source) in sorted {
-        if remaining.starts_with(source) {
-            let name = *name;
-            let consumed = source.chars().count();
-            return emit(lexer, tins, name, consumed);
+        if ahead.starts_with(source) {
+            return hit(name, source.chars().count());
         }
     }
-    None
+    Cut::No
 }
 
 // ---------------------------------------------------------------------
@@ -763,21 +1007,19 @@ pub fn make(name: &str, tins: Tins) -> ImperativeLexMatcher {
         "c_identifier" => wrap(tins, identifier),
         "c_punctuator" => {
             let sorted = sorted_punctuators();
-            Arc::new(
-                move |lexer: &mut Lexer<'_>, _rule: &mut Rule, _context: &mut Context| {
-                    punctuator(lexer, &tins, &sorted)
-                },
-            )
+            wrap(tins, move |look, scope| punctuator(look, scope, &sorted))
         }
-        _ => wrap(tins, |_lexer, _tins| None),
+        _ => wrap(tins, |_look, _scope| Cut::No),
     }
 }
 
 fn wrap(
     tins: Tins,
-    body: impl Fn(&mut Lexer<'_>, &Tins) -> Option<Token> + Send + Sync + 'static,
+    scan: impl Fn(&mut Look<'_>, &Scope<'_>) -> Cut + Send + Sync + 'static,
 ) -> ImperativeLexMatcher {
     Arc::new(
-        move |lexer: &mut Lexer<'_>, _rule: &mut Rule, _context: &mut Context| body(lexer, &tins),
+        move |lexer: &mut Lexer<'_>, _rule: &mut Rule, _context: &mut Context| {
+            cut(lexer, &tins, &scan)
+        },
     )
 }

@@ -50,6 +50,18 @@ Walk the tree depth-first and concatenate every `kind:'token'` `src` to
 recover the original source byte-for-byte (modulo whitespace, whose
 positions are preserved on token spans).
 
+`make(options)` builds the same parser whole and declares the reader
+window on it, so that `parseReader` reads a source from a reader a window
+at a time rather than whole. Go's `MakeC` and Rust's `make` do the same.
+
+```ts
+import { readSync, openSync } from 'node:fs'
+import { make } from '@tabnas/c'
+
+const fd = openSync('main.c', 'r')
+const tree = make().parseReader({ read: (buf: Uint8Array) => readSync(fd, buf) })
+```
+
 ## Options
 
 The plugin takes a single option, passed as the second argument to `use`:
