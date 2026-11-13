@@ -4,15 +4,14 @@
 // (layered on @tabnas/jsonic) that parses C source into a concrete syntax
 // tree, preserving macros and compiler extensions. Port of ../ts/src/c.ts.
 //
-// STATUS: complete and at parity. The full architecture is ported — lexer
-// (matchers.go/tokens.go/symbols.go), CST helpers (cst.go), the @tabnas/expr
-// expression layer (expr_grammar.go), grammar install + ref map
-// (grammar_install.go/refs.go), conditional-group folding
-// (conditional_groups.go), the top-level chomp + preprocessor directives, the
-// new-path structured dispatch (refs_newpath*.go), and the legacy
-// recursive-descent structurer (structure.go + expr.go). Parse produces
-// structured CSTs and TestCsmithCorpus matches the TypeScript golden fixtures
-// 100/100. See AGENTS.md.
+// STATUS: complete and at parity. It builds the same tree as the
+// TypeScript, with the same rules: the lexer (matchers.go/tokens.go/
+// symbols.go), node helpers (cst.go/node.go), grammar install + ref map
+// (grammar_install.go/refs.go), C's expressions read by @tabnas/expr
+// (expr_grammar.go), the armed fallback (fallback.go), the members API
+// (members.go), and the declaration, statement and extension refs
+// (refs_newpath*.go, refs_ext.go). TestCsmithCorpus matches the
+// TypeScript golden fixtures 100/100. See AGENTS.md and docs/rules.md.
 package tabnasc
 
 import (
@@ -81,7 +80,7 @@ var dropTriviaNames = map[string]bool{
 }
 
 // anyCTokenNames returns the wildcard token-name set (ANY_C_TOKEN) used by the
-// external-declaration chomper.
+// dispatch's lookahead and by unknown_declaration.
 func anyCTokenNames() []string {
 	names := []string{
 		"ID", "TYPEDEF_NAME", "MACRO_NAME",
@@ -119,8 +118,8 @@ func C(j *tabnas.Tabnas, opts map[string]any) error {
 	// 1. Register punctuator + keyword token names with their fixed sources,
 	//    and the special token names, so every token has a stable tin. We
 	//    register in deterministic slice order (NOT via a map) so the tins
-	//    are identical across runs — @tabnas/expr's operator binding and the
-	//    grammar resolution both depend on stable tins. We disable jsonic's
+	//    are identical across runs; the grammar resolution depends on
+	//    stable tins. We disable jsonic's
 	//    built-in matchers and drive lexing with our own.
 	for _, p := range Punctuators {
 		j.Token(p.Name, p.Src)
@@ -179,12 +178,85 @@ func C(j *tabnas.Tabnas, opts map[string]any) error {
 				"KW_INLINE", "KW___INLINE__", "KW___INLINE",
 				"KW___EXTENSION__",
 			},
-			"C_ATOM": {
-				"LIT_INT", "LIT_FLOAT", "LIT_CHAR", "LIT_STRING",
-				"ID", "MACRO_NAME", "TYPEDEF_NAME",
+			// The head of a declaration that is not held to the rules:
+			// armed (c-grammar.jsonic, external_declaration). Every keyword
+			// that can start a declaration's specifiers.
+			"DECL_HEAD": {
+				"KW_VOID", "KW_CHAR", "KW_SHORT", "KW_INT", "KW_LONG",
+				"KW_FLOAT", "KW_DOUBLE", "KW_SIGNED", "KW_UNSIGNED",
+				"KW_BOOL", "KW__BOOL", "KW___SIGNED__", "KW___SIGNED",
+				"KW___INT8", "KW___INT16", "KW___INT32", "KW___INT64",
+				"KW__COMPLEX", "KW__IMAGINARY", "KW___COMPLEX__",
+				"KW__DECIMAL32", "KW__DECIMAL64", "KW__DECIMAL128",
+				"KW__BITINT", "KW___BUILTIN_VA_LIST", "KW___AUTO_TYPE",
+				"KW_TYPEOF", "KW_TYPEOF_UNQUAL", "KW___TYPEOF__", "KW___TYPEOF",
+				"TYPEDEF_NAME",
+				"KW_CONST", "KW_VOLATILE", "KW_RESTRICT", "KW__ATOMIC",
+				"KW___CONST__", "KW___CONST", "KW___VOLATILE__", "KW___VOLATILE",
+				"KW___RESTRICT__", "KW___RESTRICT",
+				"KW_STRUCT", "KW_UNION", "KW_ENUM",
+				"KW_STATIC", "KW_EXTERN", "KW_TYPEDEF", "KW_AUTO", "KW_REGISTER",
+				"KW__THREAD_LOCAL", "KW_THREAD_LOCAL", "KW_CONSTEXPR", "KW___THREAD",
+				"KW_INLINE", "KW___INLINE__", "KW___INLINE", "KW___FORCEINLINE",
+				"KW__NORETURN", "KW__ALIGNAS", "KW_ALIGNAS",
+				"KW___EXTENSION__",
+				"KW___ATTRIBUTE__", "KW___ATTRIBUTE", "KW___DECLSPEC",
 			},
-			"C_PAREN_OPEN": {"PUNC_LPAREN", "PUNC_LBRACKET"},
-			"KW_TOKEN":     kwTokenNames(),
+			// C's operators, as token sets (expr_grammar.go has their
+			// table).
+			"ASSIGN_OP": {
+				"PUNC_ASSIGN", "PUNC_PLUS_ASSIGN", "PUNC_MINUS_ASSIGN",
+				"PUNC_STAR_ASSIGN", "PUNC_SLASH_ASSIGN", "PUNC_PERCENT_ASSIGN",
+				"PUNC_LSHIFT_ASSIGN", "PUNC_RSHIFT_ASSIGN", "PUNC_AMP_ASSIGN",
+				"PUNC_CARET_ASSIGN", "PUNC_PIPE_ASSIGN",
+			},
+			"BINARY_OP": {
+				"PUNC_OR_OR", "PUNC_AND_AND", "PUNC_PIPE", "PUNC_CARET", "PUNC_AMP",
+				"PUNC_EQ", "PUNC_NE", "PUNC_LT", "PUNC_LE", "PUNC_GT", "PUNC_GE",
+				"PUNC_LSHIFT", "PUNC_RSHIFT", "PUNC_PLUS", "PUNC_MINUS",
+				"PUNC_STAR", "PUNC_SLASH", "PUNC_PERCENT",
+			},
+			"INCDEC": {"PUNC_PLUS_PLUS", "PUNC_MINUS_MINUS"},
+			"UNARY_OP": {
+				"PUNC_PLUS", "PUNC_MINUS", "PUNC_BANG", "PUNC_TILDE",
+				"PUNC_STAR", "PUNC_AMP",
+			},
+			"MEMBER_NAME": {"ID", "TYPEDEF_NAME", "MACRO_NAME"},
+			// The storage classes and function specifiers spec_loop takes
+			// anywhere among the specifiers: C's, and the extensions' (in
+			// extended mode).
+			"STORAGE_STD": {
+				"KW_STATIC", "KW_EXTERN", "KW_TYPEDEF", "KW_AUTO", "KW_REGISTER",
+				"KW__THREAD_LOCAL", "KW_THREAD_LOCAL", "KW_CONSTEXPR", "KW_INLINE",
+			},
+			"STORAGE_EXT": {"KW___THREAD", "KW___INLINE__", "KW___INLINE", "KW___EXTENSION__"},
+			// Specifier keywords spec_loop takes as tokens, beside the type
+			// heads and the storage classes: C's, and the extensions'.
+			"SPEC_KEYWORD": {
+				"KW__NORETURN", "KW__DECIMAL32", "KW__DECIMAL64", "KW__DECIMAL128",
+			},
+			"SPEC_KEYWORD_EXT": {
+				"KW___FORCEINLINE", "KW___BUILTIN_VA_LIST", "KW___AUTO_TYPE",
+				"KW___COMPLEX__",
+			},
+			// Specifiers with a parenthesised argument: C's, and the
+			// extensions'.
+			"PAREN_SPEC":     {"KW_TYPEOF", "KW_TYPEOF_UNQUAL", "KW_ALIGNAS", "KW__ALIGNAS"},
+			"PAREN_SPEC_EXT": {"KW___TYPEOF__", "KW___TYPEOF"},
+			// A pointer's qualifiers: C's, and the extensions' spellings.
+			"PTR_QUALIFIER": {"KW_CONST", "KW_VOLATILE", "KW_RESTRICT", "KW__ATOMIC"},
+			"PTR_QUALIFIER_EXT": {
+				"KW___CONST__", "KW___CONST", "KW___VOLATILE__", "KW___VOLATILE",
+				"KW___RESTRICT__", "KW___RESTRICT",
+			},
+			"ASM_KEYWORD": {"KW_ASM", "KW___ASM", "KW___ASM__"},
+			// What never directly follows an operand in C: an identifier or
+			// a literal.
+			"JUXTAPOSED": {
+				"ID", "TYPEDEF_NAME", "MACRO_NAME",
+				"LIT_INT", "LIT_FLOAT", "LIT_CHAR", "LIT_STRING",
+			},
+			"KW_TOKEN": kwTokenNames(),
 			"SIZEOF_KW": {
 				"KW_SIZEOF",
 				"KW__ALIGNOF", "KW_ALIGNOF",
@@ -221,6 +293,16 @@ func C(j *tabnas.Tabnas, opts map[string]any) error {
 					if _, ok := ctx.Meta["cmeta"]; !ok {
 						ctx.Meta["cmeta"] = MakeCMeta()
 					}
+					// A cmeta handed in may have parsed before: the record,
+					// the declaration state and the spans given are this
+					// parse's.
+					if m, ok := ctx.Meta["cmeta"].(*CMeta); ok {
+						m.Rec = []*tabnas.Token{}
+						m.RecBase = 0
+						m.ED = nil
+						m.Fixed = map[uintptr]CNode{}
+						m.Links = newLinks()
+					}
 				},
 			},
 		},
@@ -230,7 +312,7 @@ func C(j *tabnas.Tabnas, opts map[string]any) error {
 	//    non-trivia token's Use["leading"], so comments survive in source
 	//    order even though the parser IGNOREs them.
 	j.Sub(func(tkn *tabnas.Token, _ *tabnas.Rule, ctx *tabnas.Context) {
-		if tkn == nil || ctx.Meta == nil {
+		if tkn == nil || tkn.IsNoToken() || ctx.Meta == nil {
 			return
 		}
 		m, ok := ctx.Meta["cmeta"].(*CMeta)
@@ -251,20 +333,35 @@ func C(j *tabnas.Tabnas, opts map[string]any) error {
 			tkn.Use["leading"] = m.PendingTrivia
 			m.PendingTrivia = nil
 		}
+		// The tokens the parser takes, in order, for the armed fallback
+		// (fallback.go), and the links between an expression's tokens
+		// (expr_grammar.go).
+		if tkn.Name != "#ZZ" {
+			recordToken(m, tkn)
+			if m.Links == nil {
+				m.Links = newLinks()
+			}
+			linkToken(m.Links, tkn)
+		}
 	}, nil)
 
-	// 5. Parse and install the embedded grammar with the @-ref map (real
-	//    handlers + typed stubs for any not yet ported), stripping extension
-	//    rules in plain-C mode.
+	// 5. C's expressions are read by @tabnas/expr, from the rule named
+	//    `val` that jsonic's grammar has too. Clear jsonic's, alternates and
+	//    actions both, so that expr's and C's are the only ones. Then parse
+	//    and install the embedded grammar with the @-ref map and the armed
+	//    fallback (fallback.go), stripping the extension rules in plain-C
+	//    mode, and install expr over it (expr_grammar.go).
+	j.Rule("val", func(rs *tabnas.RuleSpec, _ *tabnas.Parser) { rs.Clear() })
 	if err := installGrammar(j, copts); err != nil {
 		return err
 	}
-
-	// 6. Install @tabnas/expr with the C operator catalog and the val-atom
-	//    alts (Phase A — must run after the grammar so val exists).
 	if err := installExpr(j); err != nil {
 		return err
 	}
+	// The rules expr reads an expression with, its own and the jsonic ones
+	// it pushes (an implicit list inside a paren), are below every external
+	// declaration too.
+	withRuleFallback(j, []string{"val", "expr", "paren", "ternary", "list", "elem", "map", "pair"})
 
 	return nil
 }

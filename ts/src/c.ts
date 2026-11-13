@@ -34,9 +34,12 @@ import {
   PUNCTUATORS,
   keywordTokenName,
 } from './tokens.js'
-import { structureExternalDeclaration } from './structure.js'
-import { structureConditionalGroups } from './conditional-groups.js'
-import { installExpr } from './expr-grammar.js'
+import { installExpr, isExpressionRule, linkToken, newLinks } from './expr-grammar.js'
+import { fixSpans } from './node.js'
+import {
+  withFallback, withRuleFallback, recordToken, startDeclaration, takenTokens,
+  chompEnded, edOf, openLocal, closeLocal, tokensSince, bracketDepth,
+} from './fallback.js'
 
 // --- BEGIN EMBEDDED c-grammar.jsonic ---
 const grammarText = `
@@ -66,7 +69,6 @@ const grammarText = `
     # translation_unit
     #   bo: create the root node
     #   open: empty input → bail; else descend into extdecl_loop
-    #   bc: fold #if … #endif sequences into conditional_group nodes
     #   close: end on EOF
     translation_unit: {
       open: [
@@ -78,118 +80,166 @@ const grammarText = `
       ]
     }
 
-    # extdecl_loop
-    #   r.node is inherited from translation_unit. bc pushes the
-    #   completed external_declaration child onto translation_unit
-    #   before deciding to recurse.
+    # extdecl_loop: the external declarations of a translation unit or of
+    # a conditional branch, one a replace. r.node is the container's;
+    # @extdecl_loop-bc appends each completed declaration, and each
+    # conditional group. A \`#if\`, \`#ifdef\` or \`#ifndef\` line opens a
+    # conditional group, which takes the line as its first branch's head.
+    # In a branch (k.inBranch), a \`#elif\`, \`#elifdef\`, \`#elifndef\`, \`#else\`
+    # or \`#endif\` line ends the items, left for the group.
     extdecl_loop: {
       open: [
+        { s: '#ZZ' b: 1 g: 'loop-empty-end' }
+        { s: 'PP_HASH #ANY_C_TOKEN' b: 2 c: '@ends-branch'
+          g: 'loop-empty-branch' }
         { p: 'external_declaration' g: 'loop-one' }
       ]
       close: [
+        { c: '@opens-group' p: 'conditional_group' g: 'loop-group' }
         { s: '#ZZ' b: 1 g: 'loop-end' }
+        { s: 'PP_HASH #ANY_C_TOKEN' b: 2 c: '@ends-branch'
+          g: 'loop-branch-end' }
         { r: 'extdecl_loop' g: 'loop-more' }
+      ]
+    }
+
+    # conditional_group: a \`#if\`, \`#ifdef\` or \`#ifndef\` line's branches,
+    # each a conditional_branch, and the \`#endif\` line that ends it, or
+    # the end of the document. A branch is pushed from the close state,
+    # one at a time, so the group's branches add no depth.
+    conditional_group: {
+      open: [
+        { p: 'conditional_branch' g: 'cg-first' }
+      ]
+      close: [
+        { c: '@endif-taken' a: '@cg-end' g: 'cg-end' }
+        { s: 'PP_HASH #ANY_C_TOKEN' b: 2 c: '@next-branch'
+          p: 'conditional_branch' g: 'cg-branch' }
+        { s: 'PP_HASH #ANY_C_TOKEN' b: 2 c: '@group-endif'
+          p: 'external_declaration' g: 'cg-endif' }
+        { s: '#ZZ' b: 1 a: '@cg-end' g: 'cg-eof' }
+      ]
+    }
+
+    # conditional_branch: its directive's line, then the declarations up
+    # to the next branch's line or the \`#endif\`. The first branch's line
+    # is the group's opener, already parsed.
+    conditional_branch: {
+      open: [
+        { c: '@branch-has-head' p: 'extdecl_loop' k: { inBranch: true }
+          g: 'cb-items' }
+        { p: 'external_declaration' g: 'cb-head' }
+      ]
+      close: [
+        { c: '@branch-needs-items' p: 'extdecl_loop' k: { inBranch: true }
+          g: 'cb-items-2' }
+        { g: 'cb-end' }
       ]
     }
 
     # external_declaration
     #
-    # Phase B1 dispatch: if the head token is a recognised simple type
-    # specifier (currently only KW_INT, broadens later), descend into
-    # int_declaration which parses through proper grammar (with val
-    # for initializers via @jsonic/expr). Otherwise fall through to
-    # the legacy chomp path that absorbs tokens for post-process
-    # structuring.
+    # Dispatched on its head token. A route the parser has always held to
+    # the rules is STRICT: a declaration the rules cannot parse is refused
+    # there. Every other route is ARMED, where the parser used to hand the
+    # declaration's tokens to a structurer that took any token run: there,
+    # a declaration the rules cannot parse becomes an unknown declaration,
+    # its tokens flat. The plugin adds to every rule below this one a first
+    # alternate that, once an armed declaration has failed, ends the state
+    # without taking a token, and a last one that, where no other
+    # alternate matches in an armed declaration, marks it failed
+    # (\`withFallback\` in ts/src/fallback.ts); the rules then close down to
+    # here, and the close's first alternate turns the declaration into an
+    # unknown one. Nothing is rewound.
     external_declaration: {
       open: [
         { s: '#ZZ' b: 1 g: 'extdecl-eof' }
-        # [extension: preprocessor] PP_HASH dispatches to preprocessor_directive.
-        { s: 'PP_HASH PP_HASH' c: '@ext-and-first-iter' b: 2
-          p: 'preprocessor_directive' a: '@mark-new-path'
-          g: 'extdecl-pp-2' }
-        { s: 'PP_HASH #ANY_C_TOKEN' c: '@ext-and-first-iter' b: 2
-          p: 'preprocessor_directive' a: '@mark-new-path'
-          g: 'extdecl-pp' }
-        # Phase O: top-level static_assert dispatches into the
-        # static_assert_declaration grammar rule. The cond / msg
-        # vals are pushed with n.no_comma_op set so @jsonic/expr's
-        # expr.close bails at \`,\` rather than treating it as the
-        # comma operator.
-        { s: 'KW_STATIC_ASSERT' c: '@is-first-iter' b: 1
-          p: 'static_assert_declaration' a: '@mark-new-path'
+        # Extended mode holds a \`#\` line to the rules.
+        { s: 'PP_HASH PP_HASH' c: '@extended-on' b: 2 k: { topLine: true }
+          p: 'preprocessor_directive' g: 'extdecl-pp-2' }
+        { s: 'PP_HASH #ANY_C_TOKEN' c: '@extended-on' b: 2 k: { topLine: true }
+          p: 'preprocessor_directive' g: 'extdecl-pp' }
+        # Any other \`#\` line is armed: plain mode's, and one a strict
+        # alternate above does not take.
+        { s: 'PP_HASH' b: 1 a: '@arm' p: 'preprocessor_directive'
+          g: 'extdecl-pp-armed' }
+        { s: 'KW_STATIC_ASSERT' b: 1 p: 'static_assert_declaration'
           g: 'extdecl-sa' }
-        { s: 'KW__STATIC_ASSERT' c: '@is-first-iter' b: 1
-          p: 'static_assert_declaration' a: '@mark-new-path'
+        { s: 'KW__STATIC_ASSERT' b: 1 p: 'static_assert_declaration'
           g: 'extdecl-sa-1' }
         # [extension: gcc-asm] top-level inline assembly block.
-        { s: 'KW_ASM' c: '@ext-and-first-iter' b: 1
-          p: 'asm_statement' a: '@mark-new-path'
-          g: 'extdecl-asm' }
-        { s: 'KW___ASM' c: '@ext-and-first-iter' b: 1
-          p: 'asm_statement' a: '@mark-new-path'
+        { s: 'KW_ASM' c: '@extended-on' b: 1 p: 'asm_statement' g: 'extdecl-asm' }
+        { s: 'KW___ASM' c: '@extended-on' b: 1 p: 'asm_statement'
           g: 'extdecl-asm-1' }
-        { s: 'KW___ASM__' c: '@ext-and-first-iter' b: 1
-          p: 'asm_statement' a: '@mark-new-path'
+        { s: 'KW___ASM__' c: '@extended-on' b: 1 p: 'asm_statement'
           g: 'extdecl-asm-2' }
-        # Plain-mode direct dispatches. When the head token clearly
-        # starts a declaration, push simple_declaration without a
-        # lookahead validator — the rule's own alts and per-rule k
-        # state disambiguate the actual shape. These run only when
-        # \`extended: false\` so we don't bypass the wildcard alts'
-        # @looks-simple-decl + isFunctionBodySupported gate that
-        # routes asm-body / pp-line function definitions to the
-        # legacy structuring path (those constructs only matter in
-        # extended mode anyway).
-        { s: '#SIMPLE_TYPE_HEAD' c: '@plain-and-first-iter' b: 1
-          p: 'simple_declaration' a: '@mark-new-path'
+        # Plain mode holds a declaration with a type, storage, \`_BitInt\` or
+        # \`[[\` head to the rules.
+        { s: '#SIMPLE_TYPE_HEAD' c: '@extended-off' b: 1 p: 'simple_declaration'
           g: 'extdecl-plain-type' }
-        { s: '#STORAGE_PREFIX' c: '@plain-and-first-iter' b: 1
-          p: 'simple_declaration' a: '@mark-new-path'
+        { s: '#STORAGE_PREFIX' c: '@extended-off' b: 1 p: 'simple_declaration'
           g: 'extdecl-plain-storage' }
-        { s: 'KW__BITINT' c: '@plain-and-first-iter' b: 1
-          p: 'simple_declaration' a: '@mark-new-path'
+        { s: 'KW__BITINT' c: '@extended-off' b: 1 p: 'simple_declaration'
           g: 'extdecl-plain-bitint' }
-        { s: 'PUNC_LBRACKET PUNC_LBRACKET' c: '@plain-as23-and-first'
-          b: 2 p: 'simple_declaration' a: '@mark-new-path'
-          g: 'extdecl-plain-c23-attr' }
-        # Phase B2.3 dispatch: cascading wildcard-token alts. Each one
-        # matches a fixed number of tokens to force lookahead, then the
-        # @looks-simple-decl cond validates the actual shape — optional
-        # storage prefix, 1+ simple type specifiers, an ID, and a \`;\` or
-        # \`=\` terminator. b: N back-steps all matched tokens so
-        # simple_declaration sees them as t0..t(N-1).
-        # Longest alts first so multi-keyword forms win over shorter
-        # shapes that would have stopped at the wrong ID.
-        # Gate: only on the first iteration of an external_declaration
-        # so the chomp's r:-recursion doesn't re-fire mid-declaration.
+        { s: 'PUNC_LBRACKET PUNC_LBRACKET' c: '@plain-as23' b: 2
+          p: 'simple_declaration' g: 'extdecl-plain-c23-attr' }
+        # Extended mode holds a declaration to the rules when its
+        # lookahead validator, @looks-simple-decl, accepts the head. The
+        # alternates match a fixed number of tokens to load that much
+        # lookahead first, longest first.
         { s: '#ANY_C_TOKEN #ANY_C_TOKEN #ANY_C_TOKEN #ANY_C_TOKEN #ANY_C_TOKEN #ANY_C_TOKEN'
           c: '@looks-simple-decl' b: 6
-          p: 'simple_declaration' a: '@mark-new-path' g: 'extdecl-new-decl-6' }
+          p: 'simple_declaration' g: 'extdecl-new-decl-6' }
         { s: '#ANY_C_TOKEN #ANY_C_TOKEN #ANY_C_TOKEN #ANY_C_TOKEN #ANY_C_TOKEN'
           c: '@looks-simple-decl' b: 5
-          p: 'simple_declaration' a: '@mark-new-path' g: 'extdecl-new-decl-5' }
+          p: 'simple_declaration' g: 'extdecl-new-decl-5' }
         { s: '#ANY_C_TOKEN #ANY_C_TOKEN #ANY_C_TOKEN #ANY_C_TOKEN'
           c: '@looks-simple-decl' b: 4
-          p: 'simple_declaration' a: '@mark-new-path' g: 'extdecl-new-decl-4' }
+          p: 'simple_declaration' g: 'extdecl-new-decl-4' }
         { s: '#ANY_C_TOKEN #ANY_C_TOKEN #ANY_C_TOKEN'
           c: '@looks-simple-decl' b: 3
-          p: 'simple_declaration' a: '@mark-new-path' g: 'extdecl-new-decl-3' }
-        { s: '#ANY_C_TOKEN' a: '@absorb-token' g: 'extdecl-tok' }
+          p: 'simple_declaration' g: 'extdecl-new-decl-3' }
+        # Any other declaration-specifier head is armed.
+        { s: '#DECL_HEAD' b: 1 a: '@arm' p: 'simple_declaration'
+          g: 'extdecl-armed' }
+        { s: 'PUNC_LBRACKET PUNC_LBRACKET' c: '@as23-adjacent-open' b: 2
+          a: '@arm' p: 'simple_declaration' g: 'extdecl-armed-c23-attr' }
+        # Anything else (an identifier, a stray punctuator) is an unknown
+        # declaration, its tokens flat.
+        { s: '#ANY_C_TOKEN' b: 1 a: '@unk-start' r: 'unknown_declaration'
+          g: 'extdecl-unknown' }
       ]
       close: [
-        { c: '@new-path' a: '@finalize-new-path' g: 'extdecl-new-end' }
-        { s: '#ZZ' b: 1 a: '@finalize-extdecl' g: 'extdecl-finish-eof' }
-        { c: '@just-closed-and-decl-ahead' a: '@finalize-extdecl' g: 'extdecl-finish-block' }
-        { c: '@terminated' a: '@finalize-extdecl' g: 'extdecl-finish' }
-        { r: 'external_declaration' g: 'extdecl-more' }
+        { c: '@c-failed' a: '@to-unknown' r: 'unknown_declaration'
+          g: 'extdecl-fallback' }
+        { s: '#ZZ' b: 1 a: '@extdecl-built' g: 'extdecl-end-eof' }
+        # An armed declaration the rules ended before the chomp's end
+        # takes the rest of the run, flat.
+        { c: '@armed-runs-on' a: '@extdecl-trailing'
+          r: 'unknown_declaration' g: 'extdecl-trailing' }
+        { a: '@extdecl-built' g: 'extdecl-end' }
       ]
     }
 
-    # simple_declaration  (phase B2: single-keyword type + ID + optional init)
-    #
-    # Recognises: <simple-type-head> ID (= val)? ;
-    # Initializer expressions descend into val (which @jsonic/expr's
-    # plugin install has wired up for full C precedence).
+    # unknown_declaration: an external declaration's tokens, flat, one
+    # token a replace, ending where the structurer's token run used to
+    # end: a \`;\` at brace depth 0, the end of a \`#\` line, a \`}\` back to
+    # depth 0 followed by the head of a declaration, or the end. Its node
+    # is the external declaration's.
+    unknown_declaration: {
+      open: [
+        { s: '#ZZ' b: 1 g: 'unk-eof-open' }
+        { c: '@unk-ended' g: 'unk-done' }
+        { s: '#ANY_C_TOKEN' a: '@unk-take' g: 'unk-tok' }
+      ]
+      close: [
+        { s: '#ZZ' b: 1 a: '@unk-end' g: 'unk-eof' }
+        { c: '@unk-ended' a: '@unk-end' g: 'unk-end' }
+        { r: 'unknown_declaration' g: 'unk-more' }
+      ]
+    }
+
+    # simple_declaration
     #
     # Output: a CST node of kind 'declaration' with declaredName set,
     # children laid out as
@@ -199,9 +249,9 @@ const grammarText = `
     #
     # Recognises:
     #   <storage>? <type>+ <init_declarator> (, <init_declarator>)* ;
-    # where each init_declarator is \`ID (= val)?\`. Initializer
-    # expressions descend into val (which @jsonic/expr's plugin install
-    # has wired up for full C precedence).
+    # where each init_declarator is \`ID (= initializer)?\`, an initializer
+    # an assignment expression or a brace list (\`val\`, which
+    # @tabnas/expr reads: the "expressions" section below).
     simple_declaration: {
       open: [
         # Leading C23 attribute spec — plain C23.
@@ -234,6 +284,13 @@ const grammarText = `
           g: 'simple-decl-bitint' }
         { s: '#SIMPLE_TYPE_HEAD' a: '@absorb-spec-type' p: 'spec_loop'
           g: 'simple-decl-type' }
+        { s: '#SPEC_KEYWORD' b: 1 p: 'spec_loop' g: 'simple-decl-kw' }
+        { s: '#SPEC_KEYWORD_EXT' c: '@extended-on' b: 1 p: 'spec_loop'
+          g: 'simple-decl-kw-ext' }
+        { s: '#PAREN_SPEC_EXT PUNC_LPAREN' c: '@extended-on' b: 2
+          p: 'spec_loop' g: 'simple-decl-paren-ext' }
+        { s: '#PAREN_SPEC PUNC_LPAREN' b: 2 p: 'spec_loop'
+          g: 'simple-decl-paren' }
       ]
       close: [
         # Function-definition completion: compound_statement returned
@@ -250,16 +307,17 @@ const grammarText = `
         # First declarator (after specs). Backstep the head token so
         # init_declarator's open sees it; descend into the sub-rule.
         # ID head: plain declarator. STAR head: pointer prefix.
-        # LPAREN: function postfix on a (rare) parenthesised
-        # subdeclarator — let the chomp handle that complex case.
-        { s: 'ID' b: 1 p: 'init_declarator' g: 'simple-decl-first-decl' }
-        { s: 'PUNC_STAR' b: 1 p: 'init_declarator' g: 'simple-decl-first-decl-ptr' }
+        # LPAREN: a parenthesised declarator (a function pointer).
+        { s: 'ID' b: 1 c: '@sd-may-declarate' p: 'init_declarator'
+          g: 'simple-decl-first-decl' }
+        { s: 'PUNC_STAR' b: 1 c: '@sd-may-declarate' p: 'init_declarator'
+          g: 'simple-decl-first-decl-ptr' }
         # Phase P: parenthesised sub-declarator (function pointer).
         # Shape: \`<type>+ ( * ID ) ( <params>? ) ;\` (or = init).
         # @looks-simple-decl's paren-walk has already validated the
         # shape; here we backstep \`(\` so init_declarator's open sees
         # it and dispatches into paren_inner_declarator.
-        { s: 'PUNC_LPAREN' b: 1 p: 'init_declarator'
+        { s: 'PUNC_LPAREN' b: 1 c: '@sd-may-declarate' p: 'init_declarator'
           g: 'simple-decl-first-decl-paren' }
         # Subsequent declarators after a comma.
         { s: 'PUNC_COMMA' a: '@simple-decl-take-comma' p: 'init_declarator'
@@ -307,6 +365,21 @@ const grammarText = `
         # bit_int_paren sub-rule which captures \`( <width> )\`.
         { s: 'KW__BITINT' a: '@absorb-spec-type'
           p: 'bit_int_paren' g: 'spec-loop-bitint' }
+        # A storage class or function specifier anywhere among the
+        # specifiers (\`static inline\`, \`int static\`), and the other
+        # specifier keywords.
+        { s: '#STORAGE_STD' a: '@absorb-spec-storage' g: 'spec-loop-storage' }
+        { s: '#STORAGE_EXT' c: '@extended-on' a: '@absorb-spec-storage'
+          g: 'spec-loop-storage-ext' }
+        { s: '#SPEC_KEYWORD' a: '@absorb-spec-type' g: 'spec-loop-kw' }
+        { s: '#SPEC_KEYWORD_EXT' c: '@extended-on' a: '@absorb-spec-type'
+          g: 'spec-loop-kw-ext' }
+        { s: '#PAREN_SPEC_EXT PUNC_LPAREN' c: '@extended-on' b: 1
+          a: '@absorb-spec-paren' p: 'paren_run' g: 'spec-loop-paren-ext' }
+        # \`typeof\`, \`alignas\` and their spellings, with the tokens of
+        # their parentheses, flat, as 0.5's structurer kept them.
+        { s: '#PAREN_SPEC PUNC_LPAREN' b: 1 a: '@absorb-spec-paren'
+          p: 'paren_run' g: 'spec-loop-paren' }
         { s: '#SIMPLE_TYPE_HEAD' a: '@absorb-spec-type' g: 'spec-loop-type' }
         # If the next token isn't a specifier, fall through without
         # consuming so the parent can pick up the declarator.
@@ -331,6 +404,16 @@ const grammarText = `
         { s: 'KW_ENUM' b: 1 p: 'enum_specifier' g: 'spec-loop-more-enum' }
         { s: 'KW__BITINT' a: '@absorb-spec-type'
           p: 'bit_int_paren' g: 'spec-loop-more-bitint' }
+        { s: '#STORAGE_STD' b: 1 r: 'spec_loop' g: 'spec-loop-more-storage' }
+        { s: '#STORAGE_EXT' c: '@extended-on' b: 1 r: 'spec_loop'
+          g: 'spec-loop-more-storage-ext' }
+        { s: '#SPEC_KEYWORD' b: 1 r: 'spec_loop' g: 'spec-loop-more-kw' }
+        { s: '#SPEC_KEYWORD_EXT' c: '@extended-on' b: 1 r: 'spec_loop'
+          g: 'spec-loop-more-kw-ext' }
+        { s: '#PAREN_SPEC_EXT PUNC_LPAREN' c: '@extended-on' b: 2
+          r: 'spec_loop' g: 'spec-loop-more-paren-ext' }
+        { s: '#PAREN_SPEC PUNC_LPAREN' b: 2 r: 'spec_loop'
+          g: 'spec-loop-more-paren' }
         { s: '#SIMPLE_TYPE_HEAD' b: 1 r: 'spec_loop' g: 'spec-loop-more' }
         { s: [] g: 'spec-loop-end' }
       ]
@@ -387,7 +470,11 @@ const grammarText = `
           g: 'idecl-paren-rparen' }
         # Returning from pointer_list, capture the ID, then re-enter
         # to check for postfix / initializer.
-        { s: 'ID' a: '@idecl-name' r: 'init_declarator' g: 'idecl-id-after-ptrs' }
+        # The name after a pointer prefix. A second name, with no comma
+        # between, ends the declarator: the declaration's rule takes it as
+        # the next one where 0.5's rules took it (@sd-may-declarate).
+        { s: 'ID' c: '@idecl-may-name' a: '@idecl-name' r: 'init_declarator'
+          g: 'idecl-id-after-ptrs' }
         # Array postfix \`[ … ]\` (one or more dimensions). Each one
         # re-enters init_declarator so additional postfixes can stack.
         { s: 'PUNC_LBRACKET' b: 1 p: 'array_postfix'
@@ -398,6 +485,17 @@ const grammarText = `
         # only exercises \`<type> ID ( … ) ;\`.
         { s: 'PUNC_LPAREN' b: 1 p: 'function_postfix'
           r: 'init_declarator' g: 'idecl-fn' }
+        # [extension: gcc-attr, msvc-attr, gcc-asm] attributes and an asm
+        # label after the declarator: \`f(void) __attribute__((x))\`,
+        # \`x __asm__("name")\`.
+        { s: 'KW___ATTRIBUTE__' c: '@extended-on' b: 1
+          p: 'attribute_spec_gcc' g: 'idecl-attr-gcc' }
+        { s: 'KW___ATTRIBUTE' c: '@extended-on' b: 1
+          p: 'attribute_spec_gcc' g: 'idecl-attr-gcc-1' }
+        { s: 'KW___DECLSPEC' c: '@extended-on' b: 1
+          p: 'attribute_spec_msvc' g: 'idecl-attr-msvc' }
+        { s: '#ASM_KEYWORD PUNC_LPAREN' c: '@extended-on' b: 2
+          p: 'asm_label' g: 'idecl-asm' }
         { s: 'PUNC_ASSIGN' p: 'initializer' a: '@idecl-take-eq' g: 'idecl-eq' }
         { s: [] g: 'idecl-end' }
       ]
@@ -446,9 +544,8 @@ const grammarText = `
     }
 
     # array_postfix: \`[ const-expr? ]\`
-    # Inner expression is parsed via val (currently limited to forms
-    # @jsonic/expr handles; complex constant expressions involving
-    # casts will land cleanly once phase C lifts cast handling).
+    # The size is a conditional expression (\`val\`, which @tabnas/expr
+    # reads).
     array_postfix: {
       open: [
         { s: 'PUNC_LBRACKET' a: '@arr-open' g: 'arr-open' }
@@ -525,14 +622,10 @@ const grammarText = `
     # when no qualifier is present.
     pointer_qualifier_loop: {
       open: [
-        { s: 'KW_CONST' a: '@absorb-pq-const'
-          r: 'pointer_qualifier_loop' g: 'pql-const' }
-        { s: 'KW_VOLATILE' a: '@absorb-pq-const'
-          r: 'pointer_qualifier_loop' g: 'pql-volatile' }
-        { s: 'KW_RESTRICT' a: '@absorb-pq-const'
-          r: 'pointer_qualifier_loop' g: 'pql-restrict' }
-        { s: 'KW__ATOMIC' a: '@absorb-pq-const'
-          r: 'pointer_qualifier_loop' g: 'pql-atomic' }
+        { s: '#PTR_QUALIFIER' a: '@absorb-pq-const'
+          r: 'pointer_qualifier_loop' g: 'pql-qual' }
+        { s: '#PTR_QUALIFIER_EXT' c: '@extended-on' a: '@absorb-pq-const'
+          r: 'pointer_qualifier_loop' g: 'pql-qual-ext' }
         { s: [] g: 'pql-empty' }
       ]
       close: [
@@ -608,6 +701,13 @@ const grammarText = `
         # type-spec dispatch and fall through to close to handle
         # additional \`*\` or the ID.
         { c: '@param-reentered' s: [] g: 'param-reentry' }
+        # A struct, union or enum type, and a storage class, start the
+        # specifier loop, which reads them.
+        { s: 'KW_STRUCT' b: 1 p: 'param_spec_loop' g: 'param-struct' }
+        { s: 'KW_UNION' b: 1 p: 'param_spec_loop' g: 'param-union' }
+        { s: 'KW_ENUM' b: 1 p: 'param_spec_loop' g: 'param-enum' }
+        { s: '#STORAGE_STD' a: '@param-spec' p: 'param_spec_loop'
+          g: 'param-storage' }
         { s: '#SIMPLE_TYPE_HEAD' a: '@param-spec' p: 'param_spec_loop'
           g: 'param-type' }
       ]
@@ -622,14 +722,11 @@ const grammarText = `
         # Mirrors pointer_qualifier_loop for the top-level declarator.
         # Gated on a pointer actually being pending so a stray
         # qualifier is still an error rather than silently eaten.
-        { s: 'KW_CONST' c: '@param-has-pointer' a: '@param-pointer-qual'
-          r: 'parameter_declaration' g: 'param-ptr-const' }
-        { s: 'KW_VOLATILE' c: '@param-has-pointer' a: '@param-pointer-qual'
-          r: 'parameter_declaration' g: 'param-ptr-volatile' }
-        { s: 'KW_RESTRICT' c: '@param-has-pointer' a: '@param-pointer-qual'
-          r: 'parameter_declaration' g: 'param-ptr-restrict' }
-        { s: 'KW__ATOMIC' c: '@param-has-pointer' a: '@param-pointer-qual'
-          r: 'parameter_declaration' g: 'param-ptr-atomic' }
+        { s: '#PTR_QUALIFIER' c: '@param-has-pointer' a: '@param-pointer-qual'
+          r: 'parameter_declaration' g: 'param-ptr-qual' }
+        { s: '#PTR_QUALIFIER_EXT' c: '@param-has-pointer-ext'
+          a: '@param-pointer-qual' r: 'parameter_declaration'
+          g: 'param-ptr-qual-ext' }
         # Returning from param_paren_inner: take the matching \`)\` of
         # the outer paren-form. Must come BEFORE the PUNC_LPAREN
         # alts so the closing token is consumed by the right alt.
@@ -675,14 +772,10 @@ const grammarText = `
         { s: 'PUNC_STAR' a: '@ppi-pointer'
           r: 'param_paren_inner' g: 'ppi-ptr' }
         # Qualifier on that pointer: \`int (* const fp)(int)\`.
-        { s: 'KW_CONST' c: '@ppi-has-pointer' a: '@ppi-pointer-qual'
-          r: 'param_paren_inner' g: 'ppi-ptr-const' }
-        { s: 'KW_VOLATILE' c: '@ppi-has-pointer' a: '@ppi-pointer-qual'
-          r: 'param_paren_inner' g: 'ppi-ptr-volatile' }
-        { s: 'KW_RESTRICT' c: '@ppi-has-pointer' a: '@ppi-pointer-qual'
-          r: 'param_paren_inner' g: 'ppi-ptr-restrict' }
-        { s: 'KW__ATOMIC' c: '@ppi-has-pointer' a: '@ppi-pointer-qual'
-          r: 'param_paren_inner' g: 'ppi-ptr-atomic' }
+        { s: '#PTR_QUALIFIER' c: '@ppi-has-pointer' a: '@ppi-pointer-qual'
+          r: 'param_paren_inner' g: 'ppi-ptr-qual' }
+        { s: '#PTR_QUALIFIER_EXT' c: '@ppi-has-pointer-ext'
+          a: '@ppi-pointer-qual' r: 'param_paren_inner' g: 'ppi-ptr-qual-ext' }
         # Bare ID with no pointer (rare, e.g. \`int (fp)(…)\`).
         { s: 'ID' a: '@ppi-name' g: 'ppi-id' }
         # Abstract: nothing inside \`(*)\` already-handled by re-entry
@@ -703,10 +796,21 @@ const grammarText = `
     # parameter's spec list.
     param_spec_loop: {
       open: [
+        # Tagged types are read by their own rules, as in spec_loop;
+        # @param_spec_loop-bc puts the specifier onto the parameter's
+        # declaration_specifiers.
+        { s: 'KW_STRUCT' b: 1 p: 'struct_specifier' g: 'param-spec-struct' }
+        { s: 'KW_UNION' b: 1 p: 'struct_specifier' g: 'param-spec-union' }
+        { s: 'KW_ENUM' b: 1 p: 'enum_specifier' g: 'param-spec-enum' }
+        { s: '#STORAGE_STD' a: '@param-spec' g: 'param-spec-storage' }
         { s: '#SIMPLE_TYPE_HEAD' a: '@param-spec' g: 'param-spec-more' }
         { s: [] g: 'param-spec-empty' }
       ]
       close: [
+        { s: 'KW_STRUCT' b: 1 r: 'param_spec_loop' g: 'param-spec-loop-struct' }
+        { s: 'KW_UNION' b: 1 r: 'param_spec_loop' g: 'param-spec-loop-union' }
+        { s: 'KW_ENUM' b: 1 r: 'param_spec_loop' g: 'param-spec-loop-enum' }
+        { s: '#STORAGE_STD' b: 1 r: 'param_spec_loop' g: 'param-spec-loop-storage' }
         { s: '#SIMPLE_TYPE_HEAD' b: 1 r: 'param_spec_loop' g: 'param-spec-loop' }
         { s: [] g: 'param-spec-end' }
       ]
@@ -798,7 +902,7 @@ const grammarText = `
           g: 'stmt-asm-2' }
         # [extension: preprocessor] preprocessor line inside a body
         # (rare but legal).
-        { s: 'PP_HASH' c: '@extended-on' b: 1 p: 'preprocessor_line'
+        { s: 'PP_HASH' c: '@extended-on' b: 1 p: 'preprocessor_directive'
           g: 'stmt-pp' }
         # Expression statement (default fallthrough)
         { p: 'expression_statement' g: 'stmt-expr' }
@@ -809,7 +913,7 @@ const grammarText = `
     }
 
     # expression_statement: <expr> \`;\`
-    # Descends into val (the @jsonic/expr-driven expression rule) and
+    # Descends into an expression (\`val\`, which @tabnas/expr reads) and
     # then takes the trailing \`;\`. Empty \`;\` is handled by statement's
     # PUNC_SEMI alt before this rule is entered.
     expression_statement: {
@@ -871,9 +975,17 @@ const grammarText = `
         { c: '@if-needs-cond' s: 'PUNC_LPAREN' b: 1
           p: 'paren_condition' g: 'if-cond' }
         { c: '@if-needs-then' p: 'statement' g: 'if-then' }
+        # \`else\` and its body, the if statement's own. Before a \`}\` or a
+        # declaration there is no body, and the block takes what follows,
+        # as 0.5 read it.
+        { c: '@if-needs-else-kw' s: 'KW_ELSE PUNC_RBRACE' b: 1
+          a: '@if-take-else-kw' g: 'if-else-end' }
+        { c: '@if-needs-else-kw' s: 'KW_ELSE #STORAGE_PREFIX' b: 1
+          a: '@if-take-else-kw' g: 'if-else-decl' }
+        { c: '@if-needs-else-kw' s: 'KW_ELSE #SIMPLE_TYPE_HEAD' b: 1
+          a: '@if-take-else-kw' g: 'if-else-decl-1' }
         { c: '@if-needs-else-kw' s: 'KW_ELSE' a: '@if-take-else-kw'
-          g: 'if-else-kw' }
-        { c: '@if-needs-else-body' p: 'statement' g: 'if-else-body' }
+          p: 'statement' g: 'if-else' }
         { s: [] g: 'if-end' }
       ]
     }
@@ -898,13 +1010,17 @@ const grammarText = `
       ]
       close: [
         { c: '@do-needs-body' p: 'statement' g: 'do-body' }
+        # \`while\` and its condition, the do statement's own. A \`while\`
+        # with no \`(\` after it ends the statement, as 0.5 read it.
+        { c: '@do-needs-while' s: 'KW_WHILE PUNC_LPAREN' b: 1
+          a: '@do-take-while' p: 'paren_condition' g: 'do-while' }
         { c: '@do-needs-while' s: 'KW_WHILE' a: '@do-take-while'
-          g: 'do-while-kw' }
-        { c: '@do-needs-cond' s: 'PUNC_LPAREN' b: 1
-          p: 'paren_condition' g: 'do-cond' }
+          g: 'do-while-bare' }
         { c: '@do-needs-semi' s: 'PUNC_SEMI' a: '@do-take-semi'
           g: 'do-end' }
-        { s: [] g: 'do-fallthrough' }
+        # No \`while\` after the body: the statement ends there, as 0.5
+        # read it. After the condition, \`;\` is due.
+        { c: '@do-no-while' g: 'do-fallthrough' }
       ]
     }
 
@@ -1084,9 +1200,16 @@ const grammarText = `
         # the appropriate kind (the cond peeks t0). On empty
         # section or end (t0 = \`:\` or \`)\`), all needs-* fail and
         # the s:[] fallback exits cleanly.
-        { c: '@asec-needs-operand' p: 'asm_operand' g: 'asec-op' }
-        { c: '@asec-needs-clobber' p: 'asm_clobber' g: 'asec-cl' }
-        { c: '@asec-needs-label' p: 'asm_label_ref' g: 'asec-lbl' }
+        # Each item by its first token, which the alternate fetches.
+        { c: '@asec-operands' s: 'PUNC_LBRACKET' b: 1 p: 'asm_operand'
+          g: 'asec-op-name' }
+        { c: '@asec-operands' s: 'LIT_STRING' b: 1 p: 'asm_operand'
+          g: 'asec-op' }
+        { c: '@asec-operands' s: 'ID' b: 1 p: 'asm_operand'
+          g: 'asec-op-id' }
+        { c: '@asec-clobbers' s: 'LIT_STRING' b: 1 p: 'asm_clobber'
+          g: 'asec-cl' }
+        { c: '@asec-labels' s: 'ID' b: 1 p: 'asm_label_ref' g: 'asec-lbl' }
         # Empty section / past last item.
         { s: [] g: 'asec-empty-or-end' }
       ]
@@ -1099,20 +1222,91 @@ const grammarText = `
       ]
     }
 
-    # asm_operand: opaque-token absorber. Phase C.8.b will sub-
-    # structure it ([asm-name]? <constraint-string> ( <expr> )) once
-    # the rest of the asm grammar is verified.
+    # asm_operand: \`[name]? "constraint" ( expression )\`, each part a
+    # node of its own: asm_name, asm_constraint, asm_value. Up to 0.5 the
+    # rules took an operand's tokens flat, whatever they held, and an
+    # operand the structured parts cannot read is taken flat still: the
+    # operand catches a failure below it (its first close alternate;
+    # \`withFallback\` gives the rules below it the catch-all while it is
+    # open), and asm_operand_rest takes the rest of its tokens, flat, up
+    # to the \`,\`, \`:\` or \`)\` that ends it at depth 0, as 0.5 did.
     asm_operand: {
       open: [
-        { c: '@aop-reentered' s: [] g: 'aop-reentry' }
-        { s: '#ANY_C_TOKEN' a: '@aop-take' g: 'aop-first' }
+        { s: 'PUNC_LBRACKET #MEMBER_NAME PUNC_RBRACKET' b: 3 p: 'asm_name'
+          g: 'aop-name' }
+        { s: 'LIT_STRING' b: 1 p: 'asm_constraint' g: 'aop-constraint' }
       ]
       close: [
-        { c: '@aop-stop' s: 'PUNC_COMMA' b: 1 g: 'aop-end-comma' }
-        { c: '@aop-stop' s: 'PUNC_COLON' b: 1 g: 'aop-end-colon' }
-        { c: '@aop-stop' s: 'PUNC_RPAREN' b: 1 g: 'aop-end-rparen' }
-        { s: '#ANY_C_TOKEN' a: '@aop-take'
-          r: 'asm_operand' g: 'aop-more' }
+        { c: '@aop-failed' a: '@aop-flatten' r: 'asm_operand_rest'
+          g: 'catch-aop' }
+        { c: '@aop-needs-constraint' s: 'LIT_STRING' b: 1
+          p: 'asm_constraint' g: 'aop-constraint-2' }
+        { c: '@aop-needs-value' s: 'PUNC_LPAREN' b: 1 p: 'asm_value'
+          g: 'aop-value' }
+        { s: 'PUNC_COMMA' b: 1 a: '@aop-end' g: 'aop-end-comma' }
+        { s: 'PUNC_COLON' b: 1 a: '@aop-end' g: 'aop-end-colon' }
+        { s: 'PUNC_RPAREN' b: 1 a: '@aop-end' g: 'aop-end-rparen' }
+        { a: '@aop-trailing' r: 'asm_operand_rest' g: 'aop-rest' }
+      ]
+    }
+
+    # asm_operand_rest: the rest of an operand's tokens, flat, one a
+    # replace, tracking \`(\`/\`[\` depth from the operand's first token.
+    asm_operand_rest: {
+      open: [
+        { c: '@aor-stop' s: 'PUNC_COMMA' b: 1 a: '@aor-end' g: 'aor-comma' }
+        { c: '@aor-stop' s: 'PUNC_COLON' b: 1 a: '@aor-end' g: 'aor-colon' }
+        { c: '@aor-stop' s: 'PUNC_RPAREN' b: 1 a: '@aor-end' g: 'aor-rparen' }
+        { s: '#ANY_C_TOKEN' a: '@aor-take' g: 'aor-take' }
+      ]
+      close: [
+        { c: '@aor-ended' g: 'aor-end' }
+        { r: 'asm_operand_rest' g: 'aor-more' }
+      ]
+    }
+
+    # asm_name: \`[ name ]\`.
+    asm_name: {
+      open: [
+        { s: 'PUNC_LBRACKET #MEMBER_NAME PUNC_RBRACKET' a: '@aname-take'
+          g: 'aname' }
+      ]
+    }
+
+    # asm_constraint: the constraint string.
+    asm_constraint: {
+      open: [
+        { s: 'LIT_STRING' a: '@acon-take' g: 'acon' }
+      ]
+    }
+
+    # asm_value: \`( expression )\`, its parentheses kept, as a condition's.
+    asm_value: {
+      open: [
+        { s: 'PUNC_LPAREN' a: '@aval-open' p: 'val' g: 'aval-open' }
+      ]
+      close: [
+        { s: 'PUNC_RPAREN' a: '@aval-close' g: 'aval-close' }
+      ]
+    }
+
+    # asm_label: \`__asm__ ( "name" )\` after a declarator, its tokens
+    # flat, as 0.5's structurer kept them.
+    asm_label: {
+      open: [
+        { s: '#ASM_KEYWORD' a: '@alab-kw' p: 'paren_run' g: 'alab' }
+      ]
+    }
+
+    # paren_run: a balanced \`( ... )\`, its tokens flat, one a replace,
+    # on the node the pusher names (k.prunTarget) or its own.
+    paren_run: {
+      open: [
+        { s: '#ANY_C_TOKEN' a: '@prun-take' g: 'prun-take' }
+      ]
+      close: [
+        { c: '@prun-closed' g: 'prun-end' }
+        { r: 'paren_run' g: 'prun-more' }
       ]
     }
 
@@ -1136,24 +1330,6 @@ const grammarText = `
       ]
     }
 
-    # ---- preprocessor_line (phase B4.2.4, opaque to PP_NEWLINE) -----
-    #
-    # A \`#-line\` inside a function body. Captured as a flat token-list
-    # under a preprocessor_line node up to and including the trailing
-    # PP_NEWLINE. Structured directive shapes (#define, #include, etc)
-    # remain on the legacy chomp+structure path until phase C+.
-    preprocessor_line: {
-      open: [
-        { c: '@pp-reentry' s: [] g: 'pp-reentry' }
-        { s: 'PP_HASH' a: '@pp-take-hash' g: 'pp-hash' }
-      ]
-      close: [
-        { s: 'PP_NEWLINE' a: '@pp-take-newline' g: 'pp-end' }
-        { s: '#ZZ' b: 1 g: 'pp-eof' }
-        { s: '#ANY_C_TOKEN' a: '@pp-absorb' r: 'preprocessor_line' g: 'pp-tok' }
-      ]
-    }
-
     # ---- labeled_statement (phase B4.2.3) ---------------------------
     #
     # case <expr> :  body   → labelKind: 'case'
@@ -1167,10 +1343,20 @@ const grammarText = `
       ]
       close: [
         { c: '@lbl-needs-expr' p: 'val' a: '@lbl-mark-expr' g: 'lbl-expr' }
-        { c: '@lbl-needs-colon' s: 'PUNC_COLON'
-          a: '@lbl-take-colon' g: 'lbl-colon' }
-        { c: '@lbl-needs-body' p: 'statement' g: 'lbl-body' }
-        { s: [] g: 'lbl-end' }
+        # A label with no statement after it: at a block's end, or
+        # before a declaration (C23). The block takes what follows.
+        { c: '@lbl-needs-colon' s: 'PUNC_COLON PUNC_RBRACE' b: 1
+          a: '@lbl-take-colon' g: 'lbl-colon-end' }
+        { c: '@lbl-needs-colon' s: 'PUNC_COLON #STORAGE_PREFIX' b: 1
+          a: '@lbl-take-colon' g: 'lbl-colon-decl' }
+        { c: '@lbl-needs-colon' s: 'PUNC_COLON #SIMPLE_TYPE_HEAD' b: 1
+          a: '@lbl-take-colon' g: 'lbl-colon-decl-1' }
+        # Otherwise the statement after the colon is the label's.
+        { c: '@lbl-needs-colon' s: 'PUNC_COLON' a: '@lbl-take-colon'
+          p: 'statement' g: 'lbl-colon' }
+        # A \`case\` label's \`:\` is due; a \`default\` or a name with no \`:\`
+        # ends the label where 0.5's rules ended it.
+        { c: '@lbl-may-end' g: 'lbl-end' }
       ]
     }
 
@@ -1206,10 +1392,9 @@ const grammarText = `
     # \`sizeof ( type_name )\` and \`_Alignof ( type_name )\` (and GCC
     # __alignof__ / __alignof variants). Produces a unary_expression
     # with op set to the keyword and operand set to the type_name
-    # node. The expression-form (\`sizeof <unary>\`) is handled by
-    # @jsonic/expr's prefix-op machinery via C_OP_TABLE — a val.open
-    # alt picks this rule only when the lookahead matches
-    # \`<keyword> ( <type-head>\`.
+    # node. The expression form (\`sizeof <unary>\`) is a prefix
+    # operator of unary_expression, which picks this rule only when the
+    # lookahead is \`<keyword> ( <type-head>\`.
     sizeof_type_form: {
       open: [
         { s: 'KW_SIZEOF' a: '@stf-take-kw' g: 'stf-sizeof' }
@@ -1227,43 +1412,14 @@ const grammarText = `
       ]
     }
 
-    # ---- cast_or_compound_literal (phase C.3) -----------------------
+    # ---- expressions -------------------------------------------------
     #
-    # \`( type_name ) <unary>\`           → cast_expression
-    # \`( type_name ) { initializer }\`   → compound_literal (pending C.4
-    #                                      initializer_list rule)
-    #
-    # The val.open alt that dispatches here matches \`( <type-head>\`
-    # so we know the parens contain a type-name. After taking \`)\` we
-    # peek the next token: \`{\` selects the compound-literal arm, any
-    # other token is the cast-expression arm.
-    cast_or_compound_literal: {
-      open: [
-        # Re-entry on r: (after taking \`)\`): preserve state, fall
-        # through to close.
-        { c: '@cocl-reentered' s: [] g: 'cocl-reentry' }
-        { s: 'PUNC_LPAREN' a: '@cocl-take-lparen'
-          p: 'type_name' g: 'cocl-open' }
-      ]
-      close: [
-        # Take the closing \`)\` then r: back through open so the
-        # next close pass can decide cast vs compound literal.
-        { c: '@cocl-needs-rparen' s: 'PUNC_RPAREN'
-          a: '@cocl-take-rparen' r: 'cast_or_compound_literal'
-          g: 'cocl-rparen' }
-        # Compound literal: \`(type){…}\` — body is an initializer_list.
-        { c: '@cocl-needs-decision' s: 'PUNC_LBRACE'
-          a: '@cocl-mark-cl' b: 1 p: 'initializer_list'
-          g: 'cocl-cl' }
-        # Cast: parse the operand as an expression. (Pratt-driven
-        # val absorbs the full operand; precedence inside cast is
-        # documented as a phase-C.x follow-up if a test case fails.)
-        { c: '@cocl-needs-decision' a: '@cocl-mark-cast'
-          p: 'val' g: 'cocl-cast' }
-        { s: [] a: '@cocl-finalize' g: 'cocl-end' }
-      ]
-    }
-
+    # C's expressions are read by @tabnas/expr, installed over this grammar
+    # with C's operator table (ts/src/expr-grammar.ts). A context pushes
+    # \`val\`, the rule an expression starts from, where C's grammar names an
+    # expression; \`val\` reads the rules below where a term is one of C's
+    # own forms: \`sizeof ( type-name )\`, a cast's type name, a brace list, a
+    # statement expression, \`_Generic\` and adjacent strings.
     # ---- initializer_list family (phase C.4) ------------------------
     #
     # \`{ <item>, <item>, … }\` — used as the RHS of \`=\` in declarators
@@ -1342,10 +1498,13 @@ const grammarText = `
           p: 'val' g: 'dr-lbracket' }
       ]
       close: [
-        { c: '@dr-needs-id' s: 'ID' a: '@dr-take-id' g: 'dr-id' }
+        # A member's name is any identifier, a typedef's or a macro's
+        # name among them: members have their own name space.
+        { c: '@dr-needs-id' s: '#MEMBER_NAME' a: '@dr-take-id' g: 'dr-id' }
         { c: '@dr-needs-rbracket' s: 'PUNC_RBRACKET'
           a: '@dr-take-rbracket' g: 'dr-rbracket' }
-        { s: [] g: 'dr-end' }
+        # A designator ends with its name or its \`]\`.
+        { c: '@dr-complete' s: [] g: 'dr-end' }
       ]
     }
 
@@ -1382,8 +1541,7 @@ const grammarText = `
     }
 
     # generic_controlling_expression: wraps the controlling expression
-    # in its own node so the legacy CST shape (with \`.expression\`
-    # field) is preserved.
+    # in its own node, as 0.5's tree did (member \`expression\`).
     generic_controlling_expression: {
       open: [
         { p: 'val' g: 'gce-val' }
@@ -1550,6 +1708,10 @@ const grammarText = `
         # Subsequent declarators after \`,\`.
         { s: 'PUNC_COMMA' a: '@sd-take-comma' p: 'struct_declarator'
           g: 'sd-decl-comma' }
+        # A member's second name, with no comma between, where 0.5's rules
+        # took it, in a declaration held to the rules (\`long a MACRO;\`).
+        { c: '@sd-lenient-member' s: 'ID' b: 1 p: 'struct_declarator'
+          g: 'sd-decl-lenient' }
         # Trailing \`;\`.
         { s: 'PUNC_SEMI' a: '@sd-take-semi' g: 'sd-end' }
       ]
@@ -2006,9 +2168,9 @@ const grammarText = `
         { c: '@said-need-rparen' s: 'PUNC_RPAREN'
           a: '@said-take-rparen' r: 'static_assert_declaration'
           g: 'sa-rp' }
+        # The \`;\` ends the declaration; nothing else does.
         { c: '@said-need-semi' s: 'PUNC_SEMI'
           a: '@said-take-semi' g: 'sa-end' }
-        { s: [] g: 'sa-fall' }
       ]
     }
   }
@@ -2048,20 +2210,21 @@ export interface COptions {
   // __asm__, __extension__, __inline__, __signed__, __volatile__,
   // __const__, __restrict__, __typeof__, __alignof__), MSVC keywords
   // (__declspec, __cdecl, __int8/16/32/64, __ptr32/64, etc.), Clang
-  // nullability annotations, the structured CST shapes for inline
-  // assembly, and the legacy recursive-descent fallback that covers the
-  // long-tail declarator shapes (K&R parameter lists, compound
-  // declarators beyond arrays-of-function-pointers).
+  // nullability annotations, and the structured CST shapes for inline
+  // assembly. A declaration extended mode does not hold to the rules
+  // (its lookahead validator, @looks-simple-decl, declines it) is armed:
+  // where the rules cannot parse it, it is an unknown declaration
+  // (ts/src/fallback.ts).
   //
   // When false (default), the parser handles plain C23: keywords,
   // punctuators, literals, declarations/definitions/statements/
   // expressions, C23 attributes [[...]], static_assert, typedef +
   // macro tracking, and the whole preprocessor (#include, #define, #if
-  // family, #pragma, #error, #warning, #undef, #line, plus
-  // conditional_group folding) — directives are structured identically
-  // in both modes. Source that uses a GCC/MSVC/Clang extension
-  // construct, or a shape that only the legacy fallback covers, will
-  // fail to parse cleanly.
+  // family, #pragma, #error, #warning, #undef, #line, plus conditional
+  // groups); directives are structured identically in both modes. A
+  // declaration with a type or storage head is held to the rules, so
+  // source that uses a GCC/MSVC/Clang extension construct there fails
+  // to parse cleanly.
   //
   // The default is `false` to keep the plain-C path the canonical
   // reference. Real-world C source typically needs `{extended: true}`.
@@ -2091,13 +2254,6 @@ const EXTENSION_RULES: ReadonlyArray<string> = [
   // GCC inline assembly
   'asm_statement', 'asm_template', 'asm_section',
   'asm_operand', 'asm_clobber', 'asm_label_ref',
-  // Preprocessor (in-body opaque + top-level structured)
-  'preprocessor_line',
-  'preprocessor_directive',
-  'define_directive', 'macro_parameter_list', 'macro_body',
-  'undef_directive',
-  'include_directive', 'header_form',
-  'conditional_directive', 'simple_directive',
   // Compiler-specific attribute spec syntax
   'attribute_spec_gcc', 'attribute_spec_msvc',
 ]
@@ -2142,10 +2298,11 @@ function getCMeta(ctx: Context): CMeta {
   return (ctx.meta as any).cmeta as CMeta
 }
 
-// Statement kinds the new grammar does NOT yet cover. If any of
-// these tokens appears inside a function body, the body can't be
-// structured by block_item dispatch, so the gate below rejects the
-// new path and the legacy chomp+structure handles it.
+// Tokens whose function bodies 0.5's validator declined. The validator
+// answers as it did in 0.5, so which declarations extended mode holds
+// to the rules is 0.5's: a body that holds one of these is armed (the
+// rules build it, and it is an unknown declaration where they cannot),
+// where 0.5 handed it to its structurer.
 //
 // As phases B4.2.x land more statement rules, the corresponding
 // tokens leave this set:
@@ -2158,11 +2315,7 @@ function getCMeta(ctx: Context): CMeta {
 const UNSUPPORTED_BODY_TOKENS = new Set<string>([
   'KW_STATIC_ASSERT', 'KW__STATIC_ASSERT',
   // Function bodies that contain extension constructs (inline
-  // assembly, preprocessor lines) currently go through the legacy
-  // structuring path which has full asm-operand / pp-line shapes.
-  // The grammar's asm_operand is opaque token-list — extending it to
-  // produce the structured shape is a separate task. Until then,
-  // gate any body that mentions asm/pp away from the grammar path.
+  // assembly, preprocessor lines).
   'KW_ASM', 'KW___ASM', 'KW___ASM__',
   'PP_HASH',
 ])
@@ -2405,8 +2558,8 @@ const C: any = function C(jsonic: Tabnas, options: COptions): void {
     // them and stashes them on the next non-trivia token's use.leading
     // so source fidelity is preserved.
     //
-    // ANY_C_TOKEN is the wildcard alt-position used by the
-    // external_declaration chomper in c-grammar.jsonic. We compute it
+    // ANY_C_TOKEN is the wildcard alt-position used by the dispatch's
+    // lookahead and by unknown_declaration in c-grammar.jsonic. It is computed
     // here because the token set is dynamic (every keyword name lives
     // in tokens.ts and is generated at install time) — the grammar
     // file just references the set by name.
@@ -2443,8 +2596,8 @@ const C: any = function C(jsonic: Tabnas, options: COptions): void {
       ],
       // Phase B2.2: leading storage-class keyword the dispatcher accepts
       // before SIMPLE_TYPE_HEAD. Includes KW_TYPEDEF so `typedef int T;`
-      // takes the new path; the finaliser registers T in cmeta.symbols
-      // exactly like the chomp's structureExternalDeclaration does.
+      // is held to the rules; the declaration's end binds T in
+      // cmeta.symbols (finishExternalDeclaration).
       STORAGE_PREFIX: [
         'KW_STATIC', 'KW_EXTERN', 'KW_TYPEDEF',
         'KW_AUTO', 'KW_REGISTER',
@@ -2453,14 +2606,84 @@ const C: any = function C(jsonic: Tabnas, options: COptions): void {
         'KW_INLINE', 'KW___INLINE__', 'KW___INLINE',
         'KW___EXTENSION__',
       ],
-      // C-atom set used by val's paren-preval alt (call / subscript
-      // detection). Distinct from jsonic's standard VAL set so the
-      // implicit-list-of-VALs close alts don't fire on these tokens.
-      C_ATOM: [
-        'LIT_INT', 'LIT_FLOAT', 'LIT_CHAR', 'LIT_STRING',
-        'ID', 'MACRO_NAME', 'TYPEDEF_NAME',
+      // The head of a declaration that is not held to the rules: armed
+      // (c-grammar.jsonic, external_declaration). Every keyword that can
+      // start a declaration's specifiers.
+      DECL_HEAD: [
+        'KW_VOID', 'KW_CHAR', 'KW_SHORT', 'KW_INT', 'KW_LONG',
+        'KW_FLOAT', 'KW_DOUBLE', 'KW_SIGNED', 'KW_UNSIGNED',
+        'KW_BOOL', 'KW__BOOL', 'KW___SIGNED__', 'KW___SIGNED',
+        'KW___INT8', 'KW___INT16', 'KW___INT32', 'KW___INT64',
+        'KW__COMPLEX', 'KW__IMAGINARY', 'KW___COMPLEX__',
+        'KW__DECIMAL32', 'KW__DECIMAL64', 'KW__DECIMAL128',
+        'KW__BITINT', 'KW___BUILTIN_VA_LIST', 'KW___AUTO_TYPE',
+        'KW_TYPEOF', 'KW_TYPEOF_UNQUAL', 'KW___TYPEOF__', 'KW___TYPEOF',
+        'TYPEDEF_NAME',
+        'KW_CONST', 'KW_VOLATILE', 'KW_RESTRICT', 'KW__ATOMIC',
+        'KW___CONST__', 'KW___CONST', 'KW___VOLATILE__', 'KW___VOLATILE',
+        'KW___RESTRICT__', 'KW___RESTRICT',
+        'KW_STRUCT', 'KW_UNION', 'KW_ENUM',
+        'KW_STATIC', 'KW_EXTERN', 'KW_TYPEDEF', 'KW_AUTO', 'KW_REGISTER',
+        'KW__THREAD_LOCAL', 'KW_THREAD_LOCAL', 'KW_CONSTEXPR', 'KW___THREAD',
+        'KW_INLINE', 'KW___INLINE__', 'KW___INLINE', 'KW___FORCEINLINE',
+        'KW__NORETURN', 'KW__ALIGNAS', 'KW_ALIGNAS',
+        'KW___EXTENSION__',
+        'KW___ATTRIBUTE__', 'KW___ATTRIBUTE', 'KW___DECLSPEC',
       ],
-      C_PAREN_OPEN: ['PUNC_LPAREN', 'PUNC_LBRACKET'],
+      // C's operators, as token sets (ts/src/expr-grammar.ts has their
+      // table).
+      ASSIGN_OP: [
+        'PUNC_ASSIGN', 'PUNC_PLUS_ASSIGN', 'PUNC_MINUS_ASSIGN',
+        'PUNC_STAR_ASSIGN', 'PUNC_SLASH_ASSIGN', 'PUNC_PERCENT_ASSIGN',
+        'PUNC_LSHIFT_ASSIGN', 'PUNC_RSHIFT_ASSIGN', 'PUNC_AMP_ASSIGN',
+        'PUNC_CARET_ASSIGN', 'PUNC_PIPE_ASSIGN',
+      ],
+      BINARY_OP: [
+        'PUNC_OR_OR', 'PUNC_AND_AND', 'PUNC_PIPE', 'PUNC_CARET', 'PUNC_AMP',
+        'PUNC_EQ', 'PUNC_NE', 'PUNC_LT', 'PUNC_LE', 'PUNC_GT', 'PUNC_GE',
+        'PUNC_LSHIFT', 'PUNC_RSHIFT', 'PUNC_PLUS', 'PUNC_MINUS',
+        'PUNC_STAR', 'PUNC_SLASH', 'PUNC_PERCENT',
+      ],
+      INCDEC: ['PUNC_PLUS_PLUS', 'PUNC_MINUS_MINUS'],
+      UNARY_OP: [
+        'PUNC_PLUS', 'PUNC_MINUS', 'PUNC_BANG', 'PUNC_TILDE',
+        'PUNC_STAR', 'PUNC_AMP',
+      ],
+      MEMBER_NAME: ['ID', 'TYPEDEF_NAME', 'MACRO_NAME'],
+      // The storage classes and function specifiers spec_loop takes
+      // anywhere among the specifiers: C's, and the extensions' (in
+      // extended mode).
+      STORAGE_STD: [
+        'KW_STATIC', 'KW_EXTERN', 'KW_TYPEDEF', 'KW_AUTO', 'KW_REGISTER',
+        'KW__THREAD_LOCAL', 'KW_THREAD_LOCAL', 'KW_CONSTEXPR', 'KW_INLINE',
+      ],
+      STORAGE_EXT: ['KW___THREAD', 'KW___INLINE__', 'KW___INLINE', 'KW___EXTENSION__'],
+      // Specifier keywords spec_loop takes as tokens, beside the type
+      // heads and the storage classes: C's, and the extensions'.
+      SPEC_KEYWORD: [
+        'KW__NORETURN', 'KW__DECIMAL32', 'KW__DECIMAL64', 'KW__DECIMAL128',
+      ],
+      SPEC_KEYWORD_EXT: [
+        'KW___FORCEINLINE', 'KW___BUILTIN_VA_LIST', 'KW___AUTO_TYPE',
+        'KW___COMPLEX__',
+      ],
+      // Specifiers with a parenthesised argument: C's, and the
+      // extensions'.
+      PAREN_SPEC: ['KW_TYPEOF', 'KW_TYPEOF_UNQUAL', 'KW_ALIGNAS', 'KW__ALIGNAS'],
+      PAREN_SPEC_EXT: ['KW___TYPEOF__', 'KW___TYPEOF'],
+      // A pointer's qualifiers: C's, and the extensions' spellings.
+      PTR_QUALIFIER: ['KW_CONST', 'KW_VOLATILE', 'KW_RESTRICT', 'KW__ATOMIC'],
+      PTR_QUALIFIER_EXT: [
+        'KW___CONST__', 'KW___CONST', 'KW___VOLATILE__', 'KW___VOLATILE',
+        'KW___RESTRICT__', 'KW___RESTRICT',
+      ],
+      ASM_KEYWORD: ['KW_ASM', 'KW___ASM', 'KW___ASM__'],
+      // What never directly follows an operand in C: an identifier or a
+      // literal.
+      JUXTAPOSED: [
+        'ID', 'TYPEDEF_NAME', 'MACRO_NAME',
+        'LIT_INT', 'LIT_FLOAT', 'LIT_CHAR', 'LIT_STRING',
+      ],
       // All keyword tokens. Used by attribute_item so a C keyword
       // (e.g. `const` in `__attribute__((const))`) can stand in as
       // the attribute name — mirroring legacy parseAttributeItem
@@ -2508,6 +2731,12 @@ const C: any = function C(jsonic: Tabnas, options: COptions): void {
           const m = ctx.meta as any
           if (!m.cmeta) m.cmeta = makeCMeta()
           if (meta && meta.cmeta) m.cmeta = meta.cmeta
+          // A cmeta handed in may have parsed before: the record and the
+          // declaration state are this parse's.
+          m.cmeta.rec = []
+          m.cmeta.recBase = 0
+          m.cmeta.ed = undefined
+          m.cmeta.links = newLinks()
         }) as any,
       },
     },
@@ -2515,10 +2744,10 @@ const C: any = function C(jsonic: Tabnas, options: COptions): void {
 
   // Sub-lex hook: every emitted token (including ignored ones) flows
   // through here. Trivia tokens get pushed onto cmeta.pendingTrivia;
-  // the next non-trivia token receives them via use.leading. The
-  // chomper (and future grammar rules) drain use.leading into the AST
-  // so comments survive in source order even though IGNORE'd at
-  // parse time.
+  // the next non-trivia token receives them via use.leading. The rules
+  // put use.leading into the tree, where the token is kept or dropped,
+  // so comments survive in source order even though IGNORE'd at parse
+  // time.
   jsonic.sub({
     lex: (tkn: Token, _rule: Rule, ctx: Context) => {
       if (!tkn || !tkn.isToken) return
@@ -2535,6 +2764,14 @@ const C: any = function C(jsonic: Tabnas, options: COptions): void {
         ;(tkn as any).use = (tkn as any).use || {}
         ;(tkn as any).use.leading = m.pendingTrivia
         m.pendingTrivia = []
+      }
+      // The tokens the parser takes, in order, for the armed fallback
+      // (ts/src/fallback.ts), and the links between an expression's
+      // tokens (ts/src/expr-grammar.ts).
+      if (tkn.name !== '#ZZ') {
+        recordToken(m, tkn)
+        if (!m.links) m.links = newLinks()
+        linkToken(m.links, tkn)
       }
     },
   })
@@ -2557,24 +2794,24 @@ const C: any = function C(jsonic: Tabnas, options: COptions): void {
   if (!opts.extended && spec && spec.rule) {
     for (const name of EXTENSION_RULES) delete spec.rule[name]
   }
+  // C's expressions are read by @tabnas/expr, from the rule named `val`
+  // that jsonic's grammar has too. Clear jsonic's, alternates and actions
+  // both, so that expr's and C's are the only ones (ts/src/expr-grammar.ts).
+  jsonic.rule('val', (rs: any) => rs.clear())
+  const refs = makeGrammarRefs(opts)
+  withFallback(spec, refs)
   jsonic.grammar({
     ...spec,
-    ref: makeGrammarRefs(opts),
+    ref: refs,
   })
-
-  // Phase A: install @jsonic/expr on the same jsonic instance with
-  // the full C operator catalog. The plugin sets up val/expr rules
-  // that recognise prefix/infix/suffix/ternary operators and paren
-  // forms (call, subscript, grouping). Because c.ts already
-  // registered PUNC_PLUS / PUNC_LPAREN / etc. via fixed.token, the
-  // plugin reuses those tins instead of minting fresh `#E+` ones, so
-  // its alts match the very tokens our lex matchers emit.
-  //
-  // The main grammar (c-grammar.jsonic) does NOT yet descend into
-  // val — that's phase B. Until then val is unreachable from
-  // translation_unit so this install is functionally a no-op for
-  // existing tests, but the plumbing is in place for later phases.
   installExpr(jsonic)
+  // The rules expr reads an expression with, its own and the jsonic ones
+  // it pushes (an implicit list inside a paren), are below every external
+  // declaration too.
+  withRuleFallback(jsonic, [
+    'val', 'expr', 'paren', 'ternary', 'list', 'elem', 'map', 'pair',
+  ])
+
 }
 
 C.defaults = {} as any
@@ -2592,6 +2829,7 @@ C.defaults = {} as any
 function makeGrammarRefs(opts: Required<COptions>): Record<string, Function> {
 return {
 
+
   // Extension gate ----
   // True when the plugin was installed with `extended: true`. Every
   // extension dispatch alt (preprocessor, GCC/MSVC keywords, asm) is
@@ -2600,134 +2838,170 @@ return {
   // alts that should ONLY fire in plain-C mode (rare).
   '@extended-on': (_rule: Rule): boolean => opts.extended === true,
   '@extended-off': (_rule: Rule): boolean => opts.extended !== true,
-  // Combined: extension-on AND first iteration of the dispatching rule.
-  // Used by extdecl_loop's PP_HASH / KW_ASM extension dispatch alts
-  // which originally checked `@is-first-iter` alone.
-  '@ext-and-first-iter': (rule: Rule): boolean =>
-    opts.extended === true &&
-    (!rule.k.tokens || rule.k.tokens.length === 0),
+  // The plain-mode C23 attribute head: two adjacent `[`.
+  '@plain-as23': (_rule: Rule, ctx: Context): boolean => {
+    if (opts.extended === true) return false
+    const a = ctx.t[0] as any, b = ctx.t[1] as any
+    return !!(a && b && a.sI + a.len === b.sI)
+  },
 
   // translation_unit ----
   '@translation_unit-bo': (rule: Rule): void => {
     rule.node = makeNode('translation_unit')
   },
   '@translation_unit-bc': (rule: Rule): void => {
-    // After all external_declarations have accumulated, fold
-    // #if … #endif sequences into conditional_group nodes.
-    structureConditionalGroups(rule.node)
+    fixSpans(rule.node)
   },
 
   // extdecl_loop ----
-  // r.node is inherited from translation_unit; bc pushes the completed
-  // external_declaration child before deciding to recurse.
+  // r.node is the container's (the translation unit's, or a conditional
+  // branch's); bc appends each completed external declaration and each
+  // conditional group, but a group's opener, which the group takes.
   '@extdecl_loop-bc': (rule: Rule): void => {
     const child = rule.child
-    if (child && child.node && child.node.kind === 'external_declaration') {
+    if (!child || !child.node || child === rule.u.lastChild) return
+    rule.u.lastChild = child
+    const node = child.node
+    if (node.kind === 'external_declaration') {
+      if (conditionalOf(node, OPENERS)) rule.u.opener = node
+      else rule.node.children.push(node)
+    } else if (node.kind === 'conditional_group') {
+      rule.node.children.push(node)
+    }
+  },
+  '@opens-group': (rule: Rule): boolean => !!rule.u.opener,
+  // A branch's items end at the line of the next branch or the `#endif`.
+  '@ends-branch': (rule: Rule, ctx: Context): boolean =>
+    rule.k.inBranch === true && directiveAhead(ctx, BRANCH_ENDS),
+
+  // conditional_group ----
+  // The group takes its opener from the items loop that pushed it.
+  '@conditional_group-bo': (rule: Rule): void => {
+    rule.node = makeNode('conditional_group')
+    const loop = rule.parent as Rule
+    rule.u.opener = loop.u.opener
+    loop.u.opener = undefined
+  },
+  '@next-branch': (_rule: Rule, ctx: Context): boolean =>
+    directiveAhead(ctx, BRANCHES),
+  '@group-endif': (_rule: Rule, ctx: Context): boolean =>
+    directiveAhead(ctx, ENDIF),
+  '@endif-taken': (rule: Rule): boolean => rule.u.endifTaken === true,
+  '@conditional_group-bc': (rule: Rule): void => {
+    const child = rule.child
+    if (!child || !child.node || child === rule.u.lastChild) return
+    rule.u.lastChild = child
+    if (child.node.kind === 'conditional_branch') {
       rule.node.children.push(child.node)
+    } else if (child.node.kind === 'external_declaration') {
+      rule.node.children.push(child.node)
+      rule.u.endifTaken = true
+    }
+  },
+  '@cg-end': (rule: Rule): void => {
+    fixSpans(rule.node)
+  },
+
+  // conditional_branch ----
+  // The first branch's line is the group's opener; a later branch parses
+  // its own.
+  '@conditional_branch-bo': (rule: Rule): void => {
+    rule.node = makeNode('conditional_branch')
+    const group = rule.parent as Rule
+    const opener = group.u.opener
+    if (opener) {
+      group.u.opener = undefined
+      takeBranchHead(rule, opener)
+    }
+  },
+  '@branch-has-head': (rule: Rule): boolean => rule.u.headTaken === true,
+  '@branch-needs-items': (rule: Rule): boolean =>
+    rule.u.headTaken === true && !rule.u.itemsTaken,
+  '@conditional_branch-bc': (rule: Rule): void => {
+    const child = rule.child
+    if (!child || child === rule.u.lastChild) return
+    rule.u.lastChild = child
+    if (child.name === 'external_declaration' && !rule.u.headTaken) {
+      takeBranchHead(rule, child.node)
+    } else if (child.name === 'extdecl_loop') {
+      rule.u.itemsTaken = true
     }
   },
 
   // external_declaration ----
-  // bo runs once per fresh rule instance (including each r:-recursion).
-  // Guarded so the in-progress token list isn't reset on iteration.
-  '@external_declaration-bo': (rule: Rule): void => {
-    if (!rule.node || rule.node.kind !== 'external_declaration') {
-      rule.node = makeNode('external_declaration')
-    }
-    if (!rule.k.tokens) rule.k.tokens = []
-    if (rule.k.depth === undefined) rule.k.depth = 0
-    if (rule.k.terminated === undefined) rule.k.terminated = false
+  // Each declaration starts with a fresh node and state; the fallback's
+  // token record is trimmed to the tokens it has not yet taken.
+  '@external_declaration-bo': (rule: Rule, ctx: Context): void => {
+    rule.node = makeNode('external_declaration')
+    startDeclaration(getCMeta(ctx), ctx)
   },
 
-  // Alt-level action: the wildcard-token alt absorbs one token per
-  // cycle, attaching any preserved trivia (comments, line cont) ahead
-  // of the real token, and updating brace/depth/terminator state on r.k.
-  '@absorb-token': (rule: Rule): void => {
-    const tkn = rule.o0 as Token
-    const leading = (tkn as any).use && (tkn as any).use.leading
-    if (Array.isArray(leading)) {
-      for (const lt of leading) {
-        rule.node.children.push(tokenRef(lt))
-        rule.k.tokens.push(lt)
-      }
-    }
-    rule.k.tokens.push(tkn)
-    rule.node.children.push(tokenRef(tkn))
-    rule.k.justClosedBrace = false
-    if (tkn.name === 'PUNC_LBRACE') rule.k.depth++
-    else if (tkn.name === 'PUNC_RBRACE') {
-      rule.k.depth--
-      if (rule.k.depth <= 0) {
-        // A closing top-level brace ends a function body, but for a
-        // struct/union/enum definition or compound literal it's
-        // followed by tokens (`S;`, `var,…;`, `;` alone). The close
-        // alts decide based on lookahead — see @just-closed-and-decl-ahead.
-        rule.k.justClosedBrace = true
-      }
-    }
-    else if (tkn.name === 'PUNC_SEMI' && rule.k.depth === 0) {
-      rule.k.terminated = true
-    }
-    else if (tkn.name === 'PP_NEWLINE' && rule.k.depth === 0 &&
-             firstNonTriviaIs(rule.k.tokens, 'PP_HASH')) {
-      // Directive line ends here — each #-line is its own
-      // external_declaration.
-      rule.k.terminated = true
+  // An armed route (ts/src/fallback.ts).
+  '@arm': (_rule: Rule, ctx: Context): void => {
+    const ed = edOf(ctx)
+    if (ed) ed.armed = true
+  },
+
+  '@c-failed': (_rule: Rule, ctx: Context): boolean => {
+    const ed = edOf(ctx)
+    return !!(ed && ed.failed)
+  },
+
+  // The rules failed on an armed declaration: it is an unknown one, its
+  // children the tokens it has taken, flat; unknown_declaration takes the
+  // rest of the run.
+  '@to-unknown': (rule: Rule, ctx: Context): void => {
+    const ed = edOf(ctx)!
+    ed.unknown = true
+    rule.node.children = []
+    for (const tkn of takenTokens(getCMeta(ctx), ctx)) {
+      pushTokenWithTrivia(rule.node, tkn)
     }
   },
 
-  // Close conditions:
-  '@terminated': (rule: Rule): boolean => rule.k.terminated === true,
-  '@just-closed-and-decl-ahead': (rule: Rule, ctx: Context): boolean =>
-    rule.k.justClosedBrace === true && startsNewExternalDeclaration(ctx),
-
-  // Close action: register typedefs and structure the absorbed tokens.
-  '@finalize-extdecl': (rule: Rule, ctx: Context): void => {
-    finalizeExternalDeclaration(rule, ctx)
+  // An external declaration no rule starts: unknown from its first token.
+  '@unk-start': (_rule: Rule, ctx: Context): void => {
+    const ed = edOf(ctx)!
+    ed.armed = true
+    ed.unknown = true
   },
 
-  // ---- Phase B1: real-grammar dispatch & finalisation ----
-
-  // Marks the external_declaration as having taken the new
-  // (jsonic-rule-driven) path so the close-state can route to the
-  // matching finaliser instead of the chomp's structureExternalDecl.
-  '@mark-new-path': (rule: Rule): void => {
-    rule.u.newPath = true
+  // The rules ended an armed declaration before the chomp's end: the rest
+  // of the run follows, flat.
+  '@armed-runs-on': (_rule: Rule, ctx: Context): boolean => {
+    const ed = edOf(ctx)
+    return !!(ed && ed.armed && !ed.failed && !ed.unknown && !chompEnded(ctx))
+  },
+  '@extdecl-trailing': (rule: Rule, ctx: Context): void => {
+    spliceDeclaration(rule, ctx)
+    edOf(ctx)!.trailing = true
   },
 
-  '@new-path': (rule: Rule): boolean => rule.u.newPath === true,
-
-  // Dispatch gate: an external_declaration is on its first iteration
-  // when the chomp's token buffer is empty. After that we're mid-
-  // declaration and any specifier-shaped tokens belong to it
-  // (e.g. a struct member type), not the start of a new one.
-  '@is-first-iter': (rule: Rule): boolean =>
-    !rule.k.tokens || rule.k.tokens.length === 0,
-
-  // Plain-mode + first-iter combo. Used by external_declaration's
-  // direct-dispatch alts that route a clearly-shaped declaration
-  // straight to simple_declaration (no @looks-simple-decl lookahead
-  // walk). In extended mode the validator+wildcard cascade still
-  // handles dispatch so the asm/pp gate via isFunctionBodySupported
-  // continues to route those bodies to legacy structuring.
-  '@plain-and-first-iter': (rule: Rule): boolean =>
-    opts.extended !== true &&
-    (!rule.k.tokens || rule.k.tokens.length === 0),
-  '@plain-as23-and-first': (rule: Rule, ctx: Context): boolean => {
-    if (opts.extended === true) return false
-    if (rule.k.tokens && rule.k.tokens.length > 0) return false
-    const a = ctx.t[0] as any, b = ctx.t[1] as any
-    return !!(a && b && a.sI + a.len === b.sI)
+  // The declaration the rules built.
+  '@extdecl-built': (rule: Rule, ctx: Context): void => {
+    spliceDeclaration(rule, ctx)
+    finishExternalDeclaration(rule.node, ctx)
   },
 
-  // Phase B2.3: lookahead-based dispatch shape check.
-  // Walks ctx.t and validates: optional STORAGE_PREFIX, 1+
-  // SIMPLE_TYPE_HEAD, then ID, then `;` or `=`. Combined with the
-  // gate above, this distinguishes a simple declaration from
-  // function definitions, multi-declarator forms, pointers/arrays,
-  // and anything else that needs the chomp path.
-  '@looks-simple-decl': (rule: Rule, ctx: Context): boolean => {
-    if (rule.k.tokens && rule.k.tokens.length > 0) return false
+  // unknown_declaration ----
+  '@unk-take': (rule: Rule): void => {
+    pushTokenWithTrivia(rule.node, rule.o0 as Token)
+  },
+  '@unk-ended': (_rule: Rule, ctx: Context): boolean => chompEnded(ctx),
+  '@unk-end': (rule: Rule, ctx: Context): void => {
+    finishExternalDeclaration(rule.node, ctx)
+  },
+
+  // Plain mode holds a declaration with a type, storage, `_BitInt` or
+  // `[[` head to the rules; extended mode holds one when this lookahead
+  // validator accepts its head (the external_declaration alternates that
+  // name it). The validator answers as it did in 0.5, so the declarations
+  // held to the rules, and refused where the rules cannot parse them, are
+  // 0.5's: it walks ctx.t and validates an optional storage prefix, one
+  // or more simple type specifiers, then a declarator and `;`, `=`, `,`,
+  // `[` or `(`. Its comments below say "legacy" for what is now the armed
+  // route: a declaration the validator declines.
+  '@looks-simple-decl': (_rule: Rule, ctx: Context): boolean => {
     let i = 0
     // Phase G: skip leading attribute specs (GCC / MSVC / C23). They
     // can appear before storage prefix or type head; spec_loop will
@@ -2931,47 +3205,6 @@ return {
     return true
   },
 
-  // Close action when the new path was taken: the child rule's node
-  // is the structured declaration. To match the CST shape produced
-  // by the chomp+post-process path, splice the declaration's
-  // children directly into external_declaration.children rather
-  // than wrapping them in an extra layer.
-  '@finalize-new-path': (rule: Rule, ctx: Context): void => {
-    if (rule.child && rule.child.node) {
-      const childNode = rule.child.node
-      const childName = rule.child.name
-      // Standalone directive / declaration forms whose CST has the
-      // structured node as a single child of external_declaration.
-      // simple_declaration splices its children for the historic
-      // shape; everything else wraps.
-      const wrapAsSingle =
-        childName === 'static_assert_declaration' ||
-        childName === 'asm_statement'
-      if (wrapAsSingle) {
-        rule.node.children = [childNode]
-        rule.node.declKind = 'declaration'
-      } else {
-        rule.node.children = [...(childNode.children || [])]
-        rule.node.declKind = childNode.declKind || 'declaration'
-      }
-      // Dispatch marker: which path produced this external_declaration.
-      // Tests in test/spec/path-dispatch.tsv assert against this so
-      // changes to @looks-simple-decl that silently route shapes from
-      // one path to the other are caught.
-      ;(rule.node as any).viaPath = 'grammar'
-      // Register every declared name as a typedef when the child
-      // declaration's specifier list contained KW_TYPEDEF.
-      const u = rule.child.u || {}
-      if (u.isTypedef && Array.isArray(u.declaredNames)) {
-        const cmeta = getCMeta(ctx)
-        for (const name of u.declaredNames) {
-          cmeta.symbols.bindTypedef(name)
-          reclassifyAsTypedef(ctx, name)
-        }
-      }
-    }
-  },
-
   // ---- simple_declaration refs ----
 
   // bo: create the declaration node and the per-declaration scaffolding.
@@ -3010,14 +3243,47 @@ return {
   // then handled by a separate init_declarator sub-rule.
   '@absorb-spec-storage': (rule: Rule): void => {
     const owner = specOwner(rule)
-    const tkn = rule.o0 as Token
+    const tkn = matchedToken(rule)
     pushTokenWithTrivia(owner.u.specs, tkn)
     if (tkn.name === 'KW_TYPEDEF') owner.u.isTypedef = true
   },
   '@absorb-spec-type': (rule: Rule): void => {
     const owner = specOwner(rule)
-    const tkn = rule.o0 as Token
+    const tkn = matchedToken(rule)
     pushTokenWithTrivia(owner.u.specs, tkn)
+  },
+
+  // A specifier with a parenthesised argument: the keyword, and the
+  // parentheses' tokens on the declaration_specifiers too (paren_run).
+  '@absorb-spec-paren': (rule: Rule): void => {
+    const owner = specOwner(rule)
+    pushTokenWithTrivia(owner.u.specs, matchedToken(rule))
+    rule.k.prunTarget = owner.u.specs
+  },
+
+  // ---- paren_run: a balanced ( ... ), flat ----
+  '@prun-take': (rule: Rule): void => {
+    const tkn = rule.o0 as Token
+    pushTokenWithTrivia(rule.k.prunTarget || rule.node, tkn)
+    if (tkn.name === 'PUNC_LPAREN') rule.k.prunDepth = (rule.k.prunDepth || 0) + 1
+    else if (tkn.name === 'PUNC_RPAREN') rule.k.prunDepth = (rule.k.prunDepth || 0) - 1
+  },
+  '@prun-closed': (rule: Rule): boolean => (rule.k.prunDepth || 0) <= 0,
+  '@paren_run-ac': (rule: Rule): void => {
+    if ((rule.k.prunDepth || 0) <= 0) {
+      delete rule.k.prunTarget
+      delete rule.k.prunDepth
+    }
+  },
+
+  // ---- asm_label: `__asm__ ( "name" )` after a declarator ----
+  '@asm_label-bo': (rule: Rule): void => {
+    rule.node = makeNode('asm_label')
+  },
+  '@alab-kw': (rule: Rule): void => {
+    pushTokenWithTrivia(rule.node, rule.o0 as Token)
+    delete rule.k.prunTarget
+    rule.k.prunDepth = 0
   },
 
   // ---- bit_int_paren refs (C23 _BitInt(N)) ----
@@ -3035,7 +3301,7 @@ return {
   '@bip-mark-val': (_rule: Rule): void => { /* see -bc */ },
   '@bit_int_paren-bc': (rule: Rule): void => {
     if (rule.k.bipValAttached) return
-    if (rule.child && rule.child.name === 'val' && rule.child.node) {
+    if (rule.child && isExpressionRule(rule.child) && rule.child.node) {
       const owner = specOwner(rule)
       if (owner && owner.u && owner.u.specs) {
         owner.u.specs.children.push(rule.child.node)
@@ -3083,6 +3349,23 @@ return {
   },
 
   '@idecl-named': (rule: Rule): boolean => rule.k.named === true,
+  // A declarator after a declarator with no comma between (`int a b;`)
+  // is 0.5's rules' reading, kept where the declaration is held to the
+  // rules; an armed declaration fails there, as the structurer did.
+  '@idecl-may-name': (rule: Rule): boolean => rule.k.named !== true,
+  '@sd-may-declarate': (rule: Rule, ctx: Context): boolean => {
+    const idl = rule.u.idl
+    const n = idl && idl.children ? idl.children.length : 0
+    if (n === 0) return true
+    const last = idl.children[n - 1]
+    if (last && last.kind === 'token' && last.tname === 'PUNC_COMMA') return true
+    const ed = edOf(ctx)
+    if (ed && ed.armed) return false
+    // A declarator with no comma before it: 0.5's rules read it into the
+    // declarator before, whose name it then was.
+    rule.u.lenient = true
+    return true
+  },
 
   // Phase P: parenthesised sub-declarator (function pointer).
   // @idecl-paren-open captures the opening `(` onto the outer
@@ -3218,7 +3501,7 @@ return {
   },
 
   '@array_postfix-bc': (rule: Rule): void => {
-    if (rule.child && rule.child.name === 'val' && rule.child.node &&
+    if (rule.child && isExpressionRule(rule.child) && rule.child.node &&
         !rule.u.size) {
       rule.node.children.push(rule.child.node)
       rule.u.size = rule.child.node
@@ -3347,6 +3630,20 @@ return {
     pushTokenWithTrivia(owner.k.specs, rule.o0 as Token)
   },
 
+  // A struct, union or enum specifier read in a parameter's specifier
+  // loop goes onto the parameter's declaration_specifiers, once.
+  '@param_spec_loop-bc': (rule: Rule): void => {
+    const child = rule.child
+    if (!child || !child.node) return
+    if (child.name !== 'struct_specifier' && child.name !== 'enum_specifier') return
+    if (rule.u.takenTagged === child) return
+    const owner = rule.parent as Rule
+    if (owner && owner.k && owner.k.specs) {
+      owner.k.specs.children.push(child.node)
+      rule.u.takenTagged = child
+    }
+  },
+
   '@param-name': (rule: Rule): void => {
     const idTkn = rule.c0 as Token
     rule.node.declaredName = idTkn.src
@@ -3388,6 +3685,8 @@ return {
   // declarator, so a following type-qualifier keyword is a pointer
   // qualifier rather than a (misplaced) declaration specifier.
   '@param-has-pointer': (rule: Rule): boolean => !!rule.k.lastPointer,
+  '@param-has-pointer-ext': (rule: Rule): boolean =>
+    opts.extended === true && !!rule.k.lastPointer,
 
   // Append a type-qualifier token to the parameter's most recently
   // pushed pointer node — the parameter-list analogue of
@@ -3469,6 +3768,8 @@ return {
   // True once a `*` has been absorbed inside the parenthesised inner
   // declarator, so a following qualifier keyword qualifies it.
   '@ppi-has-pointer': (rule: Rule): boolean => !!rule.k.lastPointer,
+  '@ppi-has-pointer-ext': (rule: Rule): boolean =>
+    opts.extended === true && !!rule.k.lastPointer,
 
   // Type qualifier following a `*` inside the parenthesised inner
   // declarator, e.g. the `const` in `int (* const fp)(int)`.
@@ -3535,6 +3836,14 @@ return {
   // The initializer rule wraps both brace-init and val-expr forms in
   // an `initializer` node so we just push it directly.
   '@init_declarator-bc': (rule: Rule): void => {
+    const child = rule.child
+    if (child && child.node && child !== rule.u.lastSuffix &&
+        (child.name === 'attribute_spec_gcc' ||
+         child.name === 'attribute_spec_msvc' || child.name === 'asm_label')) {
+      rule.node.children.push(child.node)
+      rule.u.lastSuffix = child
+      return
+    }
     if (rule.u.hasInit && rule.child && rule.child.node) {
       let initNode = rule.child.node
       // Pre-Q2.1 fallthrough: if a non-initializer child still surfaces
@@ -3568,8 +3877,19 @@ return {
   // `typedef int A, B, C;`).
   '@simple_declaration-bc': (rule: Rule): void => {
     if (rule.child && rule.child.name === 'init_declarator' &&
-        rule.child.node && rule.child.node.kind === 'init_declarator') {
+        rule.child.node && rule.child.node.kind === 'init_declarator' &&
+        rule.child !== rule.u.lastDeclarator) {
+      rule.u.lastDeclarator = rule.child
       rule.u.idl.children.push(rule.child.node)
+      // A declarator with no comma before it was, in 0.5's rules, a
+      // second name of the declarator before: the name that declarator
+      // declares, for its typedef names, is this one.
+      if (rule.u.lenient && rule.child.node.declaredName &&
+          rule.u.declaredNames && rule.u.declaredNames.length) {
+        rule.u.declaredNames.pop()
+        if (0 === rule.u.declaredNames.length) rule.u.declaredName = undefined
+      }
+      rule.u.lenient = false
       if (rule.child.node.declaredName) {
         if (!rule.u.declaredNames) rule.u.declaredNames = []
         rule.u.declaredNames.push(rule.child.node.declaredName)
@@ -3714,7 +4034,11 @@ return {
       return
     }
     if (rule.child && rule.child.node) {
-      rule.node = rule.child.node
+      // A `#` line in a body is its directive's node, as at the top
+      // level an external declaration holds it.
+      const n = rule.child.node
+      rule.node = rule.child.name === 'preprocessor_directive' &&
+        n.children && n.children[0] ? n.children[0] : n
     }
   },
 
@@ -3738,10 +4062,10 @@ return {
   // @expression_statement-bc once val has returned.
   '@es-take-expr': (_rule: Rule): void => { /* see -bc */ },
   '@expression_statement-bc': (rule: Rule): void => {
-    if (rule.child && rule.child.name === 'val' && rule.child.node &&
-        rule.child.node !== rule.node && !rule.k.exprAttached) {
+    if (rule.child && isExpressionRule(rule.child) && rule.child.node &&
+        rule.child.node !== rule.node && !rule.u.exprAttached) {
       rule.node.children.push(rule.child.node)
-      rule.k.exprAttached = true
+      rule.u.exprAttached = true
     }
   },
   '@es-finalize': (rule: Rule): void => {
@@ -3774,7 +4098,7 @@ return {
     rule.k.tookExpr = true
   },
   '@jump_statement-bc': (rule: Rule): void => {
-    if (rule.child && rule.child.name === 'val' && rule.child.node &&
+    if (rule.child && isExpressionRule(rule.child) && rule.child.node &&
         rule.child.node !== rule.node && rule.k.tookExpr &&
         !rule.k.exprAttached) {
       rule.node.children.push(rule.child.node)
@@ -3796,10 +4120,10 @@ return {
   // -bc does the actual stitch.
   '@pc-take-expr': (_rule: Rule): void => { /* see -bc */ },
   '@paren_condition-bc': (rule: Rule): void => {
-    if (rule.child && rule.child.name === 'val' && rule.child.node &&
-        rule.child.node !== rule.node && !rule.k.exprAttached) {
+    if (rule.child && isExpressionRule(rule.child) && rule.child.node &&
+        rule.child.node !== rule.node && !rule.u.exprAttached) {
       rule.node.children.push(rule.child.node)
-      rule.k.exprAttached = true
+      rule.u.exprAttached = true
     }
   },
   '@pc-close': (rule: Rule): void => {
@@ -3835,8 +4159,6 @@ return {
     pushTokenWithTrivia(rule.node, rule.c0 as Token)
     rule.k.elseSeen = true
   },
-  '@if-needs-else-body': (rule: Rule): boolean =>
-    rule.k.elseSeen === true && !rule.k.tookElse,
   '@if_statement-bc': (rule: Rule): void => {
     if (!rule.child || !rule.child.node) return
     if (rule.child.name === 'paren_condition' && !rule.k.tookCond) {
@@ -3904,10 +4226,10 @@ return {
     pushTokenWithTrivia(rule.node, rule.c0 as Token)
     rule.k.tookWhile = true
   },
-  '@do-needs-cond': (rule: Rule): boolean =>
-    rule.k.tookWhile === true && !rule.k.tookCond,
   '@do-needs-semi': (rule: Rule): boolean =>
     rule.k.tookCond === true && !rule.k.tookSemi,
+  '@do-no-while': (rule: Rule): boolean =>
+    rule.k.tookBody === true && !rule.k.tookWhile,
   '@do-take-semi': (rule: Rule): void => {
     pushTokenWithTrivia(rule.node, rule.c0 as Token)
     rule.k.tookSemi = true
@@ -4006,19 +4328,16 @@ return {
     if (!rule.child || !rule.child.node) return
     if (rule.child.name === 'for_init' && !rule.k.tookInit) {
       rule.node.children.push(rule.child.node)
-      rule.node.init = rule.child.node
       rule.k.tookInit = true
       return
     }
     if (rule.child.name === 'for_cond' && !rule.k.tookCond) {
       rule.node.children.push(rule.child.node)
-      rule.node.cond = rule.child.node
       rule.k.tookCond = true
       return
     }
     if (rule.child.name === 'for_iter' && !rule.k.tookIter) {
       rule.node.children.push(rule.child.node)
-      rule.node.iter = rule.child.node
       rule.k.tookIter = true
     }
   },
@@ -4046,13 +4365,11 @@ return {
         rule.child.name === 'simple_declaration' &&
         !rule.node.value) {
       rule.node.children.push(rule.child.node)
-      rule.node.value = rule.child.node
     } else if (rule.k.took === 'expr' &&
-               rule.child.name === 'val' &&
+               isExpressionRule(rule.child) &&
                rule.child.node !== rule.node &&
                !rule.node.value) {
       rule.node.children.push(rule.child.node)
-      rule.node.value = rule.child.node
     }
   },
 
@@ -4075,11 +4392,10 @@ return {
   '@for_cond-bc': (rule: Rule): void => {
     if (!rule.child || !rule.child.node) return
     if (rule.k.took === 'expr' &&
-        rule.child.name === 'val' &&
+        isExpressionRule(rule.child) &&
         rule.child.node !== rule.node &&
         !rule.node.value) {
       rule.node.children.push(rule.child.node)
-      rule.node.value = rule.child.node
     }
   },
 
@@ -4093,58 +4409,58 @@ return {
   '@for_iter-bc': (rule: Rule): void => {
     if (!rule.child || !rule.child.node) return
     if (rule.k.took === 'expr' &&
-        rule.child.name === 'val' &&
+        isExpressionRule(rule.child) &&
         rule.child.node !== rule.node &&
         !rule.node.value) {
       rule.node.children.push(rule.child.node)
-      rule.node.value = rule.child.node
     }
   },
 
   // ---- labeled_statement (phase B4.2.3) ----------------------------
   '@labeled_statement-bo': (rule: Rule): void => {
-    if (rule.node && rule.node.kind === 'labeled_statement') return
+    // A label's statement may be another label: each has its own node,
+    // and its state is its own (u, which a child does not inherit).
     rule.node = makeNode('labeled_statement')
   },
   '@lbl-take-case': (rule: Rule): void => {
     rule.node.labelKind = 'case'
     pushTokenWithTrivia(rule.node, rule.o0 as Token)
-    rule.k.kind = 'case'
+    rule.u.kind = 'case'
   },
   '@lbl-take-default': (rule: Rule): void => {
     rule.node.labelKind = 'default'
     pushTokenWithTrivia(rule.node, rule.o0 as Token)
-    rule.k.kind = 'default'
+    rule.u.kind = 'default'
   },
   '@lbl-take-name': (rule: Rule): void => {
     rule.node.labelKind = 'label'
     rule.node.labelName = (rule.o0 as Token).src
     pushTokenWithTrivia(rule.node, rule.o0 as Token)
-    rule.k.kind = 'label'
+    rule.u.kind = 'label'
   },
   '@lbl-needs-expr': (rule: Rule): boolean =>
-    rule.k.kind === 'case' && !rule.k.tookExpr,
-  '@lbl-mark-expr': (rule: Rule): void => { rule.k.tookExpr = true },
-  '@lbl-needs-colon': (rule: Rule): boolean => !rule.k.tookColon,
+    rule.u.kind === 'case' && !rule.u.tookExpr,
+  '@lbl-mark-expr': (rule: Rule): void => { rule.u.tookExpr = true },
+  '@lbl-needs-colon': (rule: Rule): boolean => !rule.u.tookColon,
+  '@lbl-may-end': (rule: Rule): boolean =>
+    rule.u.kind !== 'case' || rule.u.tookColon === true,
   '@lbl-take-colon': (rule: Rule): void => {
     pushTokenWithTrivia(rule.node, rule.c0 as Token)
-    rule.k.tookColon = true
+    rule.u.tookColon = true
   },
-  '@lbl-needs-body': (rule: Rule): boolean =>
-    rule.k.tookColon === true && !rule.k.tookBody,
   '@labeled_statement-bc': (rule: Rule): void => {
     if (!rule.child || !rule.child.node) return
-    if (rule.k.kind === 'case' &&
-        rule.child.name === 'val' &&
+    if (rule.u.kind === 'case' &&
+        isExpressionRule(rule.child) &&
         rule.child.node !== rule.node &&
-        !rule.k.exprAttached) {
+        !rule.u.exprAttached) {
       rule.node.children.push(rule.child.node)
-      rule.k.exprAttached = true
+      rule.u.exprAttached = true
       return
     }
-    if (rule.child.name === 'statement' && !rule.k.tookBody) {
+    if (rule.child.name === 'statement' && !rule.u.tookBody) {
       rule.node.children.push(rule.child.node)
-      rule.k.tookBody = true
+      rule.u.tookBody = true
     }
   },
 
@@ -4224,7 +4540,6 @@ return {
     if (!rule.child || !rule.child.node) return
     if (rule.child.name === 'asm_template' && !rule.k.templateTaken) {
       rule.node.children.push(rule.child.node)
-      rule.node.template = rule.child.node
       rule.k.templateTaken = true
       return
     }
@@ -4238,7 +4553,6 @@ return {
         rule.child.node.kind = kind
       }
       rule.node.children.push(rule.child.node)
-      if (kind) (rule.node as any)[kind] = rule.child.node
       rule.k.sectionIdx = idx + 1
       rule.k.lastWasColon = false
       if (!rule.k.takenSecs) rule.k.takenSecs = new Set()
@@ -4251,11 +4565,10 @@ return {
     rule.node = makeNode('asm_template')
   },
   '@asm_template-bc': (rule: Rule): void => {
-    if (rule.child && rule.child.name === 'val' && rule.child.node &&
-        rule.child.node !== rule.node && !rule.k.exprAttached) {
+    if (rule.child && isExpressionRule(rule.child) && rule.child.node &&
+        rule.child.node !== rule.node && !rule.u.exprAttached) {
       rule.node.children.push(rule.child.node)
-      rule.node.expression = rule.child.node
-      rule.k.exprAttached = true
+      rule.u.exprAttached = true
     }
   },
 
@@ -4279,30 +4592,12 @@ return {
   // of that kind. On empty section / past-last-item, t0 is `:` or
   // `)` and all needs-* return false; the open's s:[] fallback
   // exits the rule cleanly.
-  '@asec-needs-operand': (rule: Rule, ctx: Context): boolean => {
-    const parent = (rule as any).parent
-    const idx = parent && parent.k && parent.k.sectionIdx
-    if (idx !== 0 && idx !== 1) return false
-    const t0 = ctx.t[0]
-    if (!t0) return false
-    return t0.name === 'PUNC_LBRACKET' ||
-           t0.name === 'LIT_STRING' ||
-           t0.name === 'ID'
+  '@asec-operands': (rule: Rule): boolean => {
+    const idx = asmSectionIndex(rule)
+    return idx === 0 || idx === 1
   },
-  '@asec-needs-clobber': (rule: Rule, ctx: Context): boolean => {
-    const parent = (rule as any).parent
-    const idx = parent && parent.k && parent.k.sectionIdx
-    if (idx !== 2) return false
-    const t0 = ctx.t[0]
-    return !!(t0 && t0.name === 'LIT_STRING')
-  },
-  '@asec-needs-label': (rule: Rule, ctx: Context): boolean => {
-    const parent = (rule as any).parent
-    const idx = parent && parent.k && parent.k.sectionIdx
-    if (idx !== 3) return false
-    const t0 = ctx.t[0]
-    return !!(t0 && t0.name === 'ID')
-  },
+  '@asec-clobbers': (rule: Rule): boolean => asmSectionIndex(rule) === 2,
+  '@asec-labels': (rule: Rule): boolean => asmSectionIndex(rule) === 3,
   '@asec-take-comma': (rule: Rule): void => {
     pushTokenWithTrivia(rule.node, rule.c0 as Token)
   },
@@ -4319,32 +4614,95 @@ return {
   },
 
   // ---- asm_operand (opaque) ----------------------------------------
-  '@asm_operand-bo': (rule: Rule): void => {
-    const prev = (rule as any).prev
-    const isRecursion = prev && prev.name === rule.name
-    if (isRecursion && rule.k.aopNode) {
-      rule.node = rule.k.aopNode
-      return
-    }
+  '@asm_operand-bo': (rule: Rule, ctx: Context): void => {
     rule.node = makeNode('asm_operand')
-    rule.k.aopNode = rule.node
-    rule.k.aopDepth = 0
+    // The operand catches a failure below it (ts/src/fallback.ts).
+    rule.u.scope = openLocal(ctx)
   },
-  '@aop-reentered': (rule: Rule): boolean => !!rule.k.aopNode && !!rule.k.aopTaken,
-  '@aop-take': (rule: Rule): void => {
-    const tkn = (rule.state === 'c' ? rule.c0 : rule.o0) as Token
+  '@aop-failed': (rule: Rule): boolean =>
+    !!(rule.u.scope && rule.u.scope.failed),
+  // The structured parts could not read the operand: its tokens so far,
+  // flat, and asm_operand_rest takes the rest.
+  '@aop-flatten': (rule: Rule, ctx: Context): void => {
+    const toks = tokensSince(ctx, rule.u.scope.vAbs)
+    rule.node.children = []
+    for (const t of toks) pushTokenWithTrivia(rule.node, t)
+    rule.k.aorDepth = bracketDepth(toks)
+    closeLocal(ctx, rule.u.scope)
+  },
+  '@aop-needs-constraint': (rule: Rule): boolean =>
+    !rule.u.constraint && !rule.u.value,
+  '@aop-needs-value': (rule: Rule): boolean => !rule.u.value,
+  '@aop-end': (rule: Rule, ctx: Context): void => {
+    closeLocal(ctx, rule.u.scope)
+  },
+  // Tokens after the parts: the rest of the operand, flat.
+  '@aop-trailing': (rule: Rule, ctx: Context): void => {
+    rule.k.aorDepth = bracketDepth(tokensSince(ctx, rule.u.scope.vAbs))
+    closeLocal(ctx, rule.u.scope)
+  },
+  '@asm_operand-bc': (rule: Rule): void => {
+    const child = rule.child
+    if (!child || !child.node || child === rule.u.lastChild) return
+    const part: Record<string, string> = {
+      asm_name: 'name', asm_constraint: 'constraint', asm_value: 'value',
+    }
+    const key = part[child.name]
+    if (!key) return
+    rule.node.children.push(child.node)
+    rule.u[key] = true
+    rule.u.lastChild = child
+  },
+
+  // asm_operand_rest ----
+  '@aor-stop': (rule: Rule): boolean => (rule.k.aorDepth || 0) === 0,
+  '@aor-end': (rule: Rule): void => { rule.u.ended = true },
+  '@aor-ended': (rule: Rule): boolean => rule.u.ended === true,
+  '@aor-take': (rule: Rule): void => {
+    const tkn = rule.o0 as Token
     pushTokenWithTrivia(rule.node, tkn)
-    rule.k.aopTaken = true
     const n = tkn.name
     if (n === 'PUNC_LPAREN' || n === 'PUNC_LBRACKET') {
-      rule.k.aopDepth = (rule.k.aopDepth || 0) + 1
+      rule.k.aorDepth = (rule.k.aorDepth || 0) + 1
     } else if (n === 'PUNC_RPAREN' || n === 'PUNC_RBRACKET') {
-      rule.k.aopDepth = (rule.k.aopDepth || 0) - 1
+      rule.k.aorDepth = (rule.k.aorDepth || 0) - 1
     }
   },
-  '@aop-stop': (rule: Rule): boolean => (rule.k.aopDepth || 0) === 0,
 
-  // ---- asm_clobber -------------------------------------------------
+  // asm_name, asm_constraint, asm_value ----
+  '@asm_name-bo': (rule: Rule): void => {
+    rule.node = makeNode('asm_name')
+  },
+  '@aname-take': (rule: Rule): void => {
+    pushTokenWithTrivia(rule.node, rule.o0 as Token)
+    pushTokenWithTrivia(rule.node, rule.o1 as Token)
+    pushTokenWithTrivia(rule.node, (rule as any).o[2] as Token)
+  },
+  '@asm_constraint-bo': (rule: Rule): void => {
+    rule.node = makeNode('asm_constraint')
+  },
+  '@acon-take': (rule: Rule): void => {
+    const tkn = rule.o0 as Token
+    pushTokenWithTrivia(rule.node, tkn)
+    rule.node.value = tkn.src
+  },
+  '@asm_value-bo': (rule: Rule): void => {
+    rule.node = makeNode('asm_value')
+  },
+  '@aval-open': (rule: Rule): void => {
+    pushTokenWithTrivia(rule.node, rule.o0 as Token)
+  },
+  '@asm_value-bc': (rule: Rule): void => {
+    if (rule.child && isExpressionRule(rule.child) && rule.child.node &&
+        rule.child.node !== rule.node && !rule.u.exprAttached) {
+      rule.node.children.push(rule.child.node)
+      rule.u.exprAttached = true
+    }
+  },
+  '@aval-close': (rule: Rule): void => {
+    pushTokenWithTrivia(rule.node, rule.c0 as Token)
+  },
+
   '@asm_clobber-bo': (rule: Rule): void => {
     rule.node = makeNode('asm_clobber')
   },
@@ -4362,23 +4720,6 @@ return {
     const tkn = rule.o0 as Token
     pushTokenWithTrivia(rule.node, tkn)
     rule.node.labelName = tkn.src
-  },
-
-  // ---- preprocessor_line (phase B4.2.4, opaque to PP_NEWLINE) ------
-  '@preprocessor_line-bo': (rule: Rule): void => {
-    if (rule.node && rule.node.kind === 'preprocessor_line') return
-    rule.node = makeNode('preprocessor_line')
-  },
-  '@pp-take-hash': (rule: Rule): void => {
-    pushTokenWithTrivia(rule.node, rule.o0 as Token)
-    rule.k.started = true
-  },
-  '@pp-reentry': (rule: Rule): boolean => rule.k.started === true,
-  '@pp-absorb': (rule: Rule): void => {
-    pushTokenWithTrivia(rule.node, rule.c0 as Token)
-  },
-  '@pp-take-newline': (rule: Rule): void => {
-    pushTokenWithTrivia(rule.node, rule.c0 as Token)
   },
 
   // ---- type_name (phase C.2) ---------------------------------------
@@ -4439,81 +4780,7 @@ return {
     if (rule.child && rule.child.name === 'type_name' &&
         rule.child.node && !rule.k.typeNameAttached) {
       rule.node.children.push(rule.child.node)
-      rule.node.operand = rule.child.node
       rule.k.typeNameAttached = true
-    }
-  },
-
-  // ---- cast_or_compound_literal (phase C.3) ------------------------
-  //
-  // Build the final cast_expression / compound_literal node in
-  // @cocl-finalize from the captured pieces (typeName, surrounding
-  // tokens, operand or initializer body) — we only know which kind
-  // we are after we've seen what follows the closing `)`.
-  '@cast_or_compound_literal-bo': (rule: Rule): void => {
-    rule.k.children = []
-  },
-  '@cocl-take-lparen': (rule: Rule): void => {
-    rule.k.lparenTkn = rule.o0 as Token
-  },
-  '@cocl-reentered': (rule: Rule): boolean => !!rule.k.lparenTkn,
-  '@cocl-needs-rparen': (rule: Rule): boolean => !rule.k.tookRparen,
-  '@cocl-take-rparen': (rule: Rule): void => {
-    rule.k.rparenTkn = rule.c0 as Token
-    rule.k.tookRparen = true
-  },
-  '@cocl-needs-decision': (rule: Rule): boolean =>
-    rule.k.tookRparen === true && !rule.k.decided,
-  '@cocl-mark-cl': (rule: Rule): void => {
-    rule.k.decided = 'compound_literal'
-  },
-  '@cocl-mark-cast': (rule: Rule): void => {
-    rule.k.decided = 'cast'
-  },
-  '@cast_or_compound_literal-bc': (rule: Rule): void => {
-    if (!rule.child || !rule.child.node) return
-    if (rule.child.name === 'type_name' && !rule.k.typeName) {
-      rule.k.typeName = rule.child.node
-      return
-    }
-    if ((rule.child.name === 'initializer_list' ||
-         rule.child.name === 'compound_literal_body') &&
-        !rule.k.compoundBody) {
-      rule.k.compoundBody = rule.child.node
-      return
-    }
-    if (rule.child.name === 'val' && !rule.k.castOperand) {
-      rule.k.castOperand = rule.child.node
-    }
-  },
-  '@cocl-finalize': (rule: Rule): void => {
-    const decided = rule.k.decided || 'cast'
-    const tn = rule.k.typeName
-    let node: CNode
-    if (decided === 'compound_literal') {
-      node = makeNode('compound_literal')
-      if (rule.k.lparenTkn) pushTokenWithTrivia(node, rule.k.lparenTkn)
-      if (tn) { node.children.push(tn); node.typeName = tn }
-      if (rule.k.rparenTkn) pushTokenWithTrivia(node, rule.k.rparenTkn)
-      if (rule.k.compoundBody) node.children.push(rule.k.compoundBody)
-    } else {
-      node = makeNode('cast_expression')
-      if (rule.k.lparenTkn) pushTokenWithTrivia(node, rule.k.lparenTkn)
-      if (tn) { node.children.push(tn); node.typeName = tn }
-      if (rule.k.rparenTkn) pushTokenWithTrivia(node, rule.k.rparenTkn)
-      if (rule.k.castOperand) {
-        node.children.push(rule.k.castOperand)
-        node.operand = rule.k.castOperand
-      }
-    }
-    rule.node = node
-    // r:-recursion creates a fresh rule per pass, but the parent's
-    // `.child` reference still points at the FIRST cocl instance.
-    // Propagate the finalised node onto that first instance so the
-    // parent (val) can pick it up via rule.child.node.
-    const parent = (rule as any).parent
-    if (parent && parent.child && parent.child.name === rule.name) {
-      parent.child.node = node
     }
   },
 
@@ -4605,7 +4872,6 @@ return {
     if (!rule.child || !rule.child.node) return
     if (rule.child.name === 'designation' && !rule.k.desigAttached) {
       rule.node.children.push(rule.child.node)
-      rule.node.designation = rule.child.node
       rule.k.desigAttached = true
       return
     }
@@ -4614,14 +4880,12 @@ return {
       const init = makeNode('initializer')
       init.children.push(rule.child.node)
       rule.node.children.push(init)
-      rule.node.value = init
       rule.k.gotValue = true
       return
     }
-    if (rule.child.name === 'val' && !rule.k.gotValue &&
+    if (isExpressionRule(rule.child) && !rule.k.gotValue &&
         rule.child.node !== rule.node) {
       rule.node.children.push(rule.child.node)
-      rule.node.value = rule.child.node
       rule.k.gotValue = true
     }
   },
@@ -4672,13 +4936,17 @@ return {
   },
   '@dr-needs-rbracket': (rule: Rule): boolean =>
     rule.k.kind === 'index' && !rule.k.tookRbracket,
+  '@dr-complete': (rule: Rule): boolean =>
+    rule.k.kind === 'member' ? rule.k.tookId === true
+      : rule.k.kind === 'index' ? rule.k.tookRbracket === true
+        : true,
   '@dr-take-rbracket': (rule: Rule): void => {
     pushTokenWithTrivia(rule.node, rule.c0 as Token)
     rule.k.tookRbracket = true
   },
   '@designator-bc': (rule: Rule): void => {
     if (rule.k.kind === 'index' &&
-        rule.child && rule.child.name === 'val' &&
+        rule.child && isExpressionRule(rule.child) &&
         rule.child.node && rule.child.node !== rule.node &&
         !rule.k.idxExprAttached) {
       rule.node.children.push(rule.child.node)
@@ -4734,7 +5002,6 @@ return {
       return
     }
     const node = makeNode('generic_selection')
-    node.associations = []
     rule.k.gsNode = node
     rule.node = node
   },
@@ -4773,14 +5040,12 @@ return {
     if (rule.child.name === 'generic_controlling_expression' &&
         !rule.k.ctrlTaken) {
       rule.node.children.push(rule.child.node)
-      rule.node.controlling = rule.child.node
       rule.k.ctrlTaken = true
       return
     }
     if (rule.child.name === 'generic_association' &&
         !rule.k.takenAssocs?.has(rule.child)) {
       rule.node.children.push(rule.child.node)
-      rule.node.associations.push(rule.child.node)
       if (!rule.k.takenAssocs) rule.k.takenAssocs = new Set()
       rule.k.takenAssocs.add(rule.child)
       rule.k.lastWasAssoc = true
@@ -4792,11 +5057,10 @@ return {
     rule.node = makeNode('generic_controlling_expression')
   },
   '@generic_controlling_expression-bc': (rule: Rule): void => {
-    if (rule.child && rule.child.name === 'val' && rule.child.node &&
-        rule.child.node !== rule.node && !rule.k.exprAttached) {
+    if (rule.child && isExpressionRule(rule.child) && rule.child.node &&
+        rule.child.node !== rule.node && !rule.u.exprAttached) {
       rule.node.children.push(rule.child.node)
-      rule.node.expression = rule.child.node
-      rule.k.exprAttached = true
+      rule.u.exprAttached = true
     }
   },
 
@@ -4838,14 +5102,12 @@ return {
     if (!rule.child || !rule.child.node) return
     if (rule.child.name === 'type_name_assoc' && !rule.k.gaTypeAttached) {
       rule.node.children.push(rule.child.node)
-      rule.node.typeName = rule.child.node
       rule.k.gaTypeAttached = true
       return
     }
-    if (rule.child.name === 'val' && rule.child.node !== rule.node &&
+    if (isExpressionRule(rule.child) && rule.child.node !== rule.node &&
         !rule.k.gaValueTaken) {
       rule.node.children.push(rule.child.node)
-      rule.node.value = rule.child.node
       rule.k.gaValueTaken = true
     }
   },
@@ -5034,6 +5296,13 @@ return {
   },
   '@sd-need-decl-first': (rule: Rule): boolean =>
     !rule.k.sdAnyDecl,
+  // A member's second name with no comma between, in a declaration held
+  // to the rules, as 0.5's rules read it.
+  '@sd-lenient-member': (rule: Rule, ctx: Context): boolean => {
+    if (!rule.k.sdAnyDecl) return false
+    const ed = edOf(ctx)
+    return !(ed && ed.armed)
+  },
   '@sd-take-comma': (rule: Rule): void => {
     pushTokenWithTrivia(rule.u.sdl, rule.c0 as Token)
   },
@@ -5124,7 +5393,7 @@ return {
     pushTokenWithTrivia(rule.node, rule.o0 as Token)
   },
   '@bitfield_width-bc': (rule: Rule): void => {
-    if (rule.child && rule.child.name === 'val' && rule.child.node &&
+    if (rule.child && isExpressionRule(rule.child) && rule.child.node &&
         rule.child.node !== rule.node && !rule.k.bfExprAttached) {
       rule.node.children.push(rule.child.node)
       rule.k.bfExprAttached = true
@@ -5268,7 +5537,7 @@ return {
     rule.k.enrEqTaken = true
   },
   '@enumerator-bc': (rule: Rule): void => {
-    if (rule.child && rule.child.name === 'val' && rule.child.node &&
+    if (rule.child && isExpressionRule(rule.child) && rule.child.node &&
         rule.child.node !== rule.node && !rule.k.enrValueAttached) {
       // Wrap the const-expr in an `initializer` node to match the
       // legacy CST.
@@ -5309,7 +5578,6 @@ return {
     }
     const node = makeNode('attribute_spec')
     node.attributeForm = 'gcc'
-    node.items = []
     rule.k.asgNode = node
     rule.node = node
   },
@@ -5356,7 +5624,6 @@ return {
     if (rule.child && rule.child.name === 'attribute_item' &&
         rule.child.node && !rule.k.takenItems?.has(rule.child)) {
       rule.node.children.push(rule.child.node)
-      rule.node.items.push(rule.child.node)
       rule.k.asgLastWasItem = true
       if (!rule.k.takenItems) rule.k.takenItems = new Set()
       rule.k.takenItems.add(rule.child)
@@ -5373,7 +5640,6 @@ return {
     }
     const node = makeNode('attribute_spec')
     node.attributeForm = 'msvc'
-    node.items = []
     rule.k.asm2Node = node
     rule.node = node
   },
@@ -5408,7 +5674,6 @@ return {
     if (rule.child && rule.child.name === 'attribute_item' &&
         rule.child.node && !rule.k.takenItems?.has(rule.child)) {
       rule.node.children.push(rule.child.node)
-      rule.node.items.push(rule.child.node)
       rule.k.asm2LastWasItem = true
       if (!rule.k.takenItems) rule.k.takenItems = new Set()
       rule.k.takenItems.add(rule.child)
@@ -5437,7 +5702,6 @@ return {
     }
     const node = makeNode('attribute_spec')
     node.attributeForm = 'c23'
-    node.items = []
     rule.k.as23Node = node
     rule.node = node
   },
@@ -5468,7 +5732,6 @@ return {
     if (rule.child && rule.child.name === 'attribute_item' &&
         rule.child.node && !rule.k.takenItems?.has(rule.child)) {
       rule.node.children.push(rule.child.node)
-      rule.node.items.push(rule.child.node)
       rule.k.as23LastWasItem = true
       if (!rule.k.takenItems) rule.k.takenItems = new Set()
       rule.k.takenItems.add(rule.child)
@@ -5524,7 +5787,6 @@ return {
     if (rule.child && rule.child.name === 'attribute_argument_list' &&
         rule.child.node && !rule.k.aiArgsTaken) {
       rule.node.children.push(rule.child.node)
-      rule.node.argumentList = rule.child.node
       rule.k.aiArgsTaken = true
     }
   },
@@ -5552,7 +5814,7 @@ return {
     pushTokenWithTrivia(rule.node, rule.c0 as Token)
   },
   '@attribute_argument_list-bc': (rule: Rule): void => {
-    if (rule.child && rule.child.name === 'val' && rule.child.node &&
+    if (rule.child && isExpressionRule(rule.child) && rule.child.node &&
         rule.child.node !== rule.node && !rule.k.takenArgs?.has(rule.child)) {
       rule.node.children.push(rule.child.node)
       if (!rule.k.takenArgs) rule.k.takenArgs = new Set()
@@ -5644,10 +5906,12 @@ return {
     rule.k.defNameTaken = true
     rule.k.defNameTokenEnd = (tkn as any).sI + (tkn as any).len
     // Register the macro as soon as the name lands so subsequent
-    // identifier classifications see it. Match the legacy
-    // registerMacrosFromTree behaviour.
+    // identifier classifications see it. An armed line binds its macro
+    // when it ends, as 0.5 did (finishExternalDeclaration).
     const cmeta = (ctx.meta as any).cmeta as CMeta
-    if (cmeta && cmeta.macros && tkn.src) {
+    const ed = edOf(ctx)
+    if (cmeta && cmeta.macros && tkn.src && rule.k.topLine === true &&
+        !(ed && ed.armed)) {
       cmeta.macros.define({ name: tkn.src, isFunctionLike: false })
       reclassifyAsMacro(ctx, tkn.src)
     }
@@ -5774,7 +6038,9 @@ return {
     rule.node.macroName = tkn.src
     rule.k.undNameTaken = true
     const cmeta = (ctx.meta as any).cmeta as CMeta
-    if (cmeta && cmeta.macros && tkn.src) {
+    const ed = edOf(ctx)
+    if (cmeta && cmeta.macros && tkn.src && rule.k.topLine === true &&
+        !(ed && ed.armed)) {
       cmeta.macros.undefine(tkn.src)
       reclassifyAsId(ctx, tkn.src)
     }
@@ -5994,14 +6260,12 @@ return {
   },
   '@static_assert_declaration-bc': (rule: Rule): void => {
     if (!rule.child || !rule.child.node) return
-    if (rule.child.name === 'val' && rule.child.node !== rule.node) {
+    if (isExpressionRule(rule.child) && rule.child.node !== rule.node) {
       if (!rule.k.saCondTaken) {
         rule.node.children.push(rule.child.node)
-        rule.node.condition = rule.child.node
         rule.k.saCondTaken = true
       } else if (rule.k.saComma && !rule.k.saMsgTaken) {
         rule.node.children.push(rule.child.node)
-        rule.node.message = rule.child.node
         rule.k.saMsgTaken = true
       }
     }
@@ -6027,6 +6291,13 @@ function clearStmtState(rule: Rule): void {
   delete rule.k.tookControls
 }
 
+// Which of an asm statement's sections an asm_section rule reads: 0
+// outputs, 1 inputs, 2 clobbers, 3 labels.
+function asmSectionIndex(rule: Rule): number | undefined {
+  const parent = (rule as any).parent
+  return parent && parent.k ? parent.k.sectionIdx : undefined
+}
+
 // tkn.use.leading. Mirrors the chomp's @absorb-token logic so the
 // new-path CST carries the same source-order trivia siblings.
 function pushTokenWithTrivia(node: CNode, tkn: Token): void {
@@ -6047,9 +6318,20 @@ function attachFunctionPostfix(rule: Rule): void {
 // Locate the simple_declaration rule that owns the per-declaration
 // scaffolding, regardless of whether the action is firing on
 // simple_declaration itself or on its spec_loop child.
+// The first token the alternate being run matched, in either state.
+function matchedToken(rule: Rule): Token {
+  return (rule.state === 'c' ? rule.c0 : rule.o0) as Token
+}
+
+// The rule whose specifier list a specifier rule writes to: the nearest
+// up the rule chain that holds one (`u.specs`: simple_declaration,
+// struct_declaration, enum_utype_specs). spec_loop is its child, and
+// bit_int_paren and paren_run are spec_loop's.
 function specOwner(rule: Rule): Rule {
-  if (rule.name === 'simple_declaration' ||
-      rule.name === 'struct_declaration') return rule
+  let r: any = rule
+  for (let i = 0; r && i < 8; i++, r = r.parent) {
+    if (r.u && r.u.specs) return r
+  }
   return rule.parent as Rule
 }
 
@@ -6368,55 +6650,140 @@ function registerTypedefIfApplicable(tokens: Token[], ctx: Context): void {
   }
 }
 
-// Run after the chomper terminates an external declaration: register
-// typedef-names and try to upgrade the flat token-ref list to a
-// structured tree (declaration / function_definition / preprocessor).
-function finalizeExternalDeclaration(rule: Rule, ctx: Context): void {
-  const tokens = rule.k.tokens as Token[]
-  registerTypedefIfApplicable(tokens, ctx)
-  const structured = structureExternalDeclaration(tokens)
-  if (structured) {
-    rule.node.children = structured.children
-    rule.node.declKind = structured.declKind
-    ;(rule.node as any).viaPath = 'legacy'
-    registerMacrosFromTree(rule.node, ctx)
+// The directive names that open a conditional group, start its later
+// branches, and end it.
+const OPENERS = new Set(['if', 'ifdef', 'ifndef'])
+const BRANCHES = new Set(['elif', 'elifdef', 'elifndef', 'else'])
+const ENDIF = new Set(['endif'])
+const BRANCH_ENDS = new Set([...BRANCHES, ...ENDIF])
+
+// The conditional directive an external declaration is, when its name is
+// one of `names`.
+function conditionalOf(node: any, names: Set<string>): any {
+  const dir = (node.children || []).find(
+    (c: any) => c && c.kind === 'conditional_directive')
+  return dir && names.has(dir.directive) ? dir : undefined
+}
+
+// True when the next line is a `#` line whose directive is one of
+// `names` (the alternate has fetched its first two tokens).
+function directiveAhead(ctx: Context, names: Set<string>): boolean {
+  const a = ctx.t[0] as any, b = ctx.t[1] as any
+  return !!(a && b && a.name === 'PP_HASH' && names.has(b.src))
+}
+
+// A branch's first child is its directive's external declaration.
+function takeBranchHead(rule: Rule, head: any): void {
+  rule.node.children.push(head)
+  const dir = (head.children || []).find(
+    (c: any) => c && c.kind === 'conditional_directive')
+  rule.node.branchKind = dir ? dir.directive : 'unknown'
+  rule.u.headTaken = true
+}
+
+// Splice the declaration a dispatch rule built into the external
+// declaration's node. simple_declaration's children become the external
+// declaration's own; a static_assert or asm statement is its one child.
+function spliceDeclaration(rule: Rule, ctx: Context): void {
+  const child = rule.child
+  if (!child || !child.node || child.node === rule.node) return
+  const childNode = child.node
+  const childName = child.name
+  if (childName === 'static_assert_declaration' ||
+      childName === 'asm_statement') {
+    rule.node.children = [childNode]
+    rule.node.declKind = 'declaration'
   } else {
-    rule.node.declKind = 'unknown'
-    ;(rule.node as any).viaPath = 'legacy-unknown'
+    rule.node.children = [...(childNode.children || [])]
+    rule.node.declKind = childNode.declKind || 'declaration'
+  }
+  const u = child.u || {}
+  const ed = edOf(ctx)
+  if (ed && u.isTypedef && Array.isArray(u.declaredNames)) {
+    ;(ed as any).typedefNames = u.declaredNames
   }
 }
 
-// Walk a freshly-structured node and register any define_directive
-// macros into cmeta.macros (and #undef removes them). The walk only
-// touches the top-level external_declaration's tree — surrounding
-// translation_unit accumulation visits each child in order, so macro
-// state evolves as the parse progresses.
-function registerMacrosFromTree(node: any, ctx: Context): void {
-  const cmeta = (ctx.meta as any).cmeta as CMeta
-  if (!cmeta) return
-  const visit = (n: any) => {
-    if (!n) return
-    if (n.kind === 'define_directive' && n.macroName) {
-      cmeta.macros.define({
-        name: n.macroName,
-        isFunctionLike: n.macroKind === 'function-like',
-        params: n.macroParams,
-        variadic: !!n.macroVariadic,
-      })
-      // Reclassify any already-lexed lookahead tokens with this name
-      // from ID to MACRO_NAME. Subsequent macros are first picked up by
-      // the identifier matcher itself, but tokens fetched into ctx.t /
-      // pnt.token *before* this define ran need a manual fix-up.
-      reclassifyAsMacro(ctx, n.macroName)
-    } else if (n.kind === 'undef_directive' && n.macroName) {
-      cmeta.macros.undefine(n.macroName)
-      // Reclassify any already-lexed lookahead tokens with this name
-      // from MACRO_NAME back to ID, mirroring the define path.
-      reclassifyAsId(ctx, n.macroName)
+// Finish an external declaration: its kind, and the names it binds.
+//
+// A strict declaration binds the typedef names its rules found. An armed
+// one (and an unknown one) is the token run the 0.5 parser handed its
+// structurer, and binds what 0.5 bound for that run, read from its
+// tokens: the typedef names of a run that starts with `typedef` and ends
+// with `;` (registerTypedefIfApplicable), and the macro each `#define`
+// and `#undef` line in it names (registerMacrosFromTokens), unless the
+// run is an unknown declaration that does not start with `#`, which the
+// structurer did not read. The names decide how later tokens lex, so
+// binding them as 0.5 did keeps what the parser accepts.
+function finishExternalDeclaration(node: CNode, ctx: Context): void {
+  const ed = edOf(ctx)
+  if (!ed) return
+  if (ed.unknown) node.declKind = 'unknown'
+  else if (!node.declKind) node.declKind = 'unknown'
+  fixSpans(node)
+  const cmeta = getCMeta(ctx)
+  if (ed.armed) {
+    const tokens = takenTokens(cmeta, ctx)
+    registerTypedefIfApplicable(tokens, ctx)
+    // 0.5 bound the macros of the lines its structurer read as
+    // directives: a `#` line's own, and those of a declaration it built.
+    // An unknown declaration that does not start with `#` binds none.
+    const first = tokens.find((t) => !TRIVIA_TOKEN_NAMES.has(t.name))
+    if (!ed.unknown || (first && first.name === 'PP_HASH')) {
+      registerMacrosFromTokens(tokens, ctx)
     }
-    if (Array.isArray(n.children)) for (const c of n.children) visit(c)
+  } else {
+    const names = (ed as any).typedefNames
+    if (Array.isArray(names)) {
+      for (const name of names) {
+        cmeta.symbols.bindTypedef(name)
+        reclassifyAsTypedef(ctx, name)
+      }
+    }
   }
-  visit(node)
+}
+
+// The macros a run's `#define` and `#undef` lines name, bound and unbound
+// in order, as 0.5's structurer read them: the token after the directive
+// name, when it is an identifier, a macro name or a typedef name; a
+// define is function-like when a `(` follows the name with no space.
+function registerMacrosFromTokens(tokens: Token[], ctx: Context): void {
+  const cmeta = getCMeta(ctx)
+  if (!cmeta || !cmeta.macros) return
+  const ts = tokens.filter((t) => !TRIVIA_TOKEN_NAMES.has(t.name))
+  const isName = (n: string | undefined) =>
+    n === 'ID' || n === 'MACRO_NAME' || n === 'TYPEDEF_NAME'
+  for (let i = 0; i < ts.length; i++) {
+    if (ts[i].name !== 'PP_HASH') continue
+    const dn = ts[i + 1] ? ts[i + 1].src : ''
+    const nameTkn = ts[i + 2]
+    if (dn === 'define' && nameTkn && isName(nameTkn.name)) {
+      const next = ts[i + 3] as any
+      const fnLike = !!(next && next.name === 'PUNC_LPAREN' &&
+        next.sI === (nameTkn as any).sI + (nameTkn as any).len)
+      const params: string[] = []
+      let variadic = false
+      if (fnLike) {
+        for (let j = i + 4; j < ts.length; j++) {
+          const t = ts[j]
+          if (t.name === 'PUNC_RPAREN' || t.name === 'PP_NEWLINE') break
+          if (t.name === 'PUNC_ELLIPSIS') variadic = true
+          else if (t.name === 'ID' || t.name === 'MACRO_NAME' ||
+                   t.name === 'TYPEDEF_NAME') params.push(t.src)
+        }
+      }
+      cmeta.macros.define({
+        name: nameTkn.src,
+        isFunctionLike: fnLike,
+        params: fnLike ? params : undefined,
+        variadic,
+      } as any)
+      reclassifyAsMacro(ctx, nameTkn.src)
+    } else if (dn === 'undef' && nameTkn && isName(nameTkn.name)) {
+      cmeta.macros.undefine(nameTkn.src)
+      reclassifyAsId(ctx, nameTkn.src)
+    }
+  }
 }
 
 // Inverse of reclassifyAsMacro — flips already-lexed lookahead tokens
@@ -6455,44 +6822,6 @@ function reclassifyAsMacro(ctx: Context, name: string): void {
   if (lex.pnt && Array.isArray(lex.pnt.token)) for (const tkn of lex.pnt.token) fix(tkn)
 }
 
-// True iff the first non-trivia entry in `tokens` has the given name.
-function firstNonTriviaIs(tokens: Token[], name: string): boolean {
-  for (const t of tokens) {
-    if (TRIVIA_TOKEN_NAMES.has(t.name)) continue
-    return t.name === name
-  }
-  return false
-}
-
-// True when ctx.t0 (the next token to be consumed) is one of the tokens
-// that unambiguously begin a new external declaration. Used by the
-// chomper to decide that a top-level `}` was the end of a function body.
-function startsNewExternalDeclaration(ctx: Context): boolean {
-  // Skip trivia in the lookahead.
-  let i = 0
-  while (i < ctx.t.length) {
-    const tkn = ctx.t[i]
-    if (!tkn) break
-    if (TRIVIA_TOKEN_NAMES.has(tkn.name)) { i++; continue }
-    const n = tkn.name
-    if (n === '#ZZ') return true
-    if (n === 'PP_HASH') return true
-    if (n === 'PUNC_HASH') return true
-    if (STORAGE_CLASS_NAMES.has(n)) return true
-    if (TYPE_SPEC_KEYWORD_NAMES.has(n)) return true
-    if (TYPE_QUALIFIER_NAMES.has(n)) return true
-    if (FUNCTION_SPECIFIER_NAMES.has(n)) return true
-    if (n === 'KW___ATTRIBUTE__' || n === 'KW___ATTRIBUTE') return true
-    if (n === 'KW___DECLSPEC') return true
-    if (n === 'KW___EXTENSION__') return true
-    if (n === 'TYPEDEF_NAME') return true
-    // ID (could be a macro that expands to a declaration, or the
-    // declared name from `typedef struct { } S;`). Assume continuation.
-    return false
-  }
-  return false
-}
-
 function reclassifyAsTypedef(ctx: Context, name: string): void {
   const lex = (ctx as any).lex
   if (!lex) return
@@ -6516,5 +6845,6 @@ const VERSION = '0.5.16'
 
 export { C, VERSION }
 export { translate } from './translate.js'
+export { member, memberNames } from './members.js'
 export type { TranslationPart, TranslationParts } from './translate.js'
 export default C

@@ -1,12 +1,11 @@
 # Path-dispatch shape catalog.
 #
-# Each row asserts that a given C source's first external_declaration
-# is produced by either the grammar path (`@finalize-new-path`) or
-# the legacy chomp path (`finalizeExternalDeclaration`). Both paths
-# emit identical CST shapes, so consumers don't care which fired —
-# but a silent reroute (e.g. someone widens @looks-simple-decl's
-# lookahead and a shape that used to flow through legacy now hits a
-# latent grammar bug) is exactly the regression these rows catch.
+# Each row names the route a given C source's external_declaration took
+# in 0.5: the grammar path, or the legacy chomp path and its structurer.
+# From 0.6 every declaration is built by rules (docs/rules.md): `grammar`
+# is a strict route, where a declaration the rules cannot parse is
+# refused, and `legacy` an armed one, where it becomes an unknown
+# declaration. The TypeScript and Rust tests hold each row's `declKind`.
 #
 # Columns are tab-separated:
 #   src      C source. Single declaration unless declIdx is set.

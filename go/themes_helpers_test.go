@@ -15,12 +15,16 @@ func asNode(v any) CNode {
 	return n
 }
 
-// field returns node[key] as a CNode (nil if absent/not a node).
+// field returns node[key] as a CNode (nil if absent/not a node), or the
+// node's member key (Member), which the tree holds as one of its children.
 func field(node CNode, key string) CNode {
 	if node == nil {
 		return nil
 	}
-	return asNode(node[key])
+	if v, ok := node[key]; ok {
+		return asNode(v)
+	}
+	return asNode(Member(node, key))
 }
 
 // fieldStr returns node[key] as a string ("" if absent).
@@ -119,13 +123,17 @@ func strSlice(v any) []string {
 }
 
 // nodeSlice returns node[key] as a []CNode (nil-safe), for fields holding
-// arrays of nodes such as attribute_spec.items and generic_selection
-// .associations.
+// arrays of nodes, or the node's list member key (Member), such as
+// attribute_spec.items and generic_selection.associations.
 func nodeSlice(node CNode, key string) []CNode {
 	if node == nil {
 		return nil
 	}
-	arr, _ := node[key].([]any)
+	v, ok := node[key]
+	if !ok {
+		v = Member(node, key)
+	}
+	arr, _ := v.([]any)
 	out := make([]CNode, 0, len(arr))
 	for _, e := range arr {
 		if m, ok := e.(map[string]any); ok {
@@ -133,4 +141,84 @@ func nodeSlice(node CNode, key string) []CNode {
 		}
 	}
 	return out
+}
+
+// parseTU parses src in extended mode (the TypeScript suite's shared
+// instance) and returns the translation unit.
+func parseTU(t *testing.T, src string) CNode {
+	t.Helper()
+	out, err := Parse(src, map[string]any{"extended": true})
+	if err != nil {
+		t.Fatalf("Parse(%q) error: %v", src, err)
+	}
+	tu, ok := out.(CNode)
+	if !ok {
+		t.Fatalf("Parse(%q) returned %T, want CNode", src, out)
+	}
+	if tu["kind"] != "translation_unit" {
+		t.Fatalf("root kind = %v, want translation_unit", tu["kind"])
+	}
+	return tu
+}
+
+func tuChildren(t *testing.T, tu CNode) []any {
+	t.Helper()
+	ch, _ := tu["children"].([]any)
+	return ch
+}
+
+// findKindByValue searches node recursively for the first node whose "kind"
+// field equals kind. (findKind in structure.go searches by key existence.)
+func findKindByValue(node any, kind string) CNode {
+	m, ok := node.(map[string]any)
+	if !ok {
+		return nil
+	}
+	if m["kind"] == kind {
+		return m
+	}
+	if children, ok := m["children"].([]any); ok {
+		for _, c := range children {
+			if hit := findKindByValue(c, kind); hit != nil {
+				return hit
+			}
+		}
+	}
+	return nil
+}
+
+// walkTokenSrcs returns token srcs in source order under node.
+func walkTokenSrcs(node any) []string {
+	var out []string
+	var visit func(n any)
+	visit = func(n any) {
+		m, ok := n.(map[string]any)
+		if !ok {
+			return
+		}
+		if m["kind"] == "token" {
+			if s, ok := m["src"].(string); ok {
+				out = append(out, s)
+			}
+			return
+		}
+		if children, ok := m["children"].([]any); ok {
+			for _, c := range children {
+				visit(c)
+			}
+		}
+	}
+	visit(node)
+	return out
+}
+
+func childKindCount(node CNode, kind string) int {
+	ch, _ := node["children"].([]any)
+	n := 0
+	for _, c := range ch {
+		if nodeKind(c) == kind {
+			n++
+		}
+	}
+	return n
 }

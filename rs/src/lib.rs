@@ -40,10 +40,10 @@ use indexmap::IndexMap;
 
 use tabnas::{GrammarSpec, LexMatcher, Options, Plugin, PluginError, Tabnas, TabnasError, Value};
 
-mod conditional_groups;
 mod cst;
 mod expr_grammar;
-mod legacy_expr;
+mod fallback;
+mod members;
 mod refs;
 mod refs_ext;
 mod refs_forms;
@@ -52,13 +52,13 @@ mod refs_stmt;
 mod rt;
 mod sets;
 mod state;
-mod structure;
 mod tokens;
 mod trivia;
 
 pub mod matchers;
 
 pub use cst::{realize, REALIZE_DEPTH_CAP};
+pub use members::{member, member_names};
 
 /// The symbol and macro tables, re-exported so a caller can seed a
 /// parse with names a header would have introduced. The canonical
@@ -260,17 +260,6 @@ const EXTENSION_RULES: &[&str] = &[
     "asm_operand",
     "asm_clobber",
     "asm_label_ref",
-    // Preprocessor (in-body opaque and top-level structured)
-    "preprocessor_line",
-    "preprocessor_directive",
-    "define_directive",
-    "macro_parameter_list",
-    "macro_body",
-    "undef_directive",
-    "include_directive",
-    "header_form",
-    "conditional_directive",
-    "simple_directive",
     // Compiler-specific attribute spec syntax
     "attribute_spec_gcc",
     "attribute_spec_msvc",
@@ -299,10 +288,27 @@ pub fn c(parser: &mut Tabnas, options: &COptions) -> Result<(), PluginError> {
 
     let tins = register_tokens(parser);
     apply_options(parser, &tins)?;
-    let stubbed = refs::register(parser, options);
-    let _ = stubbed;
-    install_grammar(parser, options)?;
+    // The grammar document, with the armed fallback's alternates given to
+    // the rules below `external_declaration` (`crate::fallback`), first:
+    // which refs the fallback wraps and fences is read from it.
+    let (document, fallback) = grammar_document(options)?;
+    // Every reference the grammar names has its handler
+    // (`every_reference_the_grammar_names_has_a_handler`); a name left
+    // over gets a no-op, which that test refuses.
+    refs::register(parser, options, &fallback);
+    // C's expressions are read by tabnas-expr, from the rule named `val`
+    // that jsonic's grammar has too. Clear jsonic's, alternates and actions
+    // both, so that expr's and C's are the only ones
+    // (`crate::expr_grammar`).
+    parser.define_rule("val", |spec| {
+        spec.clear();
+    });
+    install_grammar(parser, document)?;
     expr_grammar::install(parser)?;
+    // The rules expr reads an expression with, its own and the jsonic ones
+    // it pushes (an implicit list inside a paren), are below every external
+    // declaration too.
+    fallback::with_rule_fallback(parser, expr_grammar::EXPR_RULES);
     Ok(())
 }
 
@@ -333,6 +339,10 @@ fn register_tokens(parser: &mut Tabnas) -> matchers::Tins {
     tins
 }
 
+fn owned(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| (*name).to_string()).collect()
+}
+
 /// The per-instance engine options, mirroring the `jsonic.options(...)`
 /// calls in `ts/src/c.ts`.
 fn apply_options(parser: &mut Tabnas, tins: &matchers::Tins) -> Result<(), PluginError> {
@@ -361,14 +371,22 @@ fn apply_options(parser: &mut Tabnas, tins: &matchers::Tins) -> Result<(), Plugi
             "STORAGE_PREFIX",
             sets::STORAGE_PREFIX.iter().map(|n| n.to_string()).collect(),
         ),
-        (
-            "C_ATOM",
-            sets::C_ATOM.iter().map(|n| n.to_string()).collect(),
-        ),
-        (
-            "C_PAREN_OPEN",
-            sets::C_PAREN_OPEN.iter().map(|n| n.to_string()).collect(),
-        ),
+        ("DECL_HEAD", owned(sets::DECL_HEAD)),
+        ("ASSIGN_OP", owned(sets::ASSIGN_OP)),
+        ("BINARY_OP", owned(sets::BINARY_OP)),
+        ("INCDEC", owned(sets::INCDEC)),
+        ("UNARY_OP", owned(sets::UNARY_OP)),
+        ("MEMBER_NAME", owned(sets::MEMBER_NAME)),
+        ("STORAGE_STD", owned(sets::STORAGE_STD)),
+        ("STORAGE_EXT", owned(sets::STORAGE_EXT)),
+        ("SPEC_KEYWORD", owned(sets::SPEC_KEYWORD)),
+        ("SPEC_KEYWORD_EXT", owned(sets::SPEC_KEYWORD_EXT)),
+        ("PAREN_SPEC", owned(sets::PAREN_SPEC)),
+        ("PAREN_SPEC_EXT", owned(sets::PAREN_SPEC_EXT)),
+        ("PTR_QUALIFIER", owned(sets::PTR_QUALIFIER)),
+        ("PTR_QUALIFIER_EXT", owned(sets::PTR_QUALIFIER_EXT)),
+        ("ASM_KEYWORD", owned(sets::ASM_KEYWORD)),
+        ("JUXTAPOSED", owned(sets::JUXTAPOSED)),
         ("KW_TOKEN", tokens::keyword_token_names()),
         (
             "SIZEOF_KW",
@@ -466,9 +484,12 @@ fn apply_options(parser: &mut Tabnas, tins: &matchers::Tins) -> Result<(), Plugi
 }
 
 /// Parse the embedded grammar text into a serialized document, as the
-/// canonical `parseGrammar` does with a vanilla jsonic instance, and
-/// install it.
-fn install_grammar(parser: &mut Tabnas, options: &COptions) -> Result<(), PluginError> {
+/// canonical `parseGrammar` does with a vanilla jsonic instance, strip
+/// the extension rules in plain mode, and give the rules below
+/// `external_declaration` the armed fallback.
+fn grammar_document(
+    options: &COptions,
+) -> Result<(serde_json::Value, fallback::Fallback), PluginError> {
     let parsed = tabnas_jsonic::parse(GRAMMAR_TEXT)
         .map_err(|error| PluginError(format!("c-grammar.jsonic: {error}")))?;
     let mut document = parsed.to_json();
@@ -488,6 +509,12 @@ fn install_grammar(parser: &mut Tabnas, options: &COptions) -> Result<(), Plugin
             }
         }
     }
+    let fallback = fallback::with_fallback(&mut document);
+    Ok((document, fallback))
+}
+
+/// Install the grammar document.
+fn install_grammar(parser: &mut Tabnas, document: serde_json::Value) -> Result<(), PluginError> {
     let spec = GrammarSpec::from_value(document).map_err(|error| PluginError(error.0))?;
     parser
         .grammar(&spec)
@@ -544,6 +571,26 @@ fn make_on(mut parser: Tabnas, options: &COptions) -> Tabnas {
         .set_options(|options| options.lex.window = false)
         .expect("lex.window sets");
     parser
+}
+
+#[cfg(test)]
+mod reference_tests {
+    /// The grammar document names no condition or action this port does
+    /// not implement: `refs::register` stubs a name it has no handler for
+    /// with a no-op, and a no-op where TypeScript and Go run a handler is
+    /// a parse that differs from theirs.
+    #[test]
+    fn every_reference_the_grammar_names_has_a_handler() {
+        for extended in [false, true] {
+            let options = super::COptions::new().with_extended(extended);
+            let mut parser = tabnas_jsonic::make();
+            let tins = super::register_tokens(&mut parser);
+            super::apply_options(&mut parser, &tins).expect("options apply");
+            let (_, fallback) = super::grammar_document(&options).expect("grammar document");
+            let stubbed = super::refs::register(&mut parser, &options, &fallback);
+            assert!(stubbed.is_empty(), "no handler for {stubbed:?}");
+        }
+    }
 }
 
 #[cfg(test)]

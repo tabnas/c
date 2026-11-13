@@ -134,6 +134,15 @@ func registerStructEnumRefs(
 	cond("@sd-need-decl-first", func(r *tabnas.Rule, _ *tabnas.Context) bool {
 		return !kBool(r, "sdAnyDecl")
 	})
+	// A member's second name with no comma between, in a declaration
+	// held to the rules, as 0.5's rules read it.
+	cond("@sd-lenient-member", func(r *tabnas.Rule, ctx *tabnas.Context) bool {
+		if !kBool(r, "sdAnyDecl") {
+			return false
+		}
+		ed := edOf(ctx)
+		return !(ed != nil && ed.Armed)
+	})
 	action("@sd-take-comma", func(r *tabnas.Rule, _ *tabnas.Context) {
 		pushTokenWithTrivia(uNode(r, "sdl"), r.C0)
 	})
@@ -231,7 +240,7 @@ func registerStructEnumRefs(
 		pushTokenWithTrivia(ruleNode(r), r.O0)
 	})
 	state("@bitfield_width-bc", func(r *tabnas.Rule, _ *tabnas.Context) {
-		if childName(r) == "val" && childNode(r) != nil &&
+		if childIsExpr(r) &&
 			!sameNode(childNode(r), ruleNode(r)) && !kBool(r, "bfExprAttached") {
 			pushKids(ruleNode(r), childNode(r))
 			r.K["bfExprAttached"] = true
@@ -377,7 +386,7 @@ func registerStructEnumRefs(
 		r.K["enrEqTaken"] = true
 	})
 	state("@enumerator-bc", func(r *tabnas.Rule, _ *tabnas.Context) {
-		if childName(r) == "val" && childNode(r) != nil &&
+		if childIsExpr(r) &&
 			!sameNode(childNode(r), ruleNode(r)) && !kBool(r, "enrValueAttached") {
 			init := makeNode("initializer", nil)
 			pushKids(init, childNode(r))

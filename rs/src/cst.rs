@@ -243,16 +243,6 @@ pub fn set_kind(node: usize, kind: &str) {
     });
 }
 
-pub fn span_of(node: usize) -> Span {
-    with_state(|state| {
-        state
-            .nodes
-            .get(node)
-            .map(|data| data.span)
-            .unwrap_or_else(Span::zero)
-    })
-}
-
 pub fn set_span(node: usize, span: Span) {
     with_state(|state| {
         if let Some(data) = state.nodes.get_mut(node) {
@@ -265,14 +255,6 @@ pub fn push_child(node: usize, item: Item) {
     with_state(|state| {
         if let Some(data) = state.nodes.get_mut(node) {
             data.children.push(item);
-        }
-    });
-}
-
-pub fn push_trailing(node: usize, item: Item) {
-    with_state(|state| {
-        if let Some(data) = state.nodes.get_mut(node) {
-            data.trailing.push(item);
         }
     });
 }
@@ -376,6 +358,111 @@ pub fn push_token_with_trivia(node: usize, token: usize) {
         push_child(node, item);
     }
     push_child(node, Item::Token(token));
+}
+
+/// Drop a token from the tree but keep the trivia before it, as children
+/// of `node` at this place (`dropToken` in `ts/src/node.ts`).
+pub fn drop_token(node: usize, token: usize) {
+    for item in leading_trivia_items(token) {
+        push_child(node, item);
+    }
+}
+
+/// The node an item names, when it names one.
+fn item_node(item: &Item) -> Option<usize> {
+    match item {
+        Item::Node(id) => Some(*id),
+        Item::Val(value) => handle_node(value),
+        _ => None,
+    }
+}
+
+/// The token an item names, when it names one.
+fn item_token(item: &Item) -> Option<usize> {
+    match item {
+        Item::Token(id) => Some(*id),
+        Item::Val(value) => handle_token(value),
+        _ => None,
+    }
+}
+
+/// Give every node in a subtree its span: the span of the first token it
+/// keeps, comments and line continuations left out; a node that keeps no
+/// token takes its parent's. Run once a subtree is complete: an external
+/// declaration when it ends, an expression parsed on its own. A node
+/// already given its span (an external declaration inside a conditional
+/// group) is not walked again. The walks are loops: a chain of operators
+/// nests as deep as it is long. Port of `fixSpans` in `ts/src/node.ts`.
+pub fn fix_spans(root: usize) {
+    with_state(|state| {
+        if root >= state.nodes.len() {
+            return;
+        }
+        let mut first: HashMap<usize, Option<Span>> = HashMap::new();
+        // Post-order: each node's first kept token, from its children's.
+        let mut stack: Vec<(usize, usize)> = vec![(root, 0)];
+        while let Some(&(node, index)) = stack.last() {
+            if state.fixed.contains(&node) {
+                first.insert(node, Some(state.nodes[node].span));
+                stack.pop();
+                continue;
+            }
+            let children = &state.nodes[node].children;
+            if index < children.len() {
+                let top = stack.len() - 1;
+                stack[top].1 = index + 1;
+                if let Some(child) = item_node(&children[index]) {
+                    if !first.contains_key(&child) && child < state.nodes.len() {
+                        stack.push((child, 0));
+                    }
+                }
+                continue;
+            }
+            let mut found = None;
+            for item in children {
+                let span = if let Some(token) = item_token(item) {
+                    state
+                        .tokens
+                        .get(token)
+                        .filter(|data| !data.name.starts_with("TRIVIA_"))
+                        .map(|data| data.span)
+                } else {
+                    item_node(item).and_then(|child| first.get(&child).copied().flatten())
+                };
+                if span.is_some() {
+                    found = span;
+                    break;
+                }
+            }
+            first.insert(node, found);
+            stack.pop();
+        }
+        // Pre-order: a node with no token of its own takes its parent's.
+        let mut todo: Vec<(usize, Span)> = vec![(root, Span::zero())];
+        while let Some((node, parent)) = todo.pop() {
+            if state.fixed.contains(&node) {
+                continue;
+            }
+            let span = first.get(&node).copied().flatten().unwrap_or(parent);
+            state.nodes[node].span = span;
+            state.fixed.insert(node);
+            for item in &state.nodes[node].children {
+                if let Some(child) = item_node(item) {
+                    todo.push((child, span));
+                }
+            }
+        }
+    });
+}
+
+/// A node given its span whose children change after (an expression's
+/// node that a later operation of the same expression extends) is given
+/// its span again by the next [`fix_spans`] over it (`unfixSpan` in
+/// `ts/src/node.ts`).
+pub fn unfix_span(node: usize) {
+    with_state(|state| {
+        state.fixed.remove(&node);
+    });
 }
 
 /// How deep [`realize`] will descend before it gives up.

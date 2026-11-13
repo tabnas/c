@@ -69,13 +69,21 @@ fn installing_twice_is_a_no_op() {
 }
 
 /// With the extensions off, the rules that parse them are gone from the
-/// instance, not merely unreachable.
+/// instance, not merely unreachable. The directive rules stay in both
+/// modes: a conditional group is built by rules from its directive lines
+/// in plain C too (`docs/rules.md`).
 #[test]
 fn extension_rules_are_absent_in_plain_mode() {
     let plain = tabnas_c::make();
     let extended = tabnas_c::make_with(&COptions::new().with_extended(true));
 
-    for rule in ["asm_statement", "define_directive", "attribute_spec_gcc"] {
+    for rule in ["conditional_directive", "define_directive"] {
+        assert!(
+            plain.rule_names().iter().any(|name| name == rule),
+            "plain mode is missing {rule}"
+        );
+    }
+    for rule in ["asm_statement", "attribute_spec_gcc", "attribute_spec_msvc"] {
         assert!(
             !plain.rule_names().iter().any(|name| name == rule),
             "plain mode still carries {rule}"
@@ -272,13 +280,15 @@ fn comments_survive_as_tokens() {
     assert_eq!(comments, vec!["/* a */", "/* b */", "// c"]);
 }
 
+/// An expression node holds its operands as children and its operator as
+/// `op`; a comment where the tree drops the operator is the node's child
+/// at that place. Port of the TypeScript test of the same name.
 #[test]
-fn legacy_expression_children_are_operands_only() {
+fn expressions_expose_operands_only_through_children() {
     let parser = tabnas_c::make_with(&COptions::new().with_extended(true));
     let value = tabnas_c::parse_with(&parser, "int f(){ __asm__(\"x\"); a /*keep*/ = b + c; }")
-        .expect("the legacy function parses");
+        .expect("the function parses");
     let json = value.to_json();
-    assert_eq!(json["children"][0]["viaPath"], "legacy");
 
     fn find<'a>(node: &'a serde_json::Value, kind: &str) -> Option<&'a serde_json::Value> {
         if node.get("kind").and_then(serde_json::Value::as_str) == Some(kind) {
@@ -291,18 +301,26 @@ fn legacy_expression_children_are_operands_only() {
     }
 
     let assignment = find(&json, "assignment_expression").expect("assignment expression");
-    let children = assignment["children"].as_array().expect("operand children");
-    assert_eq!(children.len(), 2);
-    assert_eq!(children[0]["kind"], "identifier_expression");
-    assert_eq!(children[1]["kind"], "binary_expression");
-    assert_eq!(children[0]["trivia"]["trailing"][0]["src"], "/*keep*/");
+    let kinds: Vec<&str> = assignment["children"]
+        .as_array()
+        .expect("children")
+        .iter()
+        .map(|child| child["kind"].as_str().unwrap_or_default())
+        .collect();
     assert_eq!(
-        children[1]["children"]
-            .as_array()
-            .expect("binary operand children")
-            .len(),
-        2
+        kinds,
+        ["identifier_expression", "token", "binary_expression"]
     );
+    assert_eq!(assignment["op"], "=");
+    assert!(assignment.get("left").is_none() && assignment.get("right").is_none());
+    assert_eq!(assignment["children"][1]["src"], "/*keep*/");
+    let operands: Vec<&str> = assignment["children"][2]["children"]
+        .as_array()
+        .expect("binary operand children")
+        .iter()
+        .map(|child| child["kind"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(operands, ["identifier_expression", "identifier_expression"]);
 }
 
 /// A macro definition keeps its body, and a use of the name is tagged.
@@ -320,54 +338,6 @@ fn macros_are_kept_and_uses_are_tagged() {
     assert!(
         sources.iter().any(|src| src == "+"),
         "the macro body is kept verbatim: {sources:?}"
-    );
-}
-
-/// The recorded divergence of DIVERGENCE.md section 3, pinned.
-///
-/// For a few initializer shapes the expression comes back from
-/// `@tabnas/expr` as its own operator array rather than as a built
-/// node. The canonical leaves the array on the item; this port drops
-/// it, so the item has no children at all. Measured against a run of
-/// `ts/src/c.ts` under Node and of the Go port through a driver: both
-/// of those keep it.
-///
-/// This test fails when the divergence is REPAIRED as well as when it
-/// regresses, which is the point: a divergence recorded as a passing
-/// test of current behaviour outlives its own repair.
-#[test]
-fn unevaluated_initializer_items_are_dropped() {
-    let parser = tabnas_c::make();
-    let value =
-        tabnas_c::parse_with(&parser, "static int g[2] = {-5,1};").expect("it parses either way");
-    let json = value.to_json();
-
-    let mut items: Vec<serde_json::Value> = Vec::new();
-    let mut stack = vec![json];
-    while let Some(node) = stack.pop() {
-        if node.get("kind").and_then(|kind| kind.as_str()) == Some("initializer_item") {
-            items.push(node.clone());
-        }
-        if let Some(children) = node.get("children").and_then(|value| value.as_array()) {
-            stack.extend(children.iter().cloned());
-        }
-    }
-    assert!(!items.is_empty(), "the input has initializer items");
-    let first = items
-        .iter()
-        .min_by_key(|item| {
-            serde_json::to_string(item)
-                .map(|text| text.len())
-                .unwrap_or(0)
-        })
-        .expect("at least one item");
-    assert_eq!(
-        first["children"].as_array().map(Vec::len),
-        Some(0),
-        "the `-5` item is expected to be EMPTY here and to carry a raw operator \
-         array in the canonical. If it now carries something, the divergence is \
-         closed: delete section 3 of DIVERGENCE.md, the seed list in \
-         tests/csmith_test.rs, and this test."
     );
 }
 

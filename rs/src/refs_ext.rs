@@ -118,7 +118,6 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
         let name = child_name(rule);
         if name == "asm_template" && !k_bool(rule, "templateTaken") {
             cst::push_child(node, Item::Node(child));
-            cst::set_extra(node, "template", Item::Node(child));
             k_set_bool(rule, "templateTaken", true);
             return;
         }
@@ -133,9 +132,6 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
             cst::set_kind(child, kind);
         }
         cst::push_child(node, Item::Node(child));
-        if let Some(kind) = kind {
-            cst::set_extra(node, kind, Item::Node(child));
-        }
         k_set_num(rule, "sectionIdx", index + 1);
         k_set_bool(rule, "lastWasColon", false);
     });
@@ -146,7 +142,7 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
         set_node_id(rule, node);
     });
     reg.act("@asm_template-bc", |rule, _context| {
-        if !child_is_val(rule) || k_bool(rule, "exprAttached") {
+        if !crate::expr_grammar::child_is_expr(rule) || u_bool(rule, "exprAttached") {
             return;
         }
         let (Some(node), Some(child)) = (node_id(rule), child_node_id(rule)) else {
@@ -156,8 +152,7 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
             return;
         }
         cst::push_child(node, Item::Node(child));
-        cst::set_extra(node, "expression", Item::Node(child));
-        k_set_bool(rule, "exprAttached", true);
+        u_set_bool(rule, "exprAttached", true);
     });
 
     // --- asm_section ------------------------------------------------------
@@ -167,27 +162,21 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
             k_del(rule, "takenItems");
         }
     });
-    reg.cond("@asec-needs-operand", |rule, context| {
+    reg.cond("@asec-operands", |rule, _context| {
         let index = parent_k_num(rule, "sectionIdx");
-        if index != 0 && index != 1 {
-            return false;
-        }
-        matches!(
-            t_name(context, 0).as_str(),
-            "PUNC_LBRACKET" | "LIT_STRING" | "ID"
-        )
+        index == 0 || index == 1
     });
-    reg.cond("@asec-needs-clobber", |rule, context| {
-        parent_k_num(rule, "sectionIdx") == 2 && t_name(context, 0) == "LIT_STRING"
+    reg.cond("@asec-clobbers", |rule, _context| {
+        parent_k_num(rule, "sectionIdx") == 2
     });
-    reg.cond("@asec-needs-label", |rule, context| {
-        parent_k_num(rule, "sectionIdx") == 3 && t_name(context, 0) == "ID"
+    reg.cond("@asec-labels", |rule, _context| {
+        parent_k_num(rule, "sectionIdx") == 3
     });
     reg.act("@asec-take-comma", |rule, _context| take_close(rule));
     reg.act("@asm_section-bc", |rule, _context| {
         if !matches!(
             child_name(rule).as_str(),
-            "asm_operand" | "asm_clobber" | "asm_label_ref"
+            "asm_operand" | "asm_operand_rest" | "asm_clobber" | "asm_label_ref"
         ) {
             return;
         }
@@ -200,30 +189,155 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
     });
 
     // --- asm_operand, clobber and label -------------------------------------
-    reg.act("@asm_operand-bo", |rule, _context| {
-        if open_keep(rule, "asm_operand", "aopNode").is_some() {
-            k_set_num(rule, "aopDepth", 0);
+    // --- asm_operand: its parts, or its tokens flat ----------------------
+    reg.act("@asm_operand-bo", |rule, context| {
+        let node = cst::new_node("asm_operand", None);
+        set_node_id(rule, node);
+        // The operand catches a failure below it (`crate::fallback`).
+        match crate::fallback::open_local(context) {
+            Some(scope) => u_set_num(rule, "scope", scope as i64),
+            None => u_del(rule, "scope"),
         }
     });
-    reg.cond("@aop-reentered", |rule, _context| {
-        k_node(rule, "aopNode").is_some() && k_bool(rule, "aopTaken")
+    reg.cond("@aop-failed", |rule, _context| {
+        u_num(rule, "scope")
+            .and_then(|scope| crate::fallback::scope(scope as usize))
+            .is_some_and(|scope| scope.failed)
     });
-    reg.act("@aop-take", |rule, _context| {
-        let (Some(node), Some(token)) = (node_id(rule), state_token(rule)) else {
+    // The structured parts could not read the operand: its tokens so far,
+    // flat, and asm_operand_rest takes the rest.
+    reg.act("@aop-flatten", |rule, context| {
+        let Some(id) = u_num(rule, "scope").map(|scope| scope as usize) else {
+            return;
+        };
+        let Some(scope) = crate::fallback::scope(id) else {
+            return;
+        };
+        let tokens = crate::fallback::tokens_since(context, scope.v_abs);
+        if let Some(node) = node_id(rule) {
+            cst::set_children(node, Vec::new());
+            for token in &tokens {
+                cst::push_token_with_trivia(node, *token);
+            }
+        }
+        k_set_num(rule, "aorDepth", crate::fallback::bracket_depth(&tokens));
+        crate::fallback::close_local(id);
+    });
+    reg.cond("@aop-needs-constraint", |rule, _context| {
+        !u_bool(rule, "constraint") && !u_bool(rule, "value")
+    });
+    reg.cond("@aop-needs-value", |rule, _context| !u_bool(rule, "value"));
+    reg.act("@aop-end", |rule, _context| {
+        if let Some(id) = u_num(rule, "scope") {
+            crate::fallback::close_local(id as usize);
+        }
+    });
+    // Tokens after the parts: the rest of the operand, flat.
+    reg.act("@aop-trailing", |rule, context| {
+        let Some(id) = u_num(rule, "scope").map(|scope| scope as usize) else {
+            return;
+        };
+        if let Some(scope) = crate::fallback::scope(id) {
+            let tokens = crate::fallback::tokens_since(context, scope.v_abs);
+            k_set_num(rule, "aorDepth", crate::fallback::bracket_depth(&tokens));
+        }
+        crate::fallback::close_local(id);
+    });
+    reg.act("@asm_operand-bc", |rule, _context| {
+        let (Some(id), Some(child), Some(node)) =
+            (child_rule_id(rule), child_node_id(rule), node_id(rule))
+        else {
+            return;
+        };
+        if u_num(rule, "lastChild") == Some(id as i64) {
+            return;
+        }
+        let key = match child_name(rule).as_str() {
+            "asm_name" => "name",
+            "asm_constraint" => "constraint",
+            "asm_value" => "value",
+            _ => return,
+        };
+        cst::push_child(node, Item::Node(child));
+        u_set_bool(rule, key, true);
+        u_set_num(rule, "lastChild", id as i64);
+    });
+
+    // --- asm_operand_rest -------------------------------------------------
+    reg.cond("@aor-stop", |rule, _context| k_num(rule, "aorDepth") == 0);
+    reg.act("@aor-end", |rule, _context| u_set_bool(rule, "ended", true));
+    reg.cond("@aor-ended", |rule, _context| u_bool(rule, "ended"));
+    reg.act("@aor-take", |rule, _context| {
+        let (Some(node), Some(token)) = (node_id(rule), o0(rule)) else {
             return;
         };
         push_token(node, token);
-        k_set_bool(rule, "aopTaken", true);
-        let name = cst::token_name(token);
-        if matches!(name.as_str(), "PUNC_LPAREN" | "PUNC_LBRACKET") {
-            let depth = k_num(rule, "aopDepth") + 1;
-            k_set_num(rule, "aopDepth", depth);
-        } else if matches!(name.as_str(), "PUNC_RPAREN" | "PUNC_RBRACKET") {
-            let depth = k_num(rule, "aopDepth") - 1;
-            k_set_num(rule, "aopDepth", depth);
+        match cst::token_name(token).as_str() {
+            "PUNC_LPAREN" | "PUNC_LBRACKET" => {
+                let depth = k_num(rule, "aorDepth") + 1;
+                k_set_num(rule, "aorDepth", depth);
+            }
+            "PUNC_RPAREN" | "PUNC_RBRACKET" => {
+                let depth = k_num(rule, "aorDepth") - 1;
+                k_set_num(rule, "aorDepth", depth);
+            }
+            _ => {}
         }
     });
-    reg.cond("@aop-stop", |rule, _context| k_num(rule, "aopDepth") == 0);
+
+    // --- asm_name, asm_constraint, asm_value ------------------------------
+    reg.act("@asm_name-bo", |rule, _context| {
+        let node = cst::new_node("asm_name", None);
+        set_node_id(rule, node);
+    });
+    reg.act("@aname-take", |rule, _context| {
+        let Some(node) = node_id(rule) else {
+            return;
+        };
+        for index in 0..3 {
+            if let Some(token) = open_token(rule, index) {
+                push_token(node, token);
+            }
+        }
+    });
+    reg.act("@asm_constraint-bo", |rule, _context| {
+        let node = cst::new_node("asm_constraint", None);
+        set_node_id(rule, node);
+    });
+    reg.act("@acon-take", |rule, _context| {
+        let (Some(node), Some(token)) = (node_id(rule), o0(rule)) else {
+            return;
+        };
+        push_token(node, token);
+        cst::set_extra(node, "value", Item::str(cst::token_src(token)));
+    });
+    reg.act("@asm_value-bo", |rule, _context| {
+        let node = cst::new_node("asm_value", None);
+        set_node_id(rule, node);
+    });
+    reg.act("@aval-open", |rule, _context| {
+        if let (Some(node), Some(token)) = (node_id(rule), o0(rule)) {
+            push_token(node, token);
+        }
+    });
+    reg.act("@asm_value-bc", |rule, _context| {
+        if !crate::expr_grammar::child_is_expr(rule) || u_bool(rule, "exprAttached") {
+            return;
+        }
+        let (Some(node), Some(child)) = (node_id(rule), child_node_id(rule)) else {
+            return;
+        };
+        if child == node {
+            return;
+        }
+        cst::push_child(node, Item::Node(child));
+        u_set_bool(rule, "exprAttached", true);
+    });
+    reg.act("@aval-close", |rule, _context| {
+        if let (Some(node), Some(token)) = (node_id(rule), c0(rule)) {
+            push_token(node, token);
+        }
+    });
 
     reg.act("@asm_clobber-bo", |rule, _context| {
         let node = cst::new_node("asm_clobber", None);
@@ -250,22 +364,6 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
     });
 
     // --- preprocessor_line --------------------------------------------------
-    reg.act("@preprocessor_line-bo", |rule, _context| {
-        if node_id(rule).is_some_and(|node| cst::kind_of(node) == "preprocessor_line") {
-            return;
-        }
-        let node = cst::new_node("preprocessor_line", None);
-        set_node_id(rule, node);
-    });
-    reg.act("@pp-take-hash", |rule, _context| {
-        take_open(rule);
-        k_set_bool(rule, "started", true);
-    });
-    reg.cond("@pp-reentry", |rule, _context| k_bool(rule, "started"));
-    reg.act("@pp-absorb", |rule, _context| take_close(rule));
-    reg.act("@pp-take-newline", |rule, _context| take_close(rule));
-
-    // --- the directive dispatcher ---------------------------------------------
     reg.act("@preprocessor_directive-bo", |rule, _context| {
         // The wrapper's children hold the structured directive as
         // their only entry, and `@finalize-new-path` splices them
@@ -355,8 +453,10 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
             .unwrap_or_default();
         k_set_num(rule, "defNameTokenEnd", end as i64);
         // Register the macro as soon as the name lands, so the
-        // identifier classification of what follows sees it.
-        if !name.is_empty() {
+        // identifier classification of what follows sees it. An armed
+        // line binds its macro when it ends, as 0.5 did.
+        let armed = crate::fallback::with_ed(|ed| ed.armed).unwrap_or(false);
+        if !name.is_empty() && k_bool(rule, "topLine") && !armed {
             with_state(|state| {
                 state.macros.define(crate::state::MacroDef {
                     name: name.clone(),
@@ -497,7 +597,8 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
         let name = cst::token_src(token);
         cst::set_extra(node, "macroName", Item::str(name.clone()));
         k_set_bool(rule, "undNameTaken", true);
-        if !name.is_empty() {
+        let armed = crate::fallback::with_ed(|ed| ed.armed).unwrap_or(false);
+        if !name.is_empty() && k_bool(rule, "topLine") && !armed {
             with_state(|state| state.macros.undefine(&name));
             crate::refs::reclassify(context, &name, "MACRO_NAME", "ID");
         }
@@ -643,7 +744,6 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
     reg.act("@attribute_spec_gcc-bo", |rule, _context| {
         if let Some(node) = open_keep(rule, "attribute_spec", "asgNode") {
             cst::set_extra(node, "attributeForm", Item::str("gcc"));
-            cst::set_extra(node, "items", Item::List(Vec::new()));
         }
     });
     reg.cond("@asg-reentered", |rule, _context| {
@@ -705,7 +805,6 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
     reg.act("@attribute_spec_msvc-bo", |rule, _context| {
         if let Some(node) = open_keep(rule, "attribute_spec", "asm2Node") {
             cst::set_extra(node, "attributeForm", Item::str("msvc"));
-            cst::set_extra(node, "items", Item::List(Vec::new()));
         }
     });
     reg.cond("@asm2-reentered", |rule, _context| {
@@ -762,7 +861,6 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
     reg.act("@attribute_spec_c23-bo", |rule, _context| {
         if let Some(node) = open_keep(rule, "attribute_spec", "as23Node") {
             cst::set_extra(node, "attributeForm", Item::str("c23"));
-            cst::set_extra(node, "items", Item::List(Vec::new()));
         }
     });
     reg.cond("@as23-reentered", |rule, _context| k_bool(rule, "as23Open"));
@@ -863,7 +961,6 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
             return;
         };
         cst::push_child(node, Item::Node(child));
-        cst::set_extra(node, "argumentList", Item::Node(child));
         k_set_bool(rule, "aiArgsTaken", true);
     });
 
@@ -879,7 +976,7 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
     reg.act("@aal-take-rparen", |rule, _context| take_close(rule));
     reg.act("@aal-take-comma", |rule, _context| take_close(rule));
     reg.act("@attribute_argument_list-bc", |rule, _context| {
-        if !child_is_val(rule) {
+        if !crate::expr_grammar::child_is_expr(rule) {
             return;
         }
         let (Some(node), Some(child)) = (node_id(rule), child_node_id(rule)) else {
@@ -946,7 +1043,7 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
         k_set_bool(rule, "saSemi", true);
     });
     reg.act("@static_assert_declaration-bc", |rule, _context| {
-        if !child_is_val(rule) {
+        if !crate::expr_grammar::child_is_expr(rule) {
             return;
         }
         let (Some(node), Some(child)) = (node_id(rule), child_node_id(rule)) else {
@@ -957,11 +1054,9 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
         }
         if !k_bool(rule, "saCondTaken") {
             cst::push_child(node, Item::Node(child));
-            cst::set_extra(node, "condition", Item::Node(child));
             k_set_bool(rule, "saCondTaken", true);
         } else if k_bool(rule, "saComma") && !k_bool(rule, "saMsgTaken") {
             cst::push_child(node, Item::Node(child));
-            cst::set_extra(node, "message", Item::Node(child));
             k_set_bool(rule, "saMsgTaken", true);
         }
     });
@@ -981,12 +1076,6 @@ fn take_attribute_item(rule: &mut tabnas::Rule) -> bool {
         return false;
     }
     cst::push_child(node, Item::Node(child));
-    let mut items = match cst::extra_of(node, "items") {
-        Some(Item::List(items)) => items,
-        _ => Vec::new(),
-    };
-    items.push(Item::Node(child));
-    cst::set_extra(node, "items", Item::List(items));
     true
 }
 

@@ -4,7 +4,7 @@ version = "0.5.16"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"
-description = "C23 concrete-syntax-tree grammar plugin for the tabnas parsing engine, over the jsonic base grammar and the expr operator plugin"
+description = "C23 concrete-syntax-tree grammar plugin for the tabnas parsing engine, over the jsonic base grammar"
 repository = "https://github.com/tabnas/c"
 
 [lib]
@@ -33,3 +33,18 @@ serde_json = { version = "1.0", features = ["preserve_order"] }
 # the runner's fixture value.
 tabnas-support = { path = "../../support/rs", features = ["serde_json"] }
 flate2 = "1"
+
+# The engine checks, in a build with debug assertions, that its rule stack
+# has not drifted from the live parse, comparing every frame on every
+# step. C's expressions are rules (docs/rules.md), so a C parse runs with
+# stacks hundreds of rules deep on generated code and tens of thousands
+# on the deep shapes tests/limits_test.rs parses, and the check makes a
+# parse quadratic in its depth: an unoptimized engine took 14.3 s on a
+# 77 KB Csmith seed (0.5's reader: 1.5 s), and `cargo test` ran past an
+# hour. The engine's own suite runs the check; this crate's builds
+# compile the engine optimized and without it (the seed: 2.0 s). A
+# profile applies only where this crate is the root, so no dependent
+# sees it.
+[profile.dev.package.tabnas-parser]
+opt-level = 3
+debug-assertions = false

@@ -112,10 +112,15 @@ fn init_declarator_list_cost_is_linear() {
     );
 }
 
+/// Conditional groups are built by rules as their lines arrive, the
+/// groups of a unit in a replace loop. An unterminated `#if` nests the
+/// rest of the unit in its group, so a run of them nests past the realize
+/// cap (`unterminated_conditionals_nest_to_the_cap` in limits_test.rs);
+/// a run of groups in sequence measures the same work flat.
 #[test]
-fn unmatched_conditionals_cost_is_linear() {
+fn conditional_groups_cost_is_linear() {
     let parser = tabnas_c::make();
-    let source = |count: usize| "#if 1\n".repeat(count);
+    let source = |count: usize| "#if 1\nint x;\n#endif\n".repeat(count);
 
     let _ = milliseconds(&parser, &source(50));
     let small = source(500);
@@ -126,7 +131,7 @@ fn unmatched_conditionals_cost_is_linear() {
 
     assert!(
         ratio < 9.0,
-        "conditional folding is growing faster than the input: {small_ms:.1} ms then \
+        "conditional groups are growing faster than the input: {small_ms:.1} ms then \
          {large_ms:.1} ms, a ratio of {ratio:.1} for 4x the input"
     );
 }

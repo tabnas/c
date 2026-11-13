@@ -16,6 +16,8 @@ package tabnasc
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 
 	tabnas "github.com/tabnas/parser/go"
@@ -26,7 +28,7 @@ import (
 // from the package directory, and Dir discovers the files by listing, so
 // adding a .tsv runs it in every runtime without touching any runner.
 func TestSpec(t *testing.T) {
-	dir, err := support.FindSpecDir("")
+	specDir, err := support.FindSpecDir("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,10 +42,11 @@ func TestSpec(t *testing.T) {
 				}
 			}
 
-			// The opts column is {plugin?, start?}: `plugin` is the C
-			// plugin's own options (extension constructs are opt-in),
-			// `start` overrides the engine's start rule so an expression
-			// can be parsed directly.
+			// The opts column is {plugin?, start?, find?, nth?, member?}:
+			// `plugin` is the C plugin's own options (extension constructs
+			// are opt-in), `start` overrides the engine's start rule so an
+			// expression can be parsed directly, and `member` reads a
+			// node's member back (memberRow).
 			pluginOpts := map[string]any{}
 			if p, ok := opts["plugin"].(map[string]any); ok {
 				pluginOpts = p
@@ -57,7 +60,14 @@ func TestSpec(t *testing.T) {
 				j.SetOptions(tabnas.Options{Rule: &tabnas.RuleOptions{Start: start}})
 			}
 
-			return j.Parse(input)
+			tree, err := j.Parse(input)
+			if err != nil {
+				return nil, err
+			}
+			if name, ok := opts["member"].(string); ok && "" != name {
+				return memberRow(tree, opts, name)
+			}
+			return tree, nil
 		},
 
 		// Flatten through JSON so the parser's own containers and numeric
@@ -65,7 +75,89 @@ func TestSpec(t *testing.T) {
 		// outermost first, so the top node is enough — the plain values it
 		// yields pass through unchanged.
 		Normalize: jsonFlatten,
-	}.Dir(t, dir)
+	}.Dir(t, specDir)
+}
+
+// memberRow reads a node's member back through the API, as the TypeScript
+// runner does: the `nth` node of kind `find` (depth first, the root's
+// children before their children), its member, each node it gives
+// projected to its kind, its span's start and its tokens' text, so a row
+// stays short and still names the one node it means.
+func memberRow(tree any, opts map[string]any, name string) (any, error) {
+	kind, _ := opts["find"].(string)
+	nth := 0
+	if v, ok := opts["nth"].(float64); ok {
+		nth = int(v)
+	}
+	node := findNth(tree, kind, nth)
+	if node == nil {
+		return nil, fmt.Errorf("members: no %s #%d", kind, nth)
+	}
+	return projectMember(Member(node, name)), nil
+}
+
+func findNth(root any, kind string, nth int) CNode {
+	seen := 0
+	stack := []any{root}
+	for len(stack) > 0 {
+		n := stack[0]
+		stack = stack[1:]
+		m, ok := n.(map[string]any)
+		if !ok || m == nil || m["kind"] == "token" {
+			continue
+		}
+		if m["kind"] == kind {
+			if seen == nth {
+				return m
+			}
+			seen++
+		}
+		if kids, ok := m["children"].([]any); ok {
+			stack = append(append([]any{}, kids...), stack...)
+		}
+	}
+	return nil
+}
+
+func memberText(n any) string {
+	var out []string
+	var walk func(x any)
+	walk = func(x any) {
+		m, ok := x.(map[string]any)
+		if !ok || m == nil {
+			return
+		}
+		if m["kind"] == "token" {
+			if tn, _ := m["tname"].(string); !strings.HasPrefix(tn, "TRIVIA") {
+				src, _ := m["src"].(string)
+				out = append(out, src)
+			}
+			return
+		}
+		kids, _ := m["children"].([]any)
+		for _, c := range kids {
+			walk(c)
+		}
+	}
+	walk(n)
+	return strings.Join(out, " ")
+}
+
+func projectMember(v any) any {
+	switch m := v.(type) {
+	case nil:
+		return nil
+	case []any:
+		out := make([]any, len(m))
+		for i, x := range m {
+			out[i] = projectMember(x)
+		}
+		return out
+	case map[string]any:
+		span, _ := m["span"].(map[string]any)
+		return map[string]any{"kind": m["kind"], "start": span["start"], "text": memberText(m)}
+	}
+	return v
 }
 
 // jsonFlatten renders a value as JSON and reads it back as plain

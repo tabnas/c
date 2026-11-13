@@ -146,7 +146,7 @@ func TestAsmOperandWithAsmNamePrefix(t *testing.T) {
 	if len(outOps) == 0 {
 		t.Fatal("no output asm_operand")
 	}
-	if outOps[0]["asmName"] == nil {
+	if Member(outOps[0], "asmName") == nil {
 		t.Error("output operand has no asmName")
 	}
 	constraint := field(outOps[0], "constraint")

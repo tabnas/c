@@ -324,15 +324,63 @@ def c-op [n]
 def c-rest [encs]
   c-join (c-drop1 encs)
 
+; A comment or a line continuation among a node's children: the tree
+; keeps one where the token it precedes is the node's, a token the tree
+; drops among them, so it stands where that token stood.
+def c-trivia-child [c]
+  match (c-is-token c)
+    case true (c-trivia (c-str "tname" c))
+    case false false
+
+; The positions of a node's operands, its children that are not comments.
+def c-operands [n]
+  let [kids (c-kids n)]
+    filter (fn [i] (c-not (c-trivia-child (c-at kids i)))) (indices kids)
+
+; Whether the operand `j` stands before position `i`.
+def c-operand-before [ops i j]
+  match (c-less j (count ops))
+    case true (c-less (c-at ops j) i)
+    case false false
+
+; The operand a position holds, counted from 0 and at most 3, or -1 for a
+; comment. No piece placed among the operands tells the fourth operand
+; from a later one, so the count stops at 3, and a child costs the same
+; however many operands its node has.
+def c-ordinal [kids ops i]
+  match (c-trivia-child (c-at kids i))
+    case true -1
+    case false (count (filter (partial c-operand-before ops i) [0 1 2]))
+
+; The children's strings with the pieces the tree keeps outside tokens
+; placed among the operands: `(before k)` just before operand k, and
+; `close` after the last child. A comment before a dropped token is a
+; child before the operand that follows it, so the piece is written
+; after the comment, where the token stood.
+def c-around [n encs before close]
+  let [kids (c-kids n) ops (c-operands n)]
+    string-join ""
+      vector
+        c-join
+          map
+            fn [i]
+              match (c-ordinal kids ops i)
+                case -1 (c-at encs i)
+                case k (string-join "" [(before k) (c-at encs i)])
+            indices encs
+        close
+
 def c-infix [n encs]
-  match [(c-has-token n) (c-less (count encs) 2)]
-    case [false false] (string-join "" [(c-at encs 0) (c-s (c-op n)) (c-rest encs)])
+  match [(c-has-token n) (c-less (count (c-operands n)) 2)]
+    case [false false]
+      c-around n encs (fn [k] (match k (case 1 (c-s (c-op n))) (case _ ""))) ""
     case _ (c-join encs)
 
 def c-prefix [n encs]
-  match (c-has-token n)
-    case false (string-join "" [(c-s (c-op n)) (c-join encs)])
-    case true (c-join encs)
+  match [(c-has-token n) (count (c-operands n))]
+    case [true _] (c-join encs)
+    case [false 0] (string-join "" [(c-s (c-op n)) (c-join encs)])
+    case _ (c-around n encs (fn [k] (match k (case 0 (c-s (c-op n))) (case _ ""))) "")
 
 def c-postfix [n encs]
   match (c-has-token n)
@@ -340,28 +388,38 @@ def c-postfix [n encs]
     case true (c-join encs)
 
 def c-conditional [n encs]
-  match [(c-has-token n) (c-less (count encs) 3)]
-    case [false false] (string-join "" [(c-at encs 0) (c-s "?") (c-at encs 1) (c-s ":") (c-rest (c-drop1 encs))])
+  match [(c-has-token n) (c-less (count (c-operands n)) 3)]
+    case [false false]
+      c-around n encs (fn [k] (match k (case 1 (c-s "?")) (case 2 (c-s ":")) (case _ ""))) ""
     case _ (c-join encs)
 
 def c-comma [n encs]
   match (c-has-token n)
-    case false (string-join (c-s ",") encs)
+    case false (c-around n encs (fn [k] (match k (case 0 "") (case _ (c-s ",")))) "")
     case true (c-join encs)
 
 def c-member [n encs]
-  match [(c-has-token-where c-member-token n) (c-less (count encs) 2)]
-    case [false false] (string-join "" [(c-at encs 0) (c-s (c-op n)) (c-rest encs)])
+  match [(c-has-token-where c-member-token n) (c-less (count (c-operands n)) 2)]
+    case [false false]
+      c-around n encs (fn [k] (match k (case 1 (c-s (c-op n))) (case _ ""))) ""
     case _ (c-join encs)
+
+; A list a node opens and closes with pieces: the opener before its first
+; operand, a separator before each later one, and the closer last; with no
+; operand, the opener first.
+def c-enclosed [n encs open sep close]
+  match (count (c-operands n))
+    case 0 (string-join "" [(c-s open) (c-join encs) (c-s close)])
+    case _ (c-around n encs (fn [k] (match k (case 0 (c-s open)) (case _ sep))) (c-s close))
 
 def c-index [n encs]
   match (c-has-token n)
-    case false (string-join "" [(c-s "[") (c-join encs) (c-s "]")])
+    case false (c-enclosed n encs "[" "" "]")
     case true (c-join encs)
 
 def c-arguments [n encs]
   match (c-has-token n)
-    case false (string-join "" [(c-s "(") (string-join (c-s ",") encs) (c-s ")")])
+    case false (c-enclosed n encs "(" (c-s ",") ")")
     case true (c-join encs)
 
 ; A cast's parentheses are kept as its own tokens or as its type name's
@@ -377,7 +435,7 @@ def c-cast [n encs]
 
 def c-parens [n encs]
   match (c-has-token n)
-    case false (string-join "" [(c-s "(") (c-join encs) (c-s ")")])
+    case false (c-enclosed n encs "(" "" ")")
     case true (c-join encs)
 
 def c-pointer [n encs]
@@ -413,14 +471,18 @@ def c-no-arguments [a]
         case _ false
     case false false
 
-; A call of no arguments, the shape the reader gives an expression in
-; parentheses too. An identifier alone gets the two markers the layout
-; decides by the space after it; anything else is written in parentheses.
+; A call of no arguments. A node with a span is a call wherever it is: the
+; reader gives an expression in parentheses a node of its own. A node
+; without one is the 0.5 tree's, whose expression path gives an
+; expression in parentheses the same shape as a call of no arguments:
+; there an identifier alone gets the two markers the layout decides by the
+; space after it, and anything else is written in parentheses.
 def c-call [n encs]
   let [kids (c-kids n)]
-    match (c-no-arguments (c-last kids))
-      case false (c-plain n encs)
-      case true
+    match [(c-no-arguments (c-last kids)) (kind (get "span" n))]
+      case [true :record] (c-plain n encs)
+      case [false _] (c-plain n encs)
+      case _
         let [callee (c-join (pop encs))]
           match [(count encs) (c-kind-is "identifier_expression" (c-at kids 0)) (count (split c-tsep callee))]
             case [2 true 2] (string-join "" [(c-s "(?") callee (c-s ")?")])

@@ -14,13 +14,14 @@
 #![allow(dead_code)]
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use tabnas::{Options, Tabnas};
 use tabnas_support::{find_spec_dir, Failure, Row, Value};
 
-/// The shared `test/spec` directory. The search starts ABOVE `rs/`,
+/// The shared fixtures this port runs. The search starts ABOVE `rs/`,
 /// which is where the TypeScript runner starts it too.
 pub fn spec_dir() -> PathBuf {
     find_spec_dir(Some(&PathBuf::from(env!("CARGO_MANIFEST_DIR")))).expect("test/spec directory")
@@ -53,9 +54,16 @@ thread_local! {
 }
 
 /// Parse one fixture row, building (and reusing) the parser its `opts`
-/// column asks for.
+/// column asks for. A row whose `opts` names a `member` reads that member
+/// back through the API (`member_row`).
 pub fn parse_row(input: &str, row: &Row) -> Result<Value, Failure> {
     let key = row_options(row);
+    let raw = row.named("opts");
+    let opts: serde_json::Value = if raw.trim().is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_str(raw).expect("opts column is JSON")
+    };
     let result = PARSERS.with(|parsers| {
         let mut parsers = parsers.borrow_mut();
         let parser = parsers.entry(key.clone()).or_insert_with(|| {
@@ -73,10 +81,111 @@ pub fn parse_row(input: &str, row: &Row) -> Result<Value, Failure> {
         tabnas_c::parse_with(parser, input)
     });
     match result {
-        Ok(value) => Ok(Value::from(value.to_json())),
+        Ok(value) => match opts.get("member").and_then(serde_json::Value::as_str) {
+            Some(name) if !name.is_empty() => member_row(&value, &opts, name),
+            _ => Ok(Value::from(value.to_json())),
+        },
         Err(error) => Err(Failure::new(error.code.clone())
             .with_message(error.to_string())
             .at(error.row, error.col)),
+    }
+}
+
+/// A `test/spec/members.tsv` row: the `nth` node of kind `find` (depth
+/// first, a node before its children), its member `name` read through
+/// [`tabnas_c::member`], and each node that gives projected to its kind,
+/// its span's start and its tokens' text, as the TypeScript and Go runners
+/// project it.
+fn member_row(
+    tree: &tabnas::Value,
+    opts: &serde_json::Value,
+    name: &str,
+) -> Result<Value, Failure> {
+    let kind = opts
+        .get("find")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let nth = opts
+        .get("nth")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as usize;
+    let Some(node) = find_nth(tree, kind, nth) else {
+        return Err(Failure::new("members".to_string()).with_message(format!("no {kind} #{nth}")));
+    };
+    let found = tabnas_c::member(node, name).map(|value| value.to_json());
+    Ok(Value::from(project_member(found.as_ref())))
+}
+
+fn engine_field<'a>(node: &'a tabnas::Value, key: &str) -> Option<&'a tabnas::Value> {
+    match node {
+        tabnas::Value::Object(entries) => entries.get(key),
+        _ => None,
+    }
+}
+
+fn find_nth<'a>(root: &'a tabnas::Value, kind: &str, nth: usize) -> Option<&'a tabnas::Value> {
+    let mut seen = 0;
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let Some(tabnas::Value::String(this)) = engine_field(node, "kind") else {
+            continue;
+        };
+        if this == "token" {
+            continue;
+        }
+        if this == kind {
+            if seen == nth {
+                return Some(node);
+            }
+            seen += 1;
+        }
+        if let Some(tabnas::Value::Array(kids)) = engine_field(node, "children") {
+            stack.extend(kids.iter().rev());
+        }
+    }
+    None
+}
+
+fn member_text(node: &serde_json::Value) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    let mut stack = vec![node];
+    while let Some(node) = stack.pop() {
+        if node.get("kind").and_then(serde_json::Value::as_str) == Some("token") {
+            let tname = node
+                .get("tname")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if !tname.starts_with("TRIVIA") {
+                out.push(
+                    node.get("src")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default(),
+                );
+            }
+            continue;
+        }
+        if let Some(serde_json::Value::Array(kids)) = node.get("children") {
+            stack.extend(kids.iter().rev());
+        }
+    }
+    out.join(" ")
+}
+
+fn project_member(value: Option<&serde_json::Value>) -> serde_json::Value {
+    match value {
+        None | Some(serde_json::Value::Null) => serde_json::Value::Null,
+        Some(serde_json::Value::Array(items)) => serde_json::Value::Array(
+            items
+                .iter()
+                .map(|item| project_member(Some(item)))
+                .collect(),
+        ),
+        Some(node @ serde_json::Value::Object(_)) => serde_json::json!({
+            "kind": node.get("kind").cloned().unwrap_or(serde_json::Value::Null),
+            "start": node.get("span").and_then(|span| span.get("start")).cloned().unwrap_or(serde_json::Value::Null),
+            "text": member_text(node),
+        }),
+        Some(other) => other.clone(),
     }
 }
 
@@ -166,4 +275,60 @@ pub fn outcome(parser: &Tabnas, source: &str) -> String {
         Ok(value) => value.to_json().to_string(),
         Err(error) => format!("ERROR:{}", error.code),
     }
+}
+
+/// The problems a realized tree has, at most a few (docs/rules.md, "The
+/// tree"): a subtree held twice, a node with no span, a member that holds
+/// a node. Realizing memoizes each node of the arena, so two holdings of
+/// one value are two holdings of one node: identity, not equality, finds
+/// them. The walk is iterative, as `tokens_of` is.
+pub fn tree_problems(tree: &tabnas::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen: HashSet<*const ()> = HashSet::new();
+    let mut stack: Vec<(&tabnas::Value, String)> = vec![(tree, String::new())];
+    while let Some((node, at)) = stack.pop() {
+        if out.len() >= 5 {
+            break;
+        }
+        let tabnas::Value::Object(entries) = node else {
+            continue;
+        };
+        if !seen.insert(Arc::as_ptr(entries) as *const ()) {
+            out.push(format!("{at}: a subtree held twice"));
+            continue;
+        }
+        let kind = match entries.get("kind") {
+            Some(tabnas::Value::String(kind)) => kind.as_str(),
+            _ => "",
+        };
+        if kind == "token" {
+            continue;
+        }
+        match entries.get("span") {
+            Some(tabnas::Value::Object(span))
+                if matches!(span.get("start"), Some(tabnas::Value::Number(_))) => {}
+            _ => out.push(format!("{at}: no span")),
+        }
+        for (key, value) in entries.iter() {
+            if key == "children" || key == "span" || key == "trivia" {
+                continue;
+            }
+            let holds_node = match value {
+                tabnas::Value::Object(_) => true,
+                tabnas::Value::Array(items) => items
+                    .iter()
+                    .any(|item| matches!(item, tabnas::Value::Object(_))),
+                _ => false,
+            };
+            if holds_node {
+                out.push(format!("{at}/{kind}.{key}: a member holds a node"));
+            }
+        }
+        if let Some(tabnas::Value::Array(kids)) = entries.get("children") {
+            for (index, kid) in kids.iter().enumerate().rev() {
+                stack.push((kid, format!("{at}/{kind}[{index}]")));
+            }
+        }
+    }
+    out
 }

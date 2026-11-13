@@ -1,5 +1,7 @@
 /* Copyright (c) 2026 Richard Rodger and contributors, MIT License */
 
+import type { ExtDecl } from './fallback.js'
+
 // Symbol and macro tables used by the C parser to resolve the classic
 // identifier/typedef-name disambiguation problem.
 //
@@ -159,6 +161,14 @@ export interface CMeta {
   // `tkn.use.leading` of each non-trivia token, so trivia stays attached
   // to the token it precedes even though the parser sees it as IGNORE'd.
   pendingTrivia: any[]
+  // The tokens lexed since the current external declaration's start, and
+  // the engine's count of tokens taken at that start (ts/src/fallback.ts).
+  rec?: any[]
+  recBase?: number
+  // The current external declaration's state (ts/src/fallback.ts).
+  ed?: ExtDecl
+  // The links between an expression's tokens (ts/src/expr-grammar.ts).
+  links?: any
 }
 
 export function makeCMeta(): CMeta {
@@ -167,5 +177,8 @@ export function makeCMeta(): CMeta {
     macros: new MacroTable(),
     mode: { inDirective: false, expectHeaderName: false, directiveName: null },
     pendingTrivia: [],
+    rec: [],
+    recBase: 0,
+    ed: undefined,
   }
 }

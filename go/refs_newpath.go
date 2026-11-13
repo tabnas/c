@@ -131,11 +131,30 @@ func stateTokCO(r *tabnas.Rule) *tabnas.Token {
 
 // specOwnerRule locates the rule owning the per-declaration spec scaffolding.
 // Port of specOwner in c.ts.
+//
+// It is the nearest up the rule chain that holds a specifier list
+// (U["specs"]: simple_declaration, struct_declaration, enum_utype_specs).
+// spec_loop is its child, and bit_int_paren and paren_run are spec_loop's.
 func specOwnerRule(r *tabnas.Rule) *tabnas.Rule {
-	if r.Name == "simple_declaration" || r.Name == "struct_declaration" {
-		return r
+	cur := r
+	for i := 0; cur != nil && cur != tabnas.NoRule && i < 8; i++ {
+		if cur.U != nil {
+			if specs, ok := cur.U["specs"].(CNode); ok && specs != nil {
+				return cur
+			}
+		}
+		cur = cur.Parent
 	}
 	return r.Parent
+}
+
+// matchedToken is the first token the alternate being run matched, in
+// either state.
+func matchedToken(r *tabnas.Rule) *tabnas.Token {
+	if r.State == tabnas.CLOSE {
+		return r.C0
+	}
+	return r.O0
 }
 
 // clearStmtState strips shared control-flow tracking keys. Port of
@@ -434,10 +453,7 @@ func isFunctionBodySupported(ctx *tabnas.Context, lbraceI int) bool {
 // Phase G: leading attribute specs (GCC / MSVC / C23) are skipped — they
 // can appear before the storage prefix or type head; spec_loop re-encounters
 // them via its own dispatch alts.
-func looksSimpleDecl(r *tabnas.Rule, ctx *tabnas.Context) bool {
-	if len(kTokens(r)) > 0 {
-		return false
-	}
+func looksSimpleDecl(_ *tabnas.Rule, ctx *tabnas.Context) bool {
 	i := 0
 	i = skipLeadingAttributes(ctx, i)
 	if storagePrefixSet[tokName(ctxTokAt(ctx, i))] {

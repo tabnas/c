@@ -2,31 +2,27 @@
 //
 // The path-dispatch catalogue, `ts/test/spec/path-dispatch.tsv`.
 //
-// Each row names a C source, the path its external declaration takes
-// (`grammar` for the structured dispatch, `legacy` or `legacy-unknown`
-// for the absorb-and-structure fallback) and the `declKind` that comes
-// out. Both paths emit the same tree, so a consumer never sees which
-// fired, and that is exactly why the rows exist: a silent reroute, a
-// shape that used to flow through one path and now takes the other,
-// is invisible to every fixture that pins a tree. In this port the
-// routing decision hangs on the lookahead high-water mark `rt.rs`
-// keeps (see rs/AGENTS.md), so it is the port's most fragile point and
-// the one this file watches.
+// Each row names a C source, the route its external declaration took in
+// 0.5 (`grammar`, or `legacy` and `legacy-unknown` for the chomp and its
+// structurer) and the `declKind` that comes out. From 0.6 every
+// declaration is built by rules (docs/rules.md), and the route survives
+// as strict or armed; the tree no longer names it. A declaration that
+// comes out as a different `declKind` has been read another way, which a
+// fixture that pins a tree may not hold, so the rows hold the `declKind`,
+// as `ts/test/c.test.ts` does.
 //
 // The catalogue lives under `ts/test` rather than `test/spec` because
-// it asserts an internal marker rather than a parse result, and the
-// parity runners would otherwise run it as a fixture. It is read from
-// there, as `ts/test/c.test.ts` reads it, rather than copied: the
-// columns are positional (no header), a `#`-leading line with no tab is
-// a comment, and a `#`-leading line WITH a tab is a row whose source is
-// a preprocessor directive.
+// the parity runners would otherwise run it as a fixture. It is read from
+// there rather than copied: the columns are positional (no header), a
+// `#`-leading line with no tab is a comment, and a `#`-leading line WITH
+// a tab is a row whose source is a preprocessor directive.
 
 mod common;
 
 use tabnas_support::{load_spec, SpecOptions};
 
 #[test]
-fn every_catalogued_shape_takes_the_recorded_path() {
+fn every_catalogued_shape_is_the_recorded_declaration() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("rs/ has a parent")
@@ -56,7 +52,6 @@ fn every_catalogued_shape_takes_the_recorded_path() {
     for row in &spec.rows {
         let at = row.location();
         let source = row.col(0);
-        let want_path = row.col(1);
         let want_kind = row.col(2);
         // Column 4 is an index into the translation unit's external
         // declarations when it parses as one, and free-form notes
@@ -92,12 +87,10 @@ fn every_catalogued_shape_takes_the_recorded_path() {
         };
         checked += 1;
 
-        let got_path = declaration["viaPath"].as_str().unwrap_or("<no viaPath>");
         let got_kind = declaration["declKind"].as_str().unwrap_or("<no declKind>");
-        if got_path != want_path || got_kind != want_kind {
+        if got_kind != want_kind {
             failures.push(format!(
-                "{at}: {source:?} took the {got_path} path as {got_kind}; the catalogue \
-                 records {want_path} as {want_kind}"
+                "{at}: {source:?} came out as {got_kind}; the catalogue records {want_kind}"
             ));
         }
     }
@@ -105,7 +98,7 @@ fn every_catalogued_shape_takes_the_recorded_path() {
     assert!(checked > 0, "no row produced a declaration to check");
     assert!(
         failures.is_empty(),
-        "{} of {checked} catalogued shapes disagree with the canonical dispatch:\n{}",
+        "{} of {checked} catalogued shapes disagree with the canonical:\n{}",
         failures.len(),
         failures.join("\n")
     );

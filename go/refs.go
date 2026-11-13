@@ -14,11 +14,12 @@ import tabnas "github.com/tabnas/parser/go"
 // their rule by the engine's Grammar() via the key name. Alt refs are
 // tabnas.AltCond (c:) or tabnas.AltAction (a:).
 //
-// The full ref map is ported: the extension gate, the top-level chomp path
-// (translation_unit / extdecl_loop / external_declaration), the preprocessor
-// directive family (below), the new-path structured dispatch
-// (refs_newpath*.go), and the extension constructs — inline asm, in-body
-// preprocessor lines, attribute specs, static_assert (refs_ext.go).
+// The full ref map is ported: the extension gate, the translation unit,
+// the conditional groups and the
+// external declarations with the armed fallback (fallback.go), the
+// preprocessor directive family (below), the declaration, specifier,
+// initializer and statement refs (refs_newpath*.go), and the extension
+// constructs: inline asm, attribute specs, static_assert (refs_ext.go).
 func makeGrammarRefs(opts COptions) map[tabnas.FuncRef]any {
 	extended := opts.Extended
 	ref := map[tabnas.FuncRef]any{}
@@ -59,131 +60,214 @@ func makeGrammarRefs(opts COptions) map[tabnas.FuncRef]any {
 	// --- extension gate ---------------------------------------------------
 	cond("@extended-on", func(_ *tabnas.Rule, _ *tabnas.Context) bool { return extended })
 	cond("@extended-off", func(_ *tabnas.Rule, _ *tabnas.Context) bool { return !extended })
-	cond("@ext-and-first-iter", func(r *tabnas.Rule, _ *tabnas.Context) bool {
-		return extended && len(kTokens(r)) == 0
+	// The plain-mode C23 attribute head: two adjacent `[`.
+	cond("@plain-as23", func(_ *tabnas.Rule, ctx *tabnas.Context) bool {
+		if extended || len(ctx.T) < 2 {
+			return false
+		}
+		a, b := ctx.T[0], ctx.T[1]
+		return a != nil && b != nil && !a.IsNoToken() && !b.IsNoToken() &&
+			a.SI+len(a.Src) == b.SI
 	})
 
 	// --- translation_unit -------------------------------------------------
 	state("@translation_unit-bo", func(r *tabnas.Rule, _ *tabnas.Context) {
 		r.Node = makeNode("translation_unit", nil)
 	})
-	state("@translation_unit-bc", func(r *tabnas.Rule, _ *tabnas.Context) {
+	state("@translation_unit-bc", func(r *tabnas.Rule, ctx *tabnas.Context) {
 		if n, ok := r.Node.(CNode); ok {
-			structureConditionalGroups(n)
+			fixSpansIn(ctx, n)
 		}
 	})
 
 	// --- extdecl_loop -----------------------------------------------------
+	// r.Node is the container's (the translation unit's, or a conditional
+	// branch's); bc appends each completed external declaration and each
+	// conditional group, but a group's opener, which the group takes.
 	state("@extdecl_loop-bc", func(r *tabnas.Rule, _ *tabnas.Context) {
-		if r.Child == nil || r.Child == tabnas.NoRule {
+		child := r.Child
+		if child == nil || child == tabnas.NoRule || child.Node == nil {
 			return
 		}
-		child, ok := r.Child.Node.(CNode)
-		if !ok || child["kind"] != "external_declaration" {
+		if last, _ := r.U["lastChild"].(*tabnas.Rule); last == child {
 			return
 		}
-		if n, ok := r.Node.(CNode); ok {
-			appendChild(n, child)
+		r.U["lastChild"] = child
+		node, ok := child.Node.(CNode)
+		if !ok {
+			return
+		}
+		switch node["kind"] {
+		case "external_declaration":
+			if conditionalOf(node, conditionalOpeners) != nil {
+				r.U["opener"] = node
+			} else {
+				appendChild(ruleNode(r), node)
+			}
+		case "conditional_group":
+			appendChild(ruleNode(r), node)
+		}
+	})
+	cond("@opens-group", func(r *tabnas.Rule, _ *tabnas.Context) bool {
+		return uNode(r, "opener") != nil
+	})
+	// A branch's items end at the line of the next branch or the `#endif`.
+	cond("@ends-branch", func(r *tabnas.Rule, ctx *tabnas.Context) bool {
+		return kBool(r, "inBranch") && directiveAhead(ctx, conditionalBranchEnds)
+	})
+
+	// --- conditional_group ------------------------------------------------
+	// The group takes its opener from the items loop that pushed it.
+	state("@conditional_group-bo", func(r *tabnas.Rule, _ *tabnas.Context) {
+		r.Node = makeNode("conditional_group", nil)
+		if loop := parentRule(r); loop != nil {
+			loop.EnsureU()
+			r.U["opener"] = loop.U["opener"]
+			delete(loop.U, "opener")
+		}
+	})
+	cond("@next-branch", func(_ *tabnas.Rule, ctx *tabnas.Context) bool {
+		return directiveAhead(ctx, conditionalBranches)
+	})
+	cond("@group-endif", func(_ *tabnas.Rule, ctx *tabnas.Context) bool {
+		return directiveAhead(ctx, conditionalEndif)
+	})
+	cond("@endif-taken", func(r *tabnas.Rule, _ *tabnas.Context) bool { return uBool(r, "endifTaken") })
+	state("@conditional_group-bc", func(r *tabnas.Rule, _ *tabnas.Context) {
+		child := r.Child
+		if child == nil || child == tabnas.NoRule || child.Node == nil {
+			return
+		}
+		if last, _ := r.U["lastChild"].(*tabnas.Rule); last == child {
+			return
+		}
+		r.U["lastChild"] = child
+		node, ok := child.Node.(CNode)
+		if !ok {
+			return
+		}
+		switch node["kind"] {
+		case "conditional_branch":
+			appendChild(ruleNode(r), node)
+		case "external_declaration":
+			appendChild(ruleNode(r), node)
+			r.U["endifTaken"] = true
+		}
+	})
+	action("@cg-end", func(r *tabnas.Rule, ctx *tabnas.Context) {
+		if n := ruleNode(r); n != nil {
+			fixSpansIn(ctx, n)
+		}
+	})
+
+	// --- conditional_branch -----------------------------------------------
+	// The first branch's line is the group's opener; a later branch parses
+	// its own.
+	state("@conditional_branch-bo", func(r *tabnas.Rule, _ *tabnas.Context) {
+		r.Node = makeNode("conditional_branch", nil)
+		if group := parentRule(r); group != nil {
+			group.EnsureU()
+			if opener, _ := group.U["opener"].(CNode); opener != nil {
+				delete(group.U, "opener")
+				takeBranchHead(r, opener)
+			}
+		}
+	})
+	cond("@branch-has-head", func(r *tabnas.Rule, _ *tabnas.Context) bool { return uBool(r, "headTaken") })
+	cond("@branch-needs-items", func(r *tabnas.Rule, _ *tabnas.Context) bool {
+		return uBool(r, "headTaken") && !uBool(r, "itemsTaken")
+	})
+	state("@conditional_branch-bc", func(r *tabnas.Rule, _ *tabnas.Context) {
+		child := r.Child
+		if child == nil || child == tabnas.NoRule {
+			return
+		}
+		if last, _ := r.U["lastChild"].(*tabnas.Rule); last == child {
+			return
+		}
+		r.U["lastChild"] = child
+		if child.Name == "external_declaration" && !uBool(r, "headTaken") {
+			if n, ok := child.Node.(CNode); ok {
+				takeBranchHead(r, n)
+			}
+		} else if child.Name == "extdecl_loop" {
+			r.U["itemsTaken"] = true
 		}
 	})
 
 	// --- external_declaration --------------------------------------------
-	state("@external_declaration-bo", func(r *tabnas.Rule, _ *tabnas.Context) {
-		if n, ok := r.Node.(CNode); !ok || n["kind"] != "external_declaration" {
-			r.Node = makeNode("external_declaration", nil)
-		}
-		if _, ok := r.K["tokens"]; !ok {
-			r.K["tokens"] = []*tabnas.Token{}
-		}
-		if _, ok := r.K["depth"]; !ok {
-			r.K["depth"] = 0
-		}
-		if _, ok := r.K["terminated"]; !ok {
-			r.K["terminated"] = false
+	// Each declaration starts with a fresh node and state; the fallback's
+	// token record is trimmed to the tokens it has not yet taken.
+	state("@external_declaration-bo", func(r *tabnas.Rule, ctx *tabnas.Context) {
+		r.Node = makeNode("external_declaration", nil)
+		if m := ctxCMeta(ctx); m != nil {
+			startDeclaration(m, ctx)
 		}
 	})
 
-	action("@absorb-token", absorbToken)
+	// An armed route (fallback.go).
+	action("@arm", func(_ *tabnas.Rule, ctx *tabnas.Context) {
+		if ed := edOf(ctx); ed != nil {
+			ed.Armed = true
+		}
+	})
+	cond("@c-failed", func(_ *tabnas.Rule, ctx *tabnas.Context) bool {
+		ed := edOf(ctx)
+		return ed != nil && ed.Failed
+	})
+	// The rules failed on an armed declaration: it is an unknown one, its
+	// children the tokens it has taken, flat; unknown_declaration takes the
+	// rest of the run.
+	action("@to-unknown", func(r *tabnas.Rule, ctx *tabnas.Context) {
+		ed := edOf(ctx)
+		m := ctxCMeta(ctx)
+		if ed == nil || m == nil {
+			return
+		}
+		ed.Unknown = true
+		node := ruleNode(r)
+		node["children"] = []any{}
+		for _, tkn := range takenTokens(m, ctx) {
+			pushTokenWithTrivia(node, tkn)
+		}
+	})
+	// An external declaration no rule starts: unknown from its first token.
+	action("@unk-start", func(_ *tabnas.Rule, ctx *tabnas.Context) {
+		if ed := edOf(ctx); ed != nil {
+			ed.Armed = true
+			ed.Unknown = true
+		}
+	})
+	// The rules ended an armed declaration before the chomp's end: the rest
+	// of the run follows, flat.
+	cond("@armed-runs-on", func(_ *tabnas.Rule, ctx *tabnas.Context) bool {
+		ed := edOf(ctx)
+		return ed != nil && ed.Armed && !ed.Failed && !ed.Unknown && !chompEnded(ctx)
+	})
+	action("@extdecl-trailing", func(r *tabnas.Rule, ctx *tabnas.Context) {
+		spliceDeclaration(r, ctx)
+		if ed := edOf(ctx); ed != nil {
+			ed.Trailing = true
+		}
+	})
+	// The declaration the rules built.
+	action("@extdecl-built", func(r *tabnas.Rule, ctx *tabnas.Context) {
+		spliceDeclaration(r, ctx)
+		finishExternalDeclaration(ruleNode(r), ctx)
+	})
 
-	cond("@terminated", func(r *tabnas.Rule, _ *tabnas.Context) bool {
-		t, _ := r.K["terminated"].(bool)
-		return t
+	// --- unknown_declaration ------------------------------------------------
+	action("@unk-take", func(r *tabnas.Rule, _ *tabnas.Context) {
+		pushTokenWithTrivia(ruleNode(r), r.O0)
 	})
-	cond("@just-closed-and-decl-ahead", func(r *tabnas.Rule, ctx *tabnas.Context) bool {
-		jc, _ := r.K["justClosedBrace"].(bool)
-		return jc && startsNewExternalDeclaration(ctx)
-	})
-	action("@finalize-extdecl", func(r *tabnas.Rule, ctx *tabnas.Context) {
-		finalizeExternalDeclaration(r, ctx)
-	})
-
-	// --- new-path dispatch markers ---------------------------------------
-	action("@mark-new-path", func(r *tabnas.Rule, _ *tabnas.Context) {
-		r.U["newPath"] = true
-	})
-	cond("@new-path", func(r *tabnas.Rule, _ *tabnas.Context) bool {
-		np, _ := r.U["newPath"].(bool)
-		return np
-	})
-	cond("@is-first-iter", func(r *tabnas.Rule, _ *tabnas.Context) bool {
-		return len(kTokens(r)) == 0
+	cond("@unk-ended", func(_ *tabnas.Rule, ctx *tabnas.Context) bool { return chompEnded(ctx) })
+	action("@unk-end", func(r *tabnas.Rule, ctx *tabnas.Context) {
+		finishExternalDeclaration(ruleNode(r), ctx)
 	})
 
 	// =====================================================================
 	// Top-level preprocessor directives. Ported from c.ts lines ~5410-5775.
 	// =====================================================================
-
-	// ---- external_declaration new-path finaliser (c.ts @finalize-new-path)
-	// Splices the directive/declaration wrapper child's children into the
-	// external_declaration node and copies its declKind, so a preprocessor
-	// directive yields `external_declaration{children:[<directive>],
-	// declKind:"declaration"}` matching the legacy CST.
-	action("@finalize-new-path", func(r *tabnas.Rule, ctx *tabnas.Context) {
-		if r.Child == nil || r.Child == tabnas.NoRule {
-			return
-		}
-		childNode, ok := r.Child.Node.(CNode)
-		if !ok {
-			return
-		}
-		node := ruleNode(r)
-		if node == nil {
-			return
-		}
-		childName := r.Child.Name
-		wrapAsSingle := childName == "static_assert_declaration" ||
-			childName == "asm_statement"
-		if wrapAsSingle {
-			node["children"] = []any{childNode}
-			node["declKind"] = "declaration"
-		} else {
-			kids, _ := childNode["children"].([]any)
-			cp := make([]any, len(kids))
-			copy(cp, kids)
-			node["children"] = cp
-			if dk, ok := childNode["declKind"].(string); ok && dk != "" {
-				node["declKind"] = dk
-			} else {
-				node["declKind"] = "declaration"
-			}
-		}
-		node["viaPath"] = "grammar"
-		// Register declared typedef names (set by simple_declaration path).
-		if r.Child.U != nil {
-			if isT, _ := r.Child.U["isTypedef"].(bool); isT {
-				if names, ok := r.Child.U["declaredNames"].([]any); ok {
-					if cm := ctxCMeta(ctx); cm != nil {
-						for _, nm := range names {
-							if s, ok := nm.(string); ok {
-								cm.Symbols.BindTypedef(s)
-								reclassifyLookaheadTypedef(ctx, s)
-							}
-						}
-					}
-				}
-			}
-		}
-	})
 
 	// ---- preprocessor_directive dispatcher (c.ts @preprocessor_directive-*)
 	state("@preprocessor_directive-bo", func(r *tabnas.Rule, _ *tabnas.Context) {
@@ -266,8 +350,11 @@ func makeGrammarRefs(opts COptions) map[tabnas.FuncRef]any {
 		r.K["defNameTaken"] = true
 		r.K["defNameTokenEnd"] = tkn.SI + len(tkn.Src)
 		// Register the macro as soon as the name lands so subsequent
-		// identifier classifications see it.
-		if cm := ctxCMeta(ctx); cm != nil && cm.Macros != nil && tkn.Src != "" {
+		// identifier classifications see it. An armed line binds its macro
+		// when it ends, as 0.5 did (finishExternalDeclaration).
+		ed := edOf(ctx)
+		if cm := ctxCMeta(ctx); cm != nil && cm.Macros != nil && tkn.Src != "" &&
+			kBool(r, "topLine") && !(ed != nil && ed.Armed) {
 			cm.Macros.Define(&MacroDef{Name: tkn.Src, IsFunctionLike: false})
 			reclassifyLookahead(ctx, tkn.Src, "ID", "MACRO_NAME")
 		}
@@ -423,7 +510,9 @@ func makeGrammarRefs(opts COptions) map[tabnas.FuncRef]any {
 		pushTokenWithTrivia(node, tkn)
 		node["macroName"] = tkn.Src
 		r.K["undNameTaken"] = true
-		if cm := ctxCMeta(ctx); cm != nil && cm.Macros != nil && tkn.Src != "" {
+		ed := edOf(ctx)
+		if cm := ctxCMeta(ctx); cm != nil && cm.Macros != nil && tkn.Src != "" &&
+			kBool(r, "topLine") && !(ed != nil && ed.Armed) {
 			cm.Macros.Undefine(tkn.Src)
 			reclassifyLookahead(ctx, tkn.Src, "MACRO_NAME", "ID")
 		}
@@ -676,69 +765,215 @@ func pushTokenWithTrivia(node CNode, tkn *tabnas.Token) {
 	appendChild(node, tokenRef(tkn))
 }
 
-// kTokens returns the absorbed-token slice from r.K (nil-safe).
-func kTokens(r *tabnas.Rule) []*tabnas.Token {
-	if r.K == nil {
+// ---- conditional groups and the end of an external declaration ---------
+
+// The directive names that open a conditional group, start its later
+// branches, and end it.
+var (
+	conditionalOpeners    = setOf("if", "ifdef", "ifndef")
+	conditionalBranches   = setOf("elif", "elifdef", "elifndef", "else")
+	conditionalEndif      = setOf("endif")
+	conditionalBranchEnds = setOf("elif", "elifdef", "elifndef", "else", "endif")
+)
+
+// conditionalOf is the conditional directive an external declaration is,
+// when its name is one of names.
+func conditionalOf(node CNode, names map[string]bool) CNode {
+	kids, _ := node["children"].([]any)
+	for _, c := range kids {
+		cm, ok := c.(map[string]any)
+		if !ok || cm["kind"] != "conditional_directive" {
+			continue
+		}
+		d, _ := cm["directive"].(string)
+		if names[d] {
+			return cm
+		}
 		return nil
-	}
-	if t, ok := r.K["tokens"].([]*tabnas.Token); ok {
-		return t
 	}
 	return nil
 }
 
-// absorbToken is @absorb-token: append one token (and any leading trivia) to
-// the external_declaration node and update brace-depth/terminator state.
-func absorbToken(r *tabnas.Rule, _ *tabnas.Context) {
-	node, _ := r.Node.(CNode)
-	if node == nil {
+// directiveAhead is true when the next line is a `#` line whose directive
+// is one of names (the alternate has fetched its first two tokens).
+func directiveAhead(ctx *tabnas.Context, names map[string]bool) bool {
+	if len(ctx.T) < 2 {
+		return false
+	}
+	a, b := ctx.T[0], ctx.T[1]
+	return a != nil && b != nil && a.Name == "PP_HASH" && names[b.Src]
+}
+
+// takeBranchHead makes head, its directive's external declaration, a
+// branch's first child.
+func takeBranchHead(r *tabnas.Rule, head CNode) {
+	node := ruleNode(r)
+	appendChild(node, head)
+	kind := "unknown"
+	kids, _ := head["children"].([]any)
+	for _, c := range kids {
+		if cm, ok := c.(map[string]any); ok && cm["kind"] == "conditional_directive" {
+			kind, _ = cm["directive"].(string)
+			break
+		}
+	}
+	node["branchKind"] = kind
+	r.U["headTaken"] = true
+}
+
+// spliceDeclaration splices the declaration a dispatch rule built into the
+// external declaration's node. simple_declaration's children become the
+// external declaration's own; a static_assert or asm statement is its one
+// child.
+func spliceDeclaration(r *tabnas.Rule, ctx *tabnas.Context) {
+	child := r.Child
+	if child == nil || child == tabnas.NoRule {
 		return
 	}
-	toks := kTokens(r)
-	tkn := r.O0
-
-	if tkn.Use != nil {
-		if leading, ok := tkn.Use["leading"].([]any); ok {
-			for _, ltAny := range leading {
-				if lt, ok := ltAny.(*tabnas.Token); ok {
-					appendChild(node, tokenRef(lt))
-					toks = append(toks, lt)
+	childNode, ok := child.Node.(CNode)
+	if !ok || childNode == nil || sameNode(childNode, ruleNode(r)) {
+		return
+	}
+	node := ruleNode(r)
+	if child.Name == "static_assert_declaration" || child.Name == "asm_statement" {
+		node["children"] = []any{childNode}
+		node["declKind"] = "declaration"
+	} else {
+		kids, _ := childNode["children"].([]any)
+		cp := make([]any, len(kids))
+		copy(cp, kids)
+		node["children"] = cp
+		if dk, ok := childNode["declKind"].(string); ok && dk != "" {
+			node["declKind"] = dk
+		} else {
+			node["declKind"] = "declaration"
+		}
+	}
+	ed := edOf(ctx)
+	if ed == nil || child.U == nil {
+		return
+	}
+	if isT, _ := child.U["isTypedef"].(bool); isT {
+		if names, ok := child.U["declaredNames"].([]any); ok {
+			ed.TypedefNames = []string{}
+			for _, nm := range names {
+				if s, ok := nm.(string); ok {
+					ed.TypedefNames = append(ed.TypedefNames, s)
 				}
 			}
 		}
 	}
-	toks = append(toks, tkn)
-	appendChild(node, tokenRef(tkn))
-
-	r.K["justClosedBrace"] = false
-	depth, _ := r.K["depth"].(int)
-	switch {
-	case tkn.Name == "PUNC_LBRACE":
-		depth++
-	case tkn.Name == "PUNC_RBRACE":
-		depth--
-		if depth <= 0 {
-			r.K["justClosedBrace"] = true
-		}
-	case tkn.Name == "PUNC_SEMI" && depth == 0:
-		r.K["terminated"] = true
-	case tkn.Name == "PP_NEWLINE" && depth == 0 && firstNonTriviaIs(toks, "PP_HASH"):
-		r.K["terminated"] = true
-	}
-	r.K["depth"] = depth
-	r.K["tokens"] = toks
 }
 
-// firstNonTriviaIs reports whether the first non-trivia token in toks has the
-// given name.
-func firstNonTriviaIs(toks []*tabnas.Token, name string) bool {
-	for _, t := range toks {
-		switch t.Name {
-		case "TRIVIA_LINE_COMMENT", "TRIVIA_BLOCK_COMMENT", "TRIVIA_LINE_CONT",
-			"#SP", "#LN", "#CM":
+// finishExternalDeclaration finishes an external declaration: its kind,
+// and the names it binds.
+//
+// A strict declaration binds the typedef names its rules found. An armed
+// one (and an unknown one) is the token run the 0.5 parser handed its
+// structurer, and binds what 0.5 bound for that run, read from its tokens:
+// the typedef names of a run that starts with `typedef` and ends with `;`
+// (registerTypedefIfApplicable), and the macro each `#define` and `#undef`
+// line in it names (registerMacrosFromTokens), unless the run is an
+// unknown declaration that does not start with `#`, which the structurer
+// did not read. The names decide how later tokens lex, so binding them as
+// 0.5 did keeps what the parser accepts.
+func finishExternalDeclaration(node CNode, ctx *tabnas.Context) {
+	ed := edOf(ctx)
+	if ed == nil || node == nil {
+		return
+	}
+	if ed.Unknown {
+		node["declKind"] = "unknown"
+	} else if dk, _ := node["declKind"].(string); dk == "" {
+		node["declKind"] = "unknown"
+	}
+	fixSpansIn(ctx, node)
+	cm := ctxCMeta(ctx)
+	if ed.Armed {
+		tokens := takenTokens(cm, ctx)
+		registerTypedefIfApplicable(tokens, ctx)
+		// 0.5 bound the macros of the lines its structurer read as
+		// directives: a `#` line's own, and those of a declaration it
+		// built. An unknown declaration that does not start with `#`
+		// binds none.
+		var first *tabnas.Token
+		for _, t := range tokens {
+			if !triviaTokenNames[t.Name] {
+				first = t
+				break
+			}
+		}
+		if !ed.Unknown || (first != nil && first.Name == "PP_HASH") {
+			registerMacrosFromTokens(tokens, ctx)
+		}
+	} else if ed.TypedefNames != nil {
+		for _, name := range ed.TypedefNames {
+			cm.Symbols.BindTypedef(name)
+			reclassifyLookaheadTypedef(ctx, name)
+		}
+	}
+}
+
+// registerMacrosFromTokens binds and unbinds, in order, the macros a run's
+// `#define` and `#undef` lines name, as 0.5's structurer read them: the
+// token after the directive name, when it is an identifier, a macro name
+// or a typedef name; a define is function-like when a `(` follows the name
+// with no space.
+func registerMacrosFromTokens(tokens []*tabnas.Token, ctx *tabnas.Context) {
+	cm := ctxCMeta(ctx)
+	if cm == nil || cm.Macros == nil {
+		return
+	}
+	ts := make([]*tabnas.Token, 0, len(tokens))
+	for _, t := range tokens {
+		if !triviaTokenNames[t.Name] {
+			ts = append(ts, t)
+		}
+	}
+	isName := func(n string) bool {
+		return n == "ID" || n == "MACRO_NAME" || n == "TYPEDEF_NAME"
+	}
+	for i := 0; i < len(ts); i++ {
+		if ts[i].Name != "PP_HASH" {
 			continue
 		}
-		return t.Name == name
+		dn := ""
+		if i+1 < len(ts) {
+			dn = ts[i+1].Src
+		}
+		var nameTkn *tabnas.Token
+		if i+2 < len(ts) {
+			nameTkn = ts[i+2]
+		}
+		if dn == "define" && nameTkn != nil && isName(nameTkn.Name) {
+			fnLike := false
+			if i+3 < len(ts) {
+				next := ts[i+3]
+				fnLike = next.Name == "PUNC_LPAREN" && next.SI == nameTkn.SI+len(nameTkn.Src)
+			}
+			var params []string
+			variadic := false
+			if fnLike {
+				params = []string{}
+				for j := i + 4; j < len(ts); j++ {
+					t := ts[j]
+					if t.Name == "PUNC_RPAREN" || t.Name == "PP_NEWLINE" {
+						break
+					}
+					if t.Name == "PUNC_ELLIPSIS" {
+						variadic = true
+					} else if isName(t.Name) {
+						params = append(params, t.Src)
+					}
+				}
+			}
+			cm.Macros.Define(&MacroDef{
+				Name: nameTkn.Src, IsFunctionLike: fnLike, Params: params, Variadic: variadic,
+			})
+			reclassifyLookahead(ctx, nameTkn.Src, "ID", "MACRO_NAME")
+		} else if dn == "undef" && nameTkn != nil && isName(nameTkn.Name) {
+			cm.Macros.Undefine(nameTkn.Src)
+			reclassifyLookahead(ctx, nameTkn.Src, "MACRO_NAME", "ID")
+		}
 	}
-	return false
 }

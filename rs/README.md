@@ -12,12 +12,12 @@ itself rather than being normalised away. The section
 [What the tree keeps](#what-the-tree-keeps) measures exactly how far
 that goes.
 
-The plugin layers on two others. The relaxed-JSON grammar of
-[`tabnas-jsonic`](https://github.com/tabnas/jsonic) supplies the `val`
-rule the C grammar hangs its expressions on, and is also the dialect
-the grammar document itself is written in.
-[`tabnas-expr`](https://github.com/tabnas/expr) supplies Pratt-style
-expression parsing with the C operator table.
+The plugin layers on the relaxed-JSON grammar of
+[`tabnas-jsonic`](https://github.com/tabnas/jsonic), the dialect the
+grammar document itself is written in, which supplies the `val` rule the
+C grammar starts its expressions from.
+[`tabnas-expr`](https://github.com/tabnas/expr) reads the expressions,
+with C's operator table.
 
 This is the Rust port of the canonical TypeScript implementation,
 [`@tabnas/c`](https://www.npmjs.com/package/@tabnas/c); the TypeScript
@@ -174,7 +174,11 @@ them would fail the shared fixtures:
   `binary_expression` with `op: "+"` and two operand children, so the
   operator text survives while its span does not. The same holds for an
   assignment, a unary operator and `sizeof`.
-- A call's parentheses and a `_BitInt(37)` width are dropped.
+- The punctuation an expression's node stands for is dropped: a call's
+  parentheses and commas, a subscript's brackets, a conditional's `?`
+  and `:`, and the parentheses around an expression. A comment where one
+  stood is a child of the node at that place. A `_BitInt(37)` width is
+  dropped too.
 - A parameter list inside a parenthesised declarator, as in
   `int qsort(void *, int (*)(const void *, const void *));`, is dropped.
 - A comment that no later token can take as leading trivia, which means
@@ -207,9 +211,9 @@ compound statements realizes at depth `N + 2`, and an unoptimized build
 spends a little under a kilobyte of stack per level, so a thread with
 the 1 MiB stack a small runtime hands out gives out somewhere past 300.
 The cap sits below that. How much room ordinary source leaves under it
-is a second measurement, taken 2026-09-22: the deepest of the shared
-fixtures realizes at 17, and the deepest of the 100 Csmith programs at
-146, which is over half the cap. Every one of those programs still
+is a second measurement, taken 2026-11-11: the deepest of the shared
+fixtures realizes at 19, and the deepest of the 100 Csmith programs at
+148, which is over half the cap. Every one of those programs still
 returns a tree, and the corpus test would report `cancel` for any that
 stopped short.
 
@@ -243,24 +247,13 @@ the test-only one, when it publishes this crate.
 
 ## Differences from the canonical TypeScript
 
-Three, each measured against a run of the canonical under Node and
-recorded, with the measurement behind it, in the repository's
-`DIVERGENCE.md`. The short version:
-
-- A ternary in a declaration initializer, as in `int a = b ? c : d;`,
-  builds a tree that holds itself. The canonical throws
-  `RangeError: Maximum call stack size exceeded` and Go dies with
-  `fatal error: stack overflow`; this port reports the `cancel` code and
-  the caller carries on.
-- Deeply nested source is bounded by the realize cap described above.
-  The canonical has no cap and aborts instead.
-- A prefix operator as the whole of a brace initializer item, the `-5`
-  of `static int g[2] = {-5,1};`, is left by the canonical as the raw
-  operator array `tabnas-expr` handed it. This port drops the array, so
-  the item comes back with no children and the tokens of that expression
-  are not in the tree. Every shared fixture passes either way; 37 of the
-  100 Csmith programs carry at least one such item, and the corpus test
-  names them.
+One, measured against a run of the canonical under Node and recorded,
+with the measurement behind it, in the repository's `DIVERGENCE.md`:
+deeply nested source is bounded by the realize cap described above. The
+canonical has no cap and returns the tree. Up to 0.5 two more were
+recorded there, a ternary used as a whole declaration initializer and a
+prefix operator as the whole of a brace initializer item; from 0.6 this
+port builds the same tree as the canonical for both.
 
 ## Build and test
 

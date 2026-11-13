@@ -18,9 +18,10 @@ Targets **C23** plus the common **GCC / Clang / MSVC** extensions, with
 best-effort handling of preprocessor conditional groups.
 
 > Ported from [`@jsonic/c`](https://github.com/jsonicjs/c) to the
-> [Tabnas](https://github.com/tabnas/parser) engine. The grammar is the
-> same; the plugin now runs on `@tabnas/parser` + `@tabnas/jsonic` and
-> uses `@tabnas/expr` for Pratt-style expression parsing.
+> [Tabnas](https://github.com/tabnas/parser) engine. The plugin runs on
+> `@tabnas/parser`, `@tabnas/jsonic`, and `@tabnas/expr`. From 0.6 every
+> declaration is built by its own grammar rules, and `@tabnas/expr` reads
+> every expression ([`docs/rules.md`](docs/rules.md)).
 
 ## Install
 
@@ -73,10 +74,9 @@ modes.
 and syntax (`__attribute__`, `__asm__`, `__extension__`, `__inline__`,
 `__signed__`, `__volatile__`, `__const__`, `__restrict__`, `__typeof__`,
 `__alignof__`), MSVC keywords (`__declspec`, `__cdecl`,
-`__int8/16/32/64`, `__ptr32/64`), Clang nullability annotations, the
-structured CST shapes for inline assembly, and the legacy
-recursive-descent fallback that covers the long-tail declarator shapes
-(see *Coverage and known limitations*).
+`__int8/16/32/64`, `__ptr32/64`), Clang nullability annotations, and
+the structured CST shapes for inline assembly (see *Coverage and known
+limitations*).
 
 Every extension dispatch alt in the grammar is gated on `@extended-on`,
 and the extension-only rules are stripped from the grammar spec
@@ -120,56 +120,30 @@ work in both modes.
   grammar file reads as structural intent and action logic stays
   out of it.
 
-- **Pratt-style expressions** via [`@tabnas/expr`](https://github.com/tabnas/expr):
-  the `val` rule absorbs C atoms (`LIT_INT` / `LIT_FLOAT` / `LIT_CHAR`
-  / `LIT_STRING` / `ID` / `MACRO_NAME` / `TYPEDEF_NAME` / `KW_NULLPTR`
-  / `KW_TRUE` / `KW_FALSE`), then `@tabnas/expr`'s Pratt logic
-  drives infix / prefix / suffix operator precedence. Custom val
-  open-alts handle the C-only constructs that aren't simple
-  operators: `sizeof ( type )` / cast / compound literal / `_Generic`
-  / GCC statement-expression / brace initializer list / adjacent
-  string concatenation.
+- **`@tabnas/expr` reads the expressions** (`src/expr-grammar.ts`),
+  with C's operator table and expr's options for a language like C:
+  calls and subscripts bind as postfix operators, a group that holds a
+  type name casts the operand after it, a call's arguments are a
+  separated list beside the comma operator, expr refuses values side by
+  side, and the conditional binds between assignment and `||`. Compound
+  literals, `sizeof ( type )`, `_Generic`, GCC statement expressions,
+  brace lists, and adjacent strings are rules of their own.
 
-- **Conditional-group folding** (`src/conditional-groups.ts`): a
-  translation-unit-level post-pass that collapses contiguous runs
-  of `#if`/`#ifdef` … `#elif`/`#else` … `#endif` into a single
-  `conditional_group` node. Self-contained: operates only on
-  already-parsed `conditional_directive` nodes.
+- **Conditional groups are rules**: a `#if`, `#ifdef`, or `#ifndef`
+  line opens a `conditional_group`, whose `conditional_branch`es hold
+  the declarations up to the next `#elif`, `#else`, or `#endif` line.
 
-- **Hybrid dispatch + legacy fallback** (`src/structure.ts`,
-  `src/expr.ts`): the `external_declaration` cascading wildcard
-  alts dispatch to `simple_declaration` (or to typed
-  preprocessor / asm / static_assert sub-rules) whenever
-  `@looks-simple-decl` recognises the head; otherwise the chomp
-  loop falls through to a recursive-descent post-processor in
-  `structure.ts`. Shapes covered by the new path:
-  - simple declarations (storage prefix, multi-keyword type,
-    pointer / array, function declarator, function definition)
-  - tagged-type specifiers (struct / union / enum, including
-    standalone definitions and C23 fixed-underlying-type enums)
-  - attribute specs (GCC / MSVC / C23, leading + between-specs
-    insertion points)
-  - top-level preprocessor directives (#define, #include, #if
-    family, #pragma / #error / #warning / #undef / #line)
-  - top-level GCC `__asm__`
-  - all expression and statement forms
-
-  Shapes still on the legacy path (each carries
-  `viaPath: 'legacy'` on the `external_declaration`, so you can tell
-  which path produced a node):
-  - K&R parameter lists (`int f(a, b) int a; long b; { … }`).
-    Rare in modern code; Csmith never generates them. These are the
-    one case that also gets `declKind: 'unknown'`
-    (`viaPath: 'legacy-unknown'`).
-  - pointer-to-function-pointer declarators, for example
-    `int (*(*fpp))(int);`. Plain function pointers
-    `int (*fp)(int);`, arrays of function pointers
-    `int (*arr[N])(int);` and top-level `static_assert(cond, msg);`
-    are on the grammar path.
-
-  Both paths produce identical CST shapes; the
-  `@tabnas/expr`-driven `val` handles initializer expressions in
-  either case.
+- **One path, dispatched on the head, with a fallback**
+  (`src/fallback.ts`): `external_declaration` holds a declaration to the
+  rules where 0.5 did (a type or storage head in plain mode, a head that
+  `@looks-simple-decl` accepts in extended mode, a directive, a
+  `static_assert`, an asm statement), and a declaration the rules cannot
+  parse there is a parse error. Any other declaration is *armed*: where
+  the rules cannot parse it, it becomes an unknown declaration
+  (`declKind: 'unknown'`), its tokens flat, over the token run 0.5 handed
+  its structurer, so what the parser accepts is what 0.5 accepted. An
+  external declaration that starts with an identifier or a macro is
+  unknown.
 
 ## Concrete-syntax shapes
 
@@ -178,11 +152,11 @@ fields. Highlights:
 
 ```
 translation_unit
-  conditional_group              (#if … #elif … #else … #endif folded)
-    conditional_branch { branchKind, directive }
-      children: opening directive, then branch body
-    endif
-  external_declaration { declKind: 'declaration'|'function_definition' }
+  conditional_group              (#if … #elif … #else … #endif)
+    conditional_branch { branchKind }
+      children: the branch's directive, then its declarations
+    the #endif's external_declaration, last
+  external_declaration { declKind: 'declaration'|'function_definition'|'unknown' }
     declaration_specifiers
       attribute_spec, struct_specifier, union_specifier, enum_specifier
       member_decl_list / enumerator_list (typed members, bitfields,
@@ -199,7 +173,7 @@ translation_unit
               identifier_list                 (K&R)
         asm_label?, attribute_spec?
         '=' initializer
-    static_assert_declaration { condition, message? }
+    static_assert_declaration
     define_directive { macroName, macroKind, macroParams?, macroVariadic? }
     include_directive { includeForm, headerKind, headerName }
     conditional_directive { directive }
@@ -209,19 +183,30 @@ translation_unit
       if_statement, switch_statement, while_statement, do_statement,
         for_statement (for_controls), labeled_statement
         { labelKind, labelName? }, jump_statement { jumpKind },
-        expression_statement, asm_statement, preprocessor_line
+        expression_statement, asm_statement, and a `#` line's
+        directive node
 ```
 
-### Expression shapes (Pratt-parsed via @tabnas/expr)
+A node's other members are scalars. The named members that repeat one
+of its children up to 0.5 (`operand`, `typeName`, `cond`, `value`,
+`items`, and the rest) come from `member(node, name)` instead, exported
+with the plugin; [`docs/rules.md`](docs/rules.md) has the table.
 
-Operator precedence is driven by `@tabnas/expr`'s Pratt machinery.
-The full C operator catalog (11 binary precedence levels, prefix /
-suffix unary, ternary, assignment, comma, member access, and the
-sizeof / _Alignof prefix forms) is registered as a single
-`OpDef`-table at plugin-install time. The val rule absorbs C atoms
-via custom open-alts; @tabnas/expr drives the precedence climb;
-the `evaluate` callback converts the resulting S-expression into
-the per-kind CST shapes below.
+```ts
+import { member } from '@tabnas/c'
+member(castNode, 'typeName')   // the cast's type_name child
+member(castNode, 'operand')    // the expression cast
+```
+
+### Expression shapes
+
+C's eleven binary precedence levels, the prefix and postfix operators,
+the conditional, assignment, and comma operators, member access, and the
+`sizeof` and `_Alignof` forms. An operator is the node's `op`, not a
+token; a call's parentheses and commas, a parenthesised expression's
+parentheses and a member access's `.` or `->` are not kept as tokens,
+and a cast keeps its parentheses. The members in braces after `·` come
+from `member()`.
 
 ```
 literal_expression { literalKind, value }
@@ -229,22 +214,22 @@ identifier_expression { name }
 paren_expression
 call_expression { callee, isMacro }
   argument_list
-subscript_expression { target, index_list }
-member_expression { object, op ('.'|'->'), memberName }
-postfix_unary_expression { target, op }
-unary_expression { op, operand }              // ++/--/+/-/!/~/*/&/sizeof/_Alignof/...
-cast_expression { typeName, operand }
+subscript_expression { · target }             // children: target, index_list
+member_expression { op ('.'|'->'), memberName · object }
+postfix_unary_expression { op · target }
+unary_expression { op · operand }             // ++/--/+/-/!/~/*/&/sizeof/_Alignof/...
+cast_expression { · typeName, operand }
 binary_expression { op }                      // children: left, right
-conditional_expression { cond, then, else }
+conditional_expression { · cond, then, else }
 assignment_expression { op }                  // children: left, right; right-assoc
 comma_expression
-generic_selection
-  generic_controlling_expression { expression }
-  generic_association { associationKind, typeName?, value }
+generic_selection { · controlling, associations }
+  generic_controlling_expression { · expression }
+  generic_association { associationKind · typeName?, value }
 statement_expression                           // GCC ({ ... })
-compound_literal { typeName, initializer_list }
+compound_literal { · typeName }               // children: type_name, initializer_list
 initializer_list
-  initializer_item { designation?, value }
+  initializer_item { · designation?, value }
     designation
       member_designator { memberName }
       index_designator
@@ -273,13 +258,13 @@ block / struct-or-union / enum / for-init) is implemented in
 
 ## Preprocessor
 
-Each `#-line` is its own structured directive node (see shapes above).
-A translation-unit-level post-pass folds the flat sequence of
-`#if`/`#ifdef`/`#ifndef` … (`#elif`…)\* (`#else`)? … `#endif` into a
-single `conditional_group` containing typed branches. Best-effort:
-unmatched `#endif` or unterminated `#if` leaves the surrounding
-sequence flat. Nested `#if … #endif` inside a branch is recursively
-grouped.
+Each `#-line` is its own structured directive node (see shapes above)
+at the top level and in a function body alike. A
+`#if`/`#ifdef`/`#ifndef` … (`#elif`…)\* (`#else`)? … `#endif` run is a
+`conditional_group` containing typed branches, built by rules as the
+lines arrive. An unmatched `#endif` or `#else` is a flat external
+declaration; an unterminated `#if` is a group that ends with the
+document. Nested `#if … #endif` inside a branch is a group of its own.
 
 Structural relationships use `children` as their single representation.
 In particular, binary and assignment operands are `children[0]` and
@@ -293,9 +278,9 @@ removes. The macro table is the single source of truth used by lex-time
 ## Attributes (all three forms structured)
 
 ```
-attribute_spec { attributeForm: 'gcc'|'msvc'|'c23', items }
-  attribute_item { attributeName, attributePrefix?, argumentList? }
-    attribute_argument_list                   // Pratt-parsed args
+attribute_spec { attributeForm: 'gcc'|'msvc'|'c23' · items }
+  attribute_item { attributeName, attributePrefix? · argumentList? }
+    attribute_argument_list
 ```
 
 `__attribute__((noreturn, format(printf, 1, 2)))`,
@@ -305,21 +290,25 @@ attribute_spec { attributeForm: 'gcc'|'msvc'|'c23', items }
 ## GCC inline assembly
 
 ```
-asm_statement { qualifiers }
-  asm_template { expression }
-  asm_outputs?  asm_operand { asmName?, constraint, value { expression } }
+asm_statement { qualifiers · template, asm_outputs, asm_inputs, asm_clobbers, asm_labels }
+  asm_template { · expression }
+  asm_outputs?  asm_operand { · asmName?, constraint, value }
+                  asm_name, asm_constraint { value }, asm_value { · expression }
   asm_inputs?
   asm_clobbers? asm_clobber { value }
   asm_labels?   asm_label_ref { labelName }
 ```
 
+An operand the three parts cannot read (one 0.5 also took flat) keeps
+its tokens flat.
+
 ## for-loop controls
 
 ```
-for_controls
-  for_init { value: declaration | <expr> | empty }
-  for_cond { value: <expr> | empty }
-  for_iter { value: <expr> | empty }
+for_controls { · init, cond, iter }
+  for_init { · value: declaration | <expr> | empty }
+  for_cond { · value: <expr> | empty }
+  for_iter { · value: <expr> | empty }
 ```
 
 ## Coverage and known limitations
@@ -349,18 +338,16 @@ nested `struct_specifier` / `union_specifier` / `enum_specifier` inside
 the member's `specifier_qualifier_list`.
 
 Known fall-throughs that produce a `declKind: 'unknown'` external
-declaration rather than a structured one (still parseable, source
-fidelity preserved). These land on the legacy recursive-descent
-fallback, which only exists under `{ extended: true }`, and in plain-C
-mode they are a parse error:
+declaration rather than a structured one, under `{ extended: true }`
+(source fidelity preserved; in plain-C mode they are a parse error, as
+they were in 0.5):
 
-- K&R-style parameter declarations (`int f(a, b) int a; long b; { … }`).
-- GCC `__extern_inline` declarations gated on a `__USE_EXTERN_INLINES`
-  feature macro that hasn't been `#define`d.
-
-Pointer-to-function-pointer declarators (`int (*(*fpp))(int);`) also
-need `{ extended: true }`: they are structured (`declKind:
-'declaration'`) but only the legacy fallback covers them.
+- K&R-style parameter declarations (`int f(a, b) int a; long b; { … }`),
+  which read as two unknown declarations, split at the `;`.
+- Pointer-to-function-pointer declarators (`int (*(*fpp))(int);`), which
+  0.5's structurer built.
+- A declaration holding a macro where its syntax is due (`__THROW`,
+  `__REDIRECT`), and `extern "C" {`.
 
 Compound literals with a struct-tagged type inside a function body
 (`(struct point){ … }`) ARE structured: they produce a
@@ -432,21 +419,22 @@ hybrid:
 - **N₂** ship `2.0.0` declaring the hybrid as the final
   architecture.
 
-The legacy chomp + `structureExternalDeclaration` fallback
-remains by design for the long-tail shapes: K&R parameter lists
-and complex compound declarators beyond simple function pointers.
-Both paths emit identical CST nodes, so consumers see one tree
-regardless of which path produced it.
+- **0.6** every declaration and expression is built by rules, in
+  one path, the chomp, the structurer, `@tabnas/expr`, and the
+  conditional-group post-pass gone; the members that repeat a child
+  move to `member()`. [`docs/rules.md`](docs/rules.md) has the
+  design and what was measured.
 
 ## Go port
 
-A complete Go port lives under [`go/`](go/). The whole TypeScript parser is
-hand-translated: the lexer, the `@tabnas/expr`-driven expression layer, the
-grammar install, the conditional-group post-pass, the top-level chomp +
-preprocessor directives, the new-path structured dispatch (declarations,
-declarators, struct/union/enum, initializers, statements), and the legacy
-recursive-descent structurer. `tabnasc.Parse(src)` / `tabnasc.MakeC()` parse C
-into structured concrete-syntax trees with typedef/macro tracking.
+A complete Go port lives under [`go/`](go/). It builds the same tree as
+TypeScript, with the same rules: the lexer, the grammar install, C's
+expression rules, the conditional groups, the external declarations with
+the armed fallback, the preprocessor directives, and the declarations,
+declarators, struct/union/enum, initializers and statements, all
+hand-translated. `tabnasc.Parse(src)` / `tabnasc.MakeC()` parse C into
+structured concrete-syntax trees with typedef/macro tracking, and
+`tabnasc.Member(node, name)` gives back a node's members.
 
 ```go
 import tabnasc "github.com/tabnas/c/go"
@@ -459,18 +447,16 @@ cst, _ := tabnasc.Parse(`int f(int a){ return a + 1; }`, map[string]any{"extende
 against the TypeScript golden fixtures (the same `.json.gz` set the TS suite
 uses). The Go port builds against the published modules `go/go.mod`
 requires; a `go.work` over sibling `@tabnas` checkouts (see the CI note in
-[`AGENTS.md`](AGENTS.md)) is only for testing unreleased ones. One optional
-upstream `@tabnas/expr` sort fix makes the synthetic start=`val` precedence
-unit test deterministic (corpus parity holds without it).
+[`AGENTS.md`](AGENTS.md)) is only for testing unreleased ones.
 
 ## Rust port
 
 A Rust port lives under [`rs/`](rs/): crate `tabnas-c`, library
 `tabnas_c`, a hand-translation of the TypeScript onto the Rust `tabnas`
-engine over `tabnas-jsonic` and `tabnas-expr`. The engine and the two
-plugins are on crates.io as well, but this repository's `rs/Cargo.toml`
-takes each by path from a sibling checkout, and the release workflow swaps
-in crates.io versions when it publishes `tabnas-c`.
+engine over `tabnas-jsonic`. The engine and the plugin are on crates.io
+as well, but this repository's `rs/Cargo.toml` takes each by path from a
+sibling checkout, and the release workflow swaps in crates.io versions
+when it publishes `tabnas-c`.
 
 ```rust
 let value = tabnas_c::parse("int f(int a) { return a + 1; }")?;
@@ -478,15 +464,11 @@ assert_eq!(value.to_json()["kind"], "translation_unit");
 ```
 
 **Parity:** every shared `test/spec` fixture passes, and the Rust corpus
-test replays all 100 Csmith seeds: 63 match their golden fixture
-exactly, and the other 37 differ in one recorded way, a prefix operator
-standing alone as a brace-initializer item, which the canonical leaves
-as a raw operator array and this port drops. That difference and the
-two others (a ternary as a whole declaration initializer, which the
-canonical cannot walk, and a cap on nesting depth) are recorded with
-their measurements in [`DIVERGENCE.md`](DIVERGENCE.md), and each is
-pinned by a test that fails when it is repaired as well as when it
-regresses. Build and test from `rs/` with
+test replays all 100 Csmith seeds, each of which matches its golden
+fixture. The one difference from the canonical, a cap on nesting depth,
+is recorded with its measurements in [`DIVERGENCE.md`](DIVERGENCE.md),
+and tests pin it so that they fail when it moves. Build and test from
+`rs/` with
 `cargo test --all-targets && cargo test --doc`, or run the whole gate
 with `ci/rust/run.sh`; [`rs/README.md`](rs/README.md) has the details.
 

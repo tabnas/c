@@ -1,509 +1,592 @@
 /* Copyright (c) 2026 Richard Rodger and contributors, MIT License */
 
-// Phase A wiring for @jsonic/expr on the main jsonic instance.
+// C's expressions, read by @tabnas/expr.
 //
-// The plugin's `op:` table is consumed by makeOpMap which calls
-// `jsonic.fixed(src)` to discover an existing tin for each operator's
-// source. Because c.ts already registers PUNC_PLUS / PUNC_LPAREN /
-// etc. in `fixed.token`, @jsonic/expr reuses those tins instead of
-// minting fresh `#E+` ones — and the plugin's val-rule alts therefore
-// match the very tokens our lex matchers emit.
+// The grammar's contexts push `val`, the rule an expression starts from,
+// where C's grammar names an expression (an initializer, a condition, an
+// argument). expr parses the expression with C's operator table, and its
+// evaluate callback turns each operation of the S-expression into the
+// node C's tree holds for it, from the root down once the expression has
+// ended (`evaluateCExpr`). The table sets the options expr has for a
+// language like C (`ts/doc/reference.md` in tabnas/expr):
 //
-// Phase A scope:
-//   * Define the full C operator catalog using @jsonic/expr's OpDef
-//     shape.
-//   * `installExpr(jsonic)` calls jsonic.use(Expr, { op, evaluate })
-//     and adds C-atom open alts to the val rule (LIT_INT / LIT_FLOAT
-//     / LIT_CHAR / LIT_STRING / ID / MACRO_NAME / TYPEDEF_NAME). Each
-//     atom alt produces a leaf CST node so the evaluate callback can
-//     splice it into the surrounding expression.
-//   * `evaluateCExpr(rule, ctx, op, terms)` converts @jsonic/expr's
-//     S-expression nodes into the same CST shapes the rest of the
-//     parser emits (binary_expression, assignment_expression, etc.).
+// - a binding power on a call's and a subscript's parenthesis (`left`),
+//   so `a.b[1]` subscripts `a.b` and `a.b(1)` calls it;
+// - a cast: a parenthesised type name before an operand, a prefix
+//   operator at the unary level, `accept`ed when the group holds a
+//   `type_name`;
+// - the comma operator beside separators: a call's arguments are a
+//   separated list, and so is any context that sets `n.expr_sep`
+//   (`val`'s before-open below);
+// - `juxtapose: false`: values side by side are refused;
+// - a required content: `()` as a group is refused, and `f()` is a call.
 //
-// The main grammar in c-grammar.jsonic does NOT yet descend into val;
-// that's phase B. Installing the plugin is functionally a no-op for
-// existing tests because the chomp rule never reaches val.
+// The tree's shapes are C's: an operator is `op`, not a token; a call
+// drops its parentheses and the commas between its arguments, a
+// subscript its brackets, a parenthesised expression its parentheses, a
+// conditional its `?` and `:`, a comma expression its commas; a cast and
+// a compound literal keep their parentheses. A dropped token's comments
+// stay, as children of the node that drops it, at its place. A token
+// expr does not hand over with the operation (an opener, a separator, a
+// conditional's `:`) is reached through the links the sub-lex hook makes
+// as the tokens are lexed (`linkToken`).
 
 import type { Tabnas, Rule, RuleSpec, Context, Token } from '@tabnas/parser'
 import { Expr } from '@tabnas/expr'
-import type { ExprOptions, Op } from '@tabnas/expr'
 
-// ---- C operator table ---------------------------------------------
+import {
+  CNode, makeNode, keepToken, dropToken, isNode, childNodes, fixSpans,
+  unfixSpan, tokenRef,
+} from './node.js'
+
+// ---- C's operator table ---------------------------------------------
 //
-// Precedence convention (matches @jsonic/expr's prattify logic):
-//   left-assoc:  left  <  right    (next same-prec op wraps)
-//   right-assoc: left  >  right    (next same-prec op drills)
-// Numbers are spaced by 1_000 so future operators slot in without
-// renumbering, following the rjrodger/aontu convention.
+// Binding powers on a 1,000 ladder, loosest first. Left-associative
+// operators have left < right, right-associative ones left > right.
 
-export const C_OP_TABLE: ExprOptions['op'] = {
-  // ---- comma (lowest binary; left-assoc)
-  'comma':    { src: ',',   infix: true, left: 1_000, right: 1_001 },
+const UNARY = 16_000
+const POSTFIX = 17_000
 
-  // ---- assignment (right-assoc — left > right)
-  'assign':   { src: '=',   infix: true, left: 2_001, right: 2_000 },
-  'plus_a':   { src: '+=',  infix: true, left: 2_001, right: 2_000 },
-  'minus_a':  { src: '-=',  infix: true, left: 2_001, right: 2_000 },
-  'star_a':   { src: '*=',  infix: true, left: 2_001, right: 2_000 },
-  'slash_a':  { src: '/=',  infix: true, left: 2_001, right: 2_000 },
-  'pct_a':    { src: '%=',  infix: true, left: 2_001, right: 2_000 },
-  'lsh_a':    { src: '<<=', infix: true, left: 2_001, right: 2_000 },
-  'rsh_a':    { src: '>>=', infix: true, left: 2_001, right: 2_000 },
-  'amp_a':    { src: '&=',  infix: true, left: 2_001, right: 2_000 },
-  'crt_a':    { src: '^=',  infix: true, left: 2_001, right: 2_000 },
-  'pipe_a':   { src: '|=',  infix: true, left: 2_001, right: 2_000 },
+export const C_OP_TABLE: Record<string, any> = {
+  // The comma operator, which gives way to a separator wherever the
+  // context separates on `,` (a call's arguments, an initializer).
+  comma: { src: ',', infix: true, left: 1_000, right: 1_001, separator: true },
 
-  // ---- ternary (`? :` paired)
-  'tern':     { src: ['?', ':'], ternary: true, left: 3_001, right: 3_000 },
+  // Assignment, right-associative.
+  assign: { src: '=', infix: true, left: 2_001, right: 2_000 },
+  plus_a: { src: '+=', infix: true, left: 2_001, right: 2_000 },
+  minus_a: { src: '-=', infix: true, left: 2_001, right: 2_000 },
+  star_a: { src: '*=', infix: true, left: 2_001, right: 2_000 },
+  slash_a: { src: '/=', infix: true, left: 2_001, right: 2_000 },
+  pct_a: { src: '%=', infix: true, left: 2_001, right: 2_000 },
+  lsh_a: { src: '<<=', infix: true, left: 2_001, right: 2_000 },
+  rsh_a: { src: '>>=', infix: true, left: 2_001, right: 2_000 },
+  amp_a: { src: '&=', infix: true, left: 2_001, right: 2_000 },
+  crt_a: { src: '^=', infix: true, left: 2_001, right: 2_000 },
+  pipe_a: { src: '|=', infix: true, left: 2_001, right: 2_000 },
 
-  // ---- binary (logical-or → multiplicative; left-assoc)
-  'or':       { src: '||', infix: true, left: 4_000,  right: 4_001 },
-  'and':      { src: '&&', infix: true, left: 5_000,  right: 5_001 },
-  'bor':      { src: '|',  infix: true, left: 6_000,  right: 6_001 },
-  'bxor':     { src: '^',  infix: true, left: 7_000,  right: 7_001 },
-  'band':     { src: '&',  infix: true, left: 8_000,  right: 8_001 },
-  'eq':       { src: '==', infix: true, left: 9_000,  right: 9_001 },
-  'ne':       { src: '!=', infix: true, left: 9_000,  right: 9_001 },
-  'lt':       { src: '<',  infix: true, left: 10_000, right: 10_001 },
-  'le':       { src: '<=', infix: true, left: 10_000, right: 10_001 },
-  'gt':       { src: '>',  infix: true, left: 10_000, right: 10_001 },
-  'ge':       { src: '>=', infix: true, left: 10_000, right: 10_001 },
-  'lsh':      { src: '<<', infix: true, left: 11_000, right: 11_001 },
-  'rsh':      { src: '>>', infix: true, left: 11_000, right: 11_001 },
-  'plus':     { src: '+',  infix: true, left: 12_000, right: 12_001 },
-  'minus':    { src: '-',  infix: true, left: 12_000, right: 12_001 },
-  'star':     { src: '*',  infix: true, left: 13_000, right: 13_001 },
-  'slash':    { src: '/',  infix: true, left: 13_000, right: 13_001 },
-  'pct':      { src: '%',  infix: true, left: 13_000, right: 13_001 },
+  // The conditional, right-associative, placed by its binding powers: it
+  // binds tighter than assignment and the comma operator, and its middle
+  // term is a whole expression.
+  tern: { src: ['?', ':'], ternary: true, left: 3_001, right: 3_000 },
 
-  // ---- prefix unary
-  'pre_inc':  { src: '++', prefix: true, right: 16_000 },
-  'pre_dec':  { src: '--', prefix: true, right: 16_000 },
-  'unary_p':  { src: '+',  prefix: true, right: 16_000 },
-  'unary_n':  { src: '-',  prefix: true, right: 16_000 },
-  'lnot':     { src: '!',  prefix: true, right: 16_000 },
-  'bnot':     { src: '~',  prefix: true, right: 16_000 },
-  'deref':    { src: '*',  prefix: true, right: 16_000 },
-  'addr':     { src: '&',  prefix: true, right: 16_000 },
+  // The binary operators, from `||` to the multiplicative ones.
+  or: { src: '||', infix: true, left: 4_000, right: 4_001 },
+  and: { src: '&&', infix: true, left: 5_000, right: 5_001 },
+  bor: { src: '|', infix: true, left: 6_000, right: 6_001 },
+  bxor: { src: '^', infix: true, left: 7_000, right: 7_001 },
+  band: { src: '&', infix: true, left: 8_000, right: 8_001 },
+  eq: { src: '==', infix: true, left: 9_000, right: 9_001 },
+  ne: { src: '!=', infix: true, left: 9_000, right: 9_001 },
+  lt: { src: '<', infix: true, left: 10_000, right: 10_001 },
+  le: { src: '<=', infix: true, left: 10_000, right: 10_001 },
+  gt: { src: '>', infix: true, left: 10_000, right: 10_001 },
+  ge: { src: '>=', infix: true, left: 10_000, right: 10_001 },
+  lsh: { src: '<<', infix: true, left: 11_000, right: 11_001 },
+  rsh: { src: '>>', infix: true, left: 11_000, right: 11_001 },
+  plus: { src: '+', infix: true, left: 12_000, right: 12_001 },
+  minus: { src: '-', infix: true, left: 12_000, right: 12_001 },
+  star: { src: '*', infix: true, left: 13_000, right: 13_001 },
+  slash: { src: '/', infix: true, left: 13_000, right: 13_001 },
+  pct: { src: '%', infix: true, left: 13_000, right: 13_001 },
 
-  // sizeof / _Alignof / _Alignof variants. C makes these unary
-  // prefix operators (sizeof / _Alignof can also take a parenthesised
-  // type-name; the type-form is handled separately as a val open
-  // alt — Phase C). Their src strings already exist as KW_*
-  // fixed tokens, so @jsonic/expr's fixed() lookup finds them and
-  // reuses the same tin instead of creating an `#Esizeof` token.
-  'sizeof':   { src: 'sizeof',    prefix: true, right: 16_000 },
-  'alignof':  { src: '_Alignof',  prefix: true, right: 16_000 },
-  'alignof_g':  { src: 'alignof', prefix: true, right: 16_000 },
-  'gnualignof': { src: '__alignof__', prefix: true, right: 16_000 },
-  'gnualignof_s': { src: '__alignof', prefix: true, right: 16_000 },
+  // The prefix operators, and the cast at their level.
+  pre_inc: { src: '++', prefix: true, right: UNARY },
+  pre_dec: { src: '--', prefix: true, right: UNARY },
+  unary_p: { src: '+', prefix: true, right: UNARY },
+  unary_n: { src: '-', prefix: true, right: UNARY },
+  lnot: { src: '!', prefix: true, right: UNARY },
+  bnot: { src: '~', prefix: true, right: UNARY },
+  deref: { src: '*', prefix: true, right: UNARY },
+  addr: { src: '&', prefix: true, right: UNARY },
+  sizeof: { src: 'sizeof', prefix: true, right: UNARY },
+  alignof: { src: '_Alignof', prefix: true, right: UNARY },
+  alignof_g: { src: 'alignof', prefix: true, right: UNARY },
+  gnualignof: { src: '__alignof__', prefix: true, right: UNARY },
+  gnualignof_s: { src: '__alignof', prefix: true, right: UNARY },
+  cast: {
+    osrc: '(', csrc: ')', cast: true, right: UNARY,
+    accept: (term: any) => isNode(term) && 'type_name' === term.kind,
+  },
 
-  // ---- postfix
-  'post_inc': { src: '++', suffix: true, left: 17_000 },
-  'post_dec': { src: '--', suffix: true, left: 17_000 },
+  // The postfix operators, one level, left to right.
+  post_inc: { src: '++', suffix: true, left: POSTFIX },
+  post_dec: { src: '--', suffix: true, left: POSTFIX },
+  dot: { src: '.', infix: true, left: POSTFIX, right: POSTFIX + 1 },
+  arrow: { src: '->', infix: true, left: POSTFIX, right: POSTFIX + 1 },
 
-  // ---- member access (infix; right operand is an identifier)
-  // Member access is left-associative: `a.b.c` → `(a.b).c`.
-  // Pratt convention here is left < right ⇒ left-assoc (matches mult,
-  // add, etc).
-  'dot':      { src: '.',  infix: true, left: 17_000, right: 17_001 },
-  'arrow':    { src: '->', infix: true, left: 17_000, right: 17_001 },
-
-  // ---- paren forms
-  // Calls and subscripts use preval (a value precedes the opener);
-  // grouping doesn't.
-  'paren':    { osrc: '(', csrc: ')', paren: true,
-                preval: { active: false } },
-  'call':     { osrc: '(', csrc: ')', paren: true,
-                preval: { active: true } },
-  'subscript':{ osrc: '[', csrc: ']', paren: true,
-                preval: { active: true, required: true } },
+  // A group, whose content is required; a call, whose content is its
+  // arguments, separated; a subscript.
+  paren: {
+    osrc: '(', csrc: ')', paren: true,
+    preval: { active: false }, content: { required: true },
+  },
+  call: {
+    osrc: '(', csrc: ')', paren: true, left: POSTFIX,
+    preval: { active: true }, content: { separated: true },
+  },
+  subscript: {
+    osrc: '[', csrc: ']', paren: true, left: POSTFIX,
+    preval: { active: true, required: true }, content: { required: true },
+  },
 }
 
-// ---- evaluate callback: S-expression → my CST shape ---------------
-//
-// @jsonic/expr produces nested arrays `[op, term, term, ...]` and
-// invokes the evaluate callback to combine them. We emit the same CST
-// node shapes the existing post-processor produces, so the rest of
-// the codebase (and the structural test suite) keeps working as the
-// rule machinery takes over expression contexts in phase B.
-
-export function evaluateCExpr(
-  _rule: Rule, _ctx: Context, op: Op, terms: any[],
-): any {
-  const span = (terms[0] && terms[0].span) || tokenSpan(op.token) || zeroSpan()
-
-  if (op.name === 'comma-infix' || op.name === 'comma') {
-    const out = makeNode('comma_expression', span)
-    for (const t of terms) {
-      if (t && t.kind === 'comma_expression') {
-        for (const c of t.children) out.children.push(c)
-      } else if (t !== undefined) {
-        out.children.push(t)
-      }
-    }
-    return out
-  }
-
-  if (op.ternary) {
-    const out = makeNode('conditional_expression', span)
-    if (terms[0] !== undefined) { out.children.push(terms[0]); out.cond = terms[0] }
-    if (terms[1] !== undefined) { out.children.push(terms[1]); out.then = terms[1] }
-    if (terms[2] !== undefined) { out.children.push(terms[2]); out.else = terms[2] }
-    return out
-  }
-
-  if (isAssignName(op.name)) {
-    const out = makeNode('assignment_expression', span)
-    if (terms[0] !== undefined) out.children.push(terms[0])
-    if (terms[1] !== undefined) out.children.push(terms[1])
-    out.op = op.src
-    return out
-  }
-
-  if (op.name === 'dot-infix' || op.name === 'arrow-infix') {
-    const out = makeNode('member_expression', span)
-    if (terms[0] !== undefined) { out.children.push(terms[0]); out.object = terms[0] }
-    if (terms[1] !== undefined) {
-      out.children.push(terms[1])
-      if (terms[1].name) out.memberName = terms[1].name
-    }
-    out.op = op.src
-    return out
-  }
-
-  if (op.name === 'call-paren') {
-    const out = makeNode('call_expression', span)
-    const callee = terms[0]
-    if (callee !== undefined) {
-      out.children.push(callee)
-      if (callee.kind === 'identifier_expression') {
-        out.callee = callee.name
-        const idTok = (callee.children || []).find(
-          (c: any) => c && c.kind === 'token',
-        )
-        out.isMacro = !!(idTok && idTok.tname === 'MACRO_NAME')
-      }
-    }
-    const args = makeNode('argument_list', span)
-    if (Array.isArray(terms[1]) && (terms[1] as any).OP_MARK === undefined) {
-      // @jsonic/expr returns an implicit list when commas appear inside
-      // the parens — splice all of those as separate args.
-      for (const a of terms[1]) args.children.push(a)
-    } else if (terms[1] !== undefined && terms[1].kind === 'comma_expression') {
-      for (const c of terms[1].children) {
-        if (c.kind !== 'token') args.children.push(c)
-      }
-    } else if (terms[1] !== undefined) {
-      args.children.push(terms[1])
-    }
-    out.children.push(args)
-    return out
-  }
-
-  if (op.name === 'subscript-paren') {
-    const out = makeNode('subscript_expression', span)
-    if (terms[0] !== undefined) { out.children.push(terms[0]); out.target = terms[0] }
-    const idx = makeNode('index_list', span)
-    if (terms[1] !== undefined) idx.children.push(terms[1])
-    out.children.push(idx)
-    return out
-  }
-
-  if (op.name === 'paren-paren') {
-    const out = makeNode('paren_expression', span)
-    if (terms[0] !== undefined) out.children.push(terms[0])
-    return out
-  }
-
-  if (op.prefix) {
-    const out = makeNode('unary_expression', span)
-    out.op = op.src
-    if (terms[0] !== undefined) { out.children.push(terms[0]); out.operand = terms[0] }
-    return out
-  }
-  if (op.suffix) {
-    const out = makeNode('postfix_unary_expression', span)
-    out.op = op.src
-    if (terms[0] !== undefined) { out.children.push(terms[0]); out.target = terms[0] }
-    return out
-  }
-  if (op.infix) {
-    const out = makeNode('binary_expression', span)
-    out.op = op.src
-    if (terms[0] !== undefined) out.children.push(terms[0])
-    if (terms[1] !== undefined) out.children.push(terms[1])
-    return out
-  }
-
-  // Defensive fallback.
-  const out = makeNode('expression', span)
-  for (const t of terms) if (t !== undefined) out.children.push(t)
-  return out
-}
-
-// ---- val-rule extension for C atoms -------------------------------
-//
-// Adds open alts that recognise C identifiers and literals. Each alt
-// produces a leaf CST node (literal_expression / identifier_expression)
-// so evaluateCExpr can splice it into the surrounding expression
-// directly.
-
-export function installExpr(jsonic: Tabnas): void {
-  jsonic.use(Expr, { op: C_OP_TABLE as any, evaluate: evaluateCExpr as any })
-
-  // Add C-atom recognisers to val's open alts. These coexist with the
-  // operator-aware alts that @jsonic/expr injected.
-  jsonic.rule('val', (rs: RuleSpec) => {
-    // Phase C.2/C.3/C.4 multi-token discriminators. These need to
-    // fire BEFORE @jsonic/expr's prefix-op machinery (which would
-    // treat `sizeof` as a prefix op and try to parse `( int )` as
-    // a paren-expression operand) and BEFORE jsonic's default `{`
-    // → map handling. Prepended via append:false.
-    rs.open([
-      // sizeof / _Alignof type-name form:
-      // `<sizeof|_Alignof|...> ( <type-head> ...` — backstep all 3
-      // matched tokens so the sub-rule re-takes them.
-      { s: '#SIZEOF_KW PUNC_LPAREN #SIMPLE_TYPE_HEAD',
-        b: 3, p: 'sizeof_type_form',
-        g: 'c-sizeof-type' },
-      // cast / compound literal: `( <type-head> ...`.
-      { s: 'PUNC_LPAREN #SIMPLE_TYPE_HEAD',
-        b: 2, p: 'cast_or_compound_literal',
-        g: 'c-cast-or-cl' },
-      // Phase C.6: GCC statement expression `( { … } )`.
-      { s: 'PUNC_LPAREN PUNC_LBRACE',
-        b: 2, p: 'statement_expression',
-        g: 'c-stmt-expr' },
-      // Phase C.5: `_Generic ( ctrl , <association>+ )`.
-      { s: ['KW__GENERIC'],
-        b: 1, p: 'generic_selection',
-        g: 'c-generic' },
-      // Phase C.4: brace initializer list as a val (e.g. RHS of
-      // `int x = { 1, 2 };`).
-      { s: ['PUNC_LBRACE'],
-        b: 1, p: 'initializer_list',
-        g: 'c-init-list' },
-    ], { append: false })
-
-    rs.open([
-      // Paren-preval: a C atom immediately followed by `(` or `[` opens
-      // a call/subscript expression. We back-step the paren so
-      // @jsonic/expr's expr rule picks it up as a paren-form, and set
-      // rule.node to the atom CST so expr uses it as the preceding
-      // value. The token sets are configured in c.ts.
-      { s: '#C_ATOM #C_PAREN_OPEN',
-        b: 1, p: 'expr',
-        a: cParenPrevalAction,
-        u: { paren_preval: true },
-        g: 'c-atom,c-call-preval' },
-      { s: ['LIT_INT'],     a: makeAtomAction('literal_expression', 'LIT_INT'),
-        g: 'c-atom,c-int' },
-      { s: ['LIT_FLOAT'],   a: makeAtomAction('literal_expression', 'LIT_FLOAT'),
-        g: 'c-atom,c-float' },
-      { s: ['LIT_CHAR'],    a: makeAtomAction('literal_expression', 'LIT_CHAR'),
-        g: 'c-atom,c-char' },
-      { s: ['LIT_STRING'],  b: 1, p: 'string_atom',
-        g: 'c-atom,c-str' },
-      { s: ['ID'],          a: makeIdAction(),  g: 'c-atom,c-id' },
-      { s: ['MACRO_NAME'],  a: makeIdAction(),  g: 'c-atom,c-macro' },
-      { s: ['TYPEDEF_NAME'], a: makeIdAction(), g: 'c-atom,c-typedef' },
-      // C23 keyword constants. We surface them as literal_expression
-      // nodes (not identifiers) so consumers can distinguish a real
-      // identifier named `nullptr` (impossible in C23, but trivial in
-      // older code where the keyword wasn't reserved) from the
-      // language-level constant.
-      { s: ['KW_NULLPTR'],
-        a: makeAtomAction('literal_expression', 'KW_NULLPTR'),
-        g: 'c-atom,c-nullptr' },
-      { s: ['KW_TRUE'],
-        a: makeAtomAction('literal_expression', 'KW_TRUE'),
-        g: 'c-atom,c-true' },
-      { s: ['KW_FALSE'],
-        a: makeAtomAction('literal_expression', 'KW_FALSE'),
-        g: 'c-atom,c-false' },
-    ], { append: true })
-
-    // After a sub-rule (sizeof_type_form, cast_or_compound_literal,
-    // …) returns to val in close state, copy its CST node onto
-    // val.node so val proceeds as if the sub-rule was an atom. The
-    // @jsonic/expr-installed bc on val tests `isOp(r.node)` for term
-    // appending; our sub-rule produces a non-Op node so it's a no-op
-    // there and ours runs after without interfering.
-    rs.bc((rule: any) => {
-      if (rule.child &&
-          (rule.child.name === 'sizeof_type_form' ||
-           rule.child.name === 'cast_or_compound_literal' ||
-           rule.child.name === 'initializer_list' ||
-           rule.child.name === 'string_atom' ||
-           rule.child.name === 'generic_selection' ||
-           rule.child.name === 'statement_expression') &&
-          rule.child.node) {
-        rule.node = rule.child.node
-      }
-    })
-
-    // C-terminator close alts. These pre-empt jsonic's implicit-
-    // list close behaviour (which would recurse into the list rule
-    // on any unmatched token) so that hitting a `;`/`)`/`]`/`}`
-    // exits val cleanly back to the C-grammar parent.
-    //
-    // PUNC_COMMA / PUNC_COLON are gated on `!r.gt('expr_paren')`:
-    // inside a paren-form (call args, ternary, _Generic, etc) the
-    // comma / colon is owned by @jsonic/expr's own logic, so we
-    // let it through. Outside of paren-forms the surrounding
-    // C-grammar rule (e.g. init_declarator's `,` between
-    // declarators, or labeled_statement's `:`) wants to take it,
-    // so we bail val.
-    //
-    // unshift (default add behaviour) puts these in front of the
-    // imp-list alts, which is exactly where they need to be.
-    rs.close([
-      { s: ['PUNC_SEMI'],     b: 1, g: 'c-end-stmt' },
-      // r.n.expr_paren is set by @jsonic/expr's paren rule; absent
-      // (undefined) at top level. We check truthiness directly —
-      // r.gt() treats null/undefined as ">0" so it can't be used.
-      { s: ['PUNC_COMMA'],    c: (r: any) => !r.n.expr_paren,
-                              b: 1, g: 'c-end-comma' },
-      { s: ['PUNC_RPAREN'],   b: 1, g: 'c-end-paren' },
-      { s: ['PUNC_RBRACKET'], b: 1, g: 'c-end-bracket' },
-      { s: ['PUNC_RBRACE'],   b: 1, g: 'c-end-brace' },
-      { s: ['PUNC_COLON'],    c: (r: any) => !r.n.expr_paren,
-                              b: 1, g: 'c-end-colon' },
-    ])
-
-    // tabnas core's relaxed-JSON val close (@val-bc/replace and its
-    // @val-ac restore) only preserves a PRIMITIVE node a plugin set in a
-    // val open action — an object CST node is treated as a stale
-    // container and overwritten with the matched token value. The C
-    // atom recognisers (makeAtomAction / makeIdAction) deliberately set
-    // object CST nodes, so restore them here. This runs after jsonic's
-    // own @val-ac (registration order: jsonic is `use`d before C), so it
-    // has the final say. Only restore when val did not already settle on
-    // a richer node (a @tabnas/expr Op converted by evaluateCExpr, or a
-    // sub-rule CST copied by the bc above — both carry a `.kind`).
-    rs.ac((rule: any) => {
-      const cn = rule.u.cNode
-      if (null != cn &&
-          (null == rule.node ||
-           'object' !== typeof rule.node ||
-           undefined === (rule.node as any).kind)) {
-        rule.node = cn
-      }
-    })
-  })
-}
-
-// Action for the paren-preval alt: builds a C atom CST node from the
-// matched atom token (literal_expression or identifier_expression),
-// stashes it as rule.node so @jsonic/expr's expr rule can use it as
-// the preceding value of the call/subscript paren-form.
-function cParenPrevalAction(rule: Rule): void {
-  const tkn = rule.o0 as Token
-  const ref = {
-    kind: 'token', tname: tkn.name, src: tkn.src,
-    span: tokenSpan(tkn),
-  }
-  if (tkn.name.startsWith('LIT_')) {
-    const node = makeNode('literal_expression', ref.span as any)
-    for (const tr of leadingTriviaRefs(tkn)) node.children.push(tr)
-    node.children.push(ref)
-    node.literalKind = tkn.name
-    node.value = tkn.src
-    rule.node = node
-  } else {
-    const node = makeNode('identifier_expression', ref.span as any)
-    for (const tr of leadingTriviaRefs(tkn)) node.children.push(tr)
-    node.children.push(ref)
-    node.name = tkn.src
-    rule.node = node
-  }
-}
-
-function makeAtomAction(kind: string, literalKind: string) {
-  return function atomAction(rule: Rule): void {
-    const tkn = rule.o0 as Token
-    const ref = {
-      kind: 'token', tname: tkn.name, src: tkn.src,
-      span: tokenSpan(tkn),
-    }
-    const node = makeNode(kind, ref.span as any)
-    for (const tr of leadingTriviaRefs(tkn)) node.children.push(tr)
-    node.children.push(ref)
-    node.literalKind = literalKind
-    node.value = tkn.src
-    rule.node = node
-    // Stash for the val after-close restore. tabnas core's relaxed-JSON
-    // val close (@val-bc/replace + @val-ac) preserves only PRIMITIVE
-    // plugin-set node values; an object CST node set here is treated as a
-    // stale parent-seeded container and overwritten with the matched
-    // token. Restore it in the C-side `ac` hook below.
-    rule.u.cNode = node
-  }
-}
-
-function makeIdAction() {
-  return function idAction(rule: Rule): void {
-    const tkn = rule.o0 as Token
-    const ref = {
-      kind: 'token', tname: tkn.name, src: tkn.src,
-      span: tokenSpan(tkn),
-    }
-    const node = makeNode('identifier_expression', ref.span as any)
-    for (const tr of leadingTriviaRefs(tkn)) node.children.push(tr)
-    node.children.push(ref)
-    node.name = tkn.src
-    rule.node = node
-    rule.u.cNode = node
-  }
-}
-
-function leadingTriviaRefs(tkn: Token): any[] {
-  const leading = (tkn as any).use && (tkn as any).use.leading
-  if (!Array.isArray(leading)) return []
-  return leading.map((lt: Token) => ({
-    kind: 'token', tname: lt.name, src: lt.src,
-    span: tokenSpan(lt),
-  }))
-}
-
-// ---- Helpers -------------------------------------------------------
-
-function tokenSpan(tkn: Token | undefined): Span | undefined {
-  if (!tkn) return undefined
-  return { start: tkn.sI, end: tkn.sI + tkn.len, line: tkn.rI, col: tkn.cI }
-}
-
-function zeroSpan(): Span {
-  return { start: 0, end: 0, line: 1, col: 1 }
-}
-
-interface Span { start: number; end: number; line: number; col: number }
-
-interface CNode {
-  kind: string
-  span: Span
-  children: any[]
-  trivia: { leading: any[]; trailing: any[] }
-  [extra: string]: any
-}
-
-function makeNode(kind: string, span: Span | undefined): CNode {
-  return {
-    kind,
-    span: span ?? zeroSpan(),
-    children: [],
-    trivia: { leading: [], trailing: [] },
-  }
-}
-
-const ASSIGN_NAMES = new Set([
+const ASSIGN_OPS = new Set([
   'assign-infix', 'plus_a-infix', 'minus_a-infix', 'star_a-infix',
   'slash_a-infix', 'pct_a-infix', 'lsh_a-infix', 'rsh_a-infix',
   'amp_a-infix', 'crt_a-infix', 'pipe_a-infix',
 ])
 
-function isAssignName(name: string): boolean {
-  return ASSIGN_NAMES.has(name)
+// ---- The links between an operation's tokens --------------------------
+//
+// expr hands evaluate each operation's own token: an operator's, a
+// paren's closer, a conditional's `?`. The opener of a paren, the commas
+// between a call's arguments and a conditional's `:` are reached from
+// it, through links made as the tokens are lexed: a closer's `use.open`
+// is its opener, an opener's `use.seps` the commas directly inside it,
+// and a `?`'s `use.colon` the `:` that answers it.
+
+interface Level { opener?: Token; qs: Token[] }
+
+interface LinkState { levels: Level[]; last?: Token }
+
+const OPENERS = new Set(['PUNC_LPAREN', 'PUNC_LBRACKET', 'PUNC_LBRACE'])
+const CLOSER_OF: Record<string, string> = {
+  PUNC_RPAREN: 'PUNC_LPAREN',
+  PUNC_RBRACKET: 'PUNC_LBRACKET',
+  PUNC_RBRACE: 'PUNC_LBRACE',
+}
+
+export function newLinks(): LinkState {
+  return { levels: [{ qs: [] }] }
+}
+
+function use(tkn: Token): any {
+  return ((tkn as any).use = (tkn as any).use || {})
+}
+
+// Link a token the lexer gave the parser, in the order it gave them. A
+// token given again at the same place (the engine's relex) takes the
+// place of the one before it.
+export function linkToken(links: LinkState, tkn: Token): void {
+  const last = links.last
+  if (last && last.sI === tkn.sI) {
+    const was = use(last)
+    const now = use(tkn)
+    for (const key of ['open', 'seps', 'colon']) {
+      if (undefined !== was[key] && undefined === now[key]) now[key] = was[key]
+    }
+    for (const level of links.levels) {
+      if (level.opener === last) level.opener = tkn
+      const qi = level.qs.indexOf(last)
+      if (qi >= 0) level.qs[qi] = tkn
+    }
+    links.last = tkn
+    return
+  }
+  links.last = tkn
+  const levels = links.levels
+  const top = levels[levels.length - 1]
+  const name = tkn.name
+  if (OPENERS.has(name)) {
+    levels.push({ opener: tkn, qs: [] })
+    return
+  }
+  const opens = CLOSER_OF[name]
+  if (undefined !== opens) {
+    for (let i = levels.length - 1; i > 0; i--) {
+      const opener = levels[i].opener as Token
+      if (opener.name === opens) {
+        use(tkn).open = opener
+        levels.length = i
+        break
+      }
+    }
+    return
+  }
+  if ('PUNC_COMMA' === name) {
+    if (top.opener) (use(top.opener).seps ??= []).push(tkn)
+    return
+  }
+  if ('PUNC_QUESTION' === name) {
+    top.qs.push(tkn)
+    return
+  }
+  if ('PUNC_COLON' === name) {
+    const q = top.qs.pop()
+    if (q) use(q).colon = tkn
+    return
+  }
+  if ('PUNC_SEMI' === name) {
+    top.qs.length = 0
+  }
+}
+
+const linked = (tkn: Token | undefined, key: string): any =>
+  tkn && (tkn as any).use ? (tkn as any).use[key] : undefined
+
+// ---- evaluate: an operation as C's node -----------------------------
+
+function nodeOf(term: any): CNode | undefined {
+  return isNode(term) ? term : undefined
+}
+
+function push(node: CNode, term: any): void {
+  if (isNode(term)) node.children.push(term)
+}
+
+function drop(node: CNode, tkn: Token | undefined): void {
+  if (tkn && (tkn as any).isToken) dropToken(node, tkn)
+}
+
+function keep(node: CNode, tkn: Token | undefined): void {
+  if (tkn && (tkn as any).isToken) keepToken(node, tkn)
+}
+
+// An infix operation: the left operand, the operator's comments, the
+// right operand.
+function infix(kind: string, op: any, terms: any[]): CNode {
+  const out = makeNode(kind)
+  push(out, terms[0])
+  drop(out, op.token)
+  push(out, terms[1])
+  return out
+}
+
+// A comma expression holds every operand of a chain of commas: expr
+// builds `a, b, c` left to right, `[, [, a b] c]`, and the inner one is
+// the outer one's first operand. A parenthesised one is a group's.
+function comma(op: any, terms: any[]): CNode {
+  const left = nodeOf(terms[0])
+  let out: CNode
+  if (left && 'comma_expression' === left.kind) {
+    out = left
+    unfixSpan(out)
+  } else {
+    out = makeNode('comma_expression')
+    push(out, left)
+  }
+  drop(out, op.token)
+  push(out, terms[1])
+  return out
+}
+
+function member(op: any, terms: any[]): CNode {
+  const out = makeNode('member_expression')
+  push(out, terms[0])
+  drop(out, op.token)
+  const name = nodeOf(terms[1])
+  push(out, name)
+  if (name && 'string' === typeof name.name) out.memberName = name.name
+  out.op = op.src
+  return out
+}
+
+function conditional(op: any, terms: any[]): CNode {
+  const out = makeNode('conditional_expression')
+  push(out, terms[0])
+  drop(out, op.token)
+  push(out, terms[1])
+  drop(out, linked(op.token, 'colon'))
+  push(out, terms[2])
+  return out
+}
+
+function unary(op: any, terms: any[]): CNode {
+  const out = makeNode('unary_expression')
+  out.op = op.src
+  drop(out, op.token)
+  push(out, terms[0])
+  return out
+}
+
+function postfix(op: any, terms: any[]): CNode {
+  const out = makeNode('postfix_unary_expression')
+  push(out, terms[0])
+  drop(out, op.token)
+  out.op = op.src
+  return out
+}
+
+function call(op: any, terms: any[]): CNode {
+  const out = makeNode('call_expression')
+  const callee = nodeOf(terms[0])
+  push(out, callee)
+  if (callee && 'identifier_expression' === callee.kind) {
+    out.callee = callee.name
+    const idTok = callee.children.find(
+      (c: any) => c && 'token' === c.kind && !String(c.tname).startsWith('TRIVIA'))
+    out.isMacro = !!(idTok && 'MACRO_NAME' === (idTok as any).tname)
+  }
+  const closer = op.token as Token
+  const opener = linked(closer, 'open') as Token | undefined
+  const seps: Token[] = linked(opener, 'seps') || []
+  const args = makeNode('argument_list')
+  drop(args, opener)
+  for (let i = 1; i < terms.length; i++) {
+    if (i > 1) drop(args, seps[i - 2])
+    push(args, terms[i])
+  }
+  drop(args, closer)
+  out.children.push(args)
+  return out
+}
+
+function subscript(op: any, terms: any[]): CNode {
+  const out = makeNode('subscript_expression')
+  push(out, terms[0])
+  const closer = op.token as Token
+  const index = makeNode('index_list')
+  drop(index, linked(closer, 'open'))
+  for (let i = 1; i < terms.length; i++) push(index, terms[i])
+  drop(index, closer)
+  out.children.push(index)
+  return out
+}
+
+// A parenthesised expression.
+function group(op: any, terms: any[]): CNode {
+  const out = makeNode('paren_expression')
+  const closer = op.token as Token
+  drop(out, linked(closer, 'open'))
+  for (const t of terms) push(out, t)
+  drop(out, closer)
+  return out
+}
+
+// The nodes a postfix operator builds, each over its first child node:
+// a compound literal's postfix chain is built over its brace list.
+const POSTFIX_KINDS = new Set([
+  'member_expression', 'subscript_expression', 'call_expression',
+  'postfix_unary_expression',
+])
+
+// A cast: `( type-name )` and its operand. A brace list in the operand's
+// place is a compound literal, which binds as a postfix expression does:
+// expr builds the postfix operators after it into the cast's operand, so
+// the compound literal takes the brace list's place under them.
+function cast(op: any, terms: any[]): CNode {
+  const closer = op.token as Token
+  const opener = linked(closer, 'open') as Token | undefined
+  const typeName = nodeOf(terms[0])
+  const operand = nodeOf(terms[1])
+
+  const parens = (kind: string, body: CNode | undefined): CNode => {
+    const out = makeNode(kind)
+    keep(out, opener)
+    push(out, typeName)
+    keep(out, closer)
+    push(out, body)
+    return out
+  }
+
+  const chain: CNode[] = []
+  let n = operand
+  while (n && POSTFIX_KINDS.has(n.kind)) {
+    chain.push(n)
+    n = childNodes(n)[0]
+  }
+  if (n && 'initializer_list' === n.kind) {
+    const literal = parens('compound_literal', n)
+    const parent = chain[chain.length - 1]
+    if (!parent) return literal
+    const i = parent.children.indexOf(n)
+    parent.children[i] = literal
+    // The chain's nodes start with the compound literal's `(` now.
+    for (const c of chain) unfixSpan(c)
+    return operand as CNode
+  }
+  return parens('cast_expression', operand)
+}
+
+export function evaluateCExpr(
+  _rule: Rule, _ctx: Context, op: any, terms: any[],
+): any {
+  const out = evaluateOp(op, terms)
+  // Each operation's node is given its span as it is built, from the
+  // innermost out: the span of the first token it keeps, which every
+  // expression's node has. An external declaration gives the rest of its
+  // tree theirs when it ends, and an expression parsed on its own (the
+  // start rule `val`) has no declaration to give them.
+  if (isNode(out)) fixSpans(out)
+  return out
+}
+
+function isRoot(rule: Rule, ctx: Context): boolean {
+  const norule = (ctx as any).NORULE
+  const parent: any = rule ? (rule as any).parent : undefined
+  return rule === norule || !parent || parent === norule
+}
+
+function evaluateOp(op: any, terms: any[]): any {
+  const name: string = op.name
+  if (op.cast) return cast(op, terms)
+  if (op.paren) {
+    if ('call-paren' === name) return call(op, terms)
+    if ('subscript-paren' === name) return subscript(op, terms)
+    return group(op, terms)
+  }
+  if (op.ternary) return conditional(op, terms)
+  if (op.infix) {
+    if ('comma-infix' === name) return comma(op, terms)
+    if (ASSIGN_OPS.has(name)) {
+      const out = infix('assignment_expression', op, terms)
+      out.op = op.src
+      return out
+    }
+    if ('dot-infix' === name || 'arrow-infix' === name) return member(op, terms)
+    const out = infix('binary_expression', op, terms)
+    out.op = op.src
+    return out
+  }
+  if (op.prefix) return unary(op, terms)
+  if (op.suffix) return postfix(op, terms)
+  const out = makeNode('expression')
+  for (const t of terms) push(out, t)
+  return out
+}
+
+// ---- val: where an expression starts --------------------------------
+
+// The rules of expr's own: a `val` they push is a term of the
+// expression being read, not a new one.
+const EXPR_OWN = new Set([
+  'val', 'expr', 'paren', 'ternary', 'list', 'map', 'elem', 'pair',
+])
+
+// The contexts whose expression is a full one, where a comma is the
+// comma operator; in every other a comma ends the expression, for the
+// context to take (an assignment or a conditional expression, in C's
+// grammar).
+const FULL_EXPRESSION = new Set([
+  'expression_statement', 'jump_statement', 'paren_condition',
+  'for_init', 'for_cond', 'for_iter', 'asm_value',
+])
+
+// The C rules a `val` pushes for a term, whose node is the term's.
+const TERM_RULES = new Set([
+  'type_name', 'sizeof_type_form', 'initializer_list', 'string_atom',
+  'generic_selection', 'statement_expression',
+])
+
+// C's values: an identifier or a literal, which never directly follows
+// an operand.
+const JUXTAPOSED = new Set([
+  'ID', 'TYPEDEF_NAME', 'MACRO_NAME',
+  'LIT_INT', 'LIT_FLOAT', 'LIT_CHAR', 'LIT_STRING',
+])
+
+// A literal or an identifier, from its one token.
+function atom(kind: string, tkn: Token): CNode {
+  const node = makeNode(kind, tokenRef(tkn).span)
+  keepToken(node, tkn)
+  if ('literal_expression' === kind) {
+    node.literalKind = tkn.name
+    node.value = tkn.src
+  } else {
+    node.name = tkn.src
+  }
+  return node
+}
+
+function atomAction(kind: string) {
+  return (rule: Rule): void => {
+    rule.node = atom(kind, rule.o0 as Token)
+  }
+}
+
+// Is the val the first term of a group's content, where a type name is
+// the group's own (a cast's or a compound literal's)?
+function groupContent(rule: Rule): boolean {
+  const paren: any = (rule as any).parent
+  return !!paren && 'paren' === paren.name && !!paren.u.expr_paren_group &&
+    undefined === paren.u.expr_items
+}
+
+export function installExpr(tn: Tabnas): void {
+  tn.use(Expr as any, {
+    op: C_OP_TABLE as any,
+    evaluate: evaluateCExpr as any,
+    juxtapose: false,
+    values: [...JUXTAPOSED],
+  })
+
+  tn.rule('val', (rs: RuleSpec) => {
+    // A new expression, from one of C's contexts: expr's counters start
+    // again (the expression around a statement expression or a brace
+    // list is not this one's), and the context says whether a comma
+    // separates.
+    rs.bo((rule: Rule) => {
+      const parent: any = (rule as any).parent
+      if (parent && !EXPR_OWN.has(parent.name)) {
+        const n: any = rule.n
+        n.expr = 0
+        n.expr_prefix = 0
+        n.expr_suffix = 0
+        n.expr_paren = 0
+        n.expr_ternary = 0
+        n.expr_sep = FULL_EXPRESSION.has(parent.name) ? 0 : 1
+        n.dlist = 0
+        n.dmap = 0
+        n.pk = 0
+      }
+      rule.node = undefined as any
+    })
+
+    // The forms that expr's own alternates would take otherwise: a type
+    // name after `sizeof (`, a statement expression `( {`, `_Generic`, a
+    // brace list, and a type name as a group's content (a cast's).
+    rs.open([
+      { s: '#SIZEOF_KW PUNC_LPAREN #SIMPLE_TYPE_HEAD', b: 3,
+        p: 'sizeof_type_form', g: 'c-sizeof-type' },
+      { s: 'PUNC_LPAREN PUNC_LBRACE', b: 2, p: 'statement_expression',
+        g: 'c-stmt-expr' },
+      { s: 'KW__GENERIC', b: 1, p: 'generic_selection', g: 'c-generic' },
+      { s: 'PUNC_LBRACE', b: 1, p: 'initializer_list', g: 'c-brace-list' },
+      { s: '#SIMPLE_TYPE_HEAD', b: 1, c: groupContent, p: 'type_name',
+        g: 'c-type-name' },
+    ] as any, { append: false } as any)
+
+    // C's atoms.
+    rs.open([
+      { s: 'LIT_INT', a: atomAction('literal_expression'), g: 'c-atom,c-int' },
+      { s: 'LIT_FLOAT', a: atomAction('literal_expression'), g: 'c-atom,c-float' },
+      { s: 'LIT_CHAR', a: atomAction('literal_expression'), g: 'c-atom,c-char' },
+      { s: 'KW_NULLPTR', a: atomAction('literal_expression'), g: 'c-atom,c-nullptr' },
+      { s: 'KW_TRUE', a: atomAction('literal_expression'), g: 'c-atom,c-true' },
+      { s: 'KW_FALSE', a: atomAction('literal_expression'), g: 'c-atom,c-false' },
+      { s: 'LIT_STRING', b: 1, p: 'string_atom', g: 'c-atom,c-str' },
+      { s: 'ID', a: atomAction('identifier_expression'), g: 'c-atom,c-id' },
+      { s: 'MACRO_NAME', a: atomAction('identifier_expression'), g: 'c-atom,c-macro' },
+      { s: 'TYPEDEF_NAME', a: atomAction('identifier_expression'), g: 'c-atom,c-typedef' },
+    ] as any, { append: true } as any)
+
+    // The expression ends where no operator follows. An identifier or a
+    // literal, which never directly follows an operand in C, expr refuses
+    // before this (its `values`).
+    rs.close([
+      { g: 'c-val-end' },
+    ] as any, { append: true } as any)
+
+    // A C rule a term pushed: its node is the term's.
+    rs.bc((rule: Rule) => {
+      const child: any = (rule as any).child
+      if (child && TERM_RULES.has(child.name) && child.node &&
+          child !== rule.u.seenTerm) {
+        rule.u.seenTerm = child
+        rule.node = child.node
+      }
+    })
+
+    // An expression parsed on its own (the start rule `val`): its spans,
+    // as an external declaration's are given when it ends.
+    rs.ac((rule: Rule, ctx: Context) => {
+      if (isRoot(rule, ctx) && isNode(rule.node)) fixSpans(rule.node)
+    })
+  })
+}
+
+// The rules an expression is built in, whose node a context reads back.
+export function isExpressionRule(rule: Rule | undefined): boolean {
+  return !!rule && 'val' === rule.name
 }

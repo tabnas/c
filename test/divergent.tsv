@@ -24,19 +24,13 @@ input	ts	go	rust	why
 # under Node over a type-stripped copy of ts/src/c.ts, the Go port through
 # a driver binary, and the Rust port through cargo test.
 #
-# --- 1. A ternary in a declaration initializer --------------------------
-# The conditional_expression node holds itself among its descendants, so
-# every walk over the tree runs forever. TypeScript throws a catchable
-# RangeError; Go and a straight port into Rust kill the process. This port
-# refuses to enter a node twice and bounds the realize walk, so the parse
-# fails the way a parse fails.
+# From 0.6 every runtime builds the canonical's tree with its rules, and
+# the ternary and the initializer item that had rows here agree: the
+# register holds no row.
 #
-# The cycle needs the ternary to be the WHOLE initializer: `int a = (b ? c
-# : d);` parses in every runtime, measured, so it is not a row here.
-int a = b ? c : d;	ABORT	ABORT	ERROR:cancel	DIVERGENCE.md#1; upstream, the canonical builds the cycle
-# --- 2. Source nested deeper than the realize cap -----------------------
+# --- 1. Source nested deeper than the realize cap -----------------------
 # Not expressible here: the input is thousands of braces, far larger than a
 # cell, and the TypeScript and Go answers depend on the stack the process
 # happens to have. Pinned by nesting_at_the_cap, nesting_past_the_cap and
 # every_recursive_construct_stops_at_the_cap in rs/tests/limits_test.rs,
-# and written up in DIVERGENCE.md#2.
+# and written up in DIVERGENCE.md#1.
