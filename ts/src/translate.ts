@@ -13,6 +13,7 @@ type TranslationParts = Readonly<{
   lift?: TranslationPart
   embed?: TranslationPart
   render?: TranslationPart
+  transduce?: TranslationPart
 }>
 
 const TRANSLATION: TranslationParts = Object.freeze({
@@ -53,6 +54,7 @@ const TRANSLATION: TranslationParts = Object.freeze({
     "root": "object",
     "schema": "c",
     "render": "alchemy/render.alc",
+    "transduce": "alchemy/transduce.alc",
     "loss": [
       "White space is written as spaces and line feeds, each token where its span puts it, so comments and layout come back with every token's line, column and offset: a tab, a form feed, a vertical tab and a carriage return are each written as a space, which the reader counts as one column and one offset as it counts them, and white space after the last token is not written.",
       "A comment after the last token is not in the tree, which keeps a comment only as a token before another, so it is not written.",
@@ -61,8 +63,7 @@ const TRANSLATION: TranslationParts = Object.freeze({
       "A _BitInt's width is not in the tree, since the reader drops the parenthesised width, so the type is written _BitInt() with nothing between the parentheses, which reads back as the same tree and which a compiler refuses.",
       "The parameter list after a parenthesised declarator (the (int) of int (*fp)(int), or of an abstract int (*)(int)) is not in the tree, so it is not written, and the declarator reads back as the same tree, a pointer rather than a pointer to a function.",
       "A prefix operator standing alone as a brace-initializer item ({-1L, &x}) is kept as a raw operator array: the TypeScript reader keeps the operator's position, so it is written in place, and the Go reader, which wraps the array in a Val member, keeps none, so it is written as other operators are. Where the Rust reader drops such an item's expression (DIVERGENCE.md), the item is written empty, and the text does not read back as the same tree."
-    ],
-    "whole": "A conditional group, from its #if, #ifdef or #ifndef to its #endif, is folded into one node with the code between its directives only once the whole translation unit is parsed, so a document's tree is complete only at its end: it is read whole before anything is written."
+    ]
   }
 }
 `,
@@ -1171,6 +1172,3802 @@ def c-render [input]
   concat-map c-file
     select root
       as-events (scan-emit [] c-filter-step c-filter-finish (events input))
+` }),
+  transduce: Object.freeze({ entry: "c-transduce", source: `; C's transducer part: the reader's tree, the JSON events of C's concrete
+; syntax tree, from the C grammar's rule passes with their token items
+; (\`parser-events input :tokens\`), for a host that reads parser events
+; (dmog's \`translate\` and \`run --grammar c\`). Its entry is
+; \`c-transduce\`.
+;
+; The reader builds its tree in the actions of its rules (ts/src/c.ts and
+; its Go and Rust ports), and in tabnas/expr's rules with C's evaluator
+; (ts/src/expr-grammar.ts). A pass says which rule ran, in which state,
+; which alternate matched (its group) and which tokens it took, so the
+; part follows the engine's stack a frame per rule (\`c-tr-enter\`, \`c-tr-pop\`)
+; and runs, for each pass, what the reader's actions do for that rule,
+; state and alternate: each rule's handler (\`c-h-<rule>\`), in the phases
+; the engine runs them (before, the alternate's action, after). The
+; grammar's conditions need no port: a pass names the alternate they
+; chose.
+;
+; A node the actions build is a register, written by reference as the
+; reader writes an object, and held as a placeholder where a rule puts it
+; in another node; a frame keeps the registers it made, and its end hands
+; them to the rule below it. Comments come as token items, and each joins
+; the token after it, which keeps it or drops it where the reader does.
+;
+; Expressions are placed here, over the tokens and alternates of expr's
+; passes: each operator by its binding powers, from a copy of C's operator
+; table (\`c-tr-op-table\`, held to C_OP_TABLE by a test in every runtime), as
+; expr places it, holding one expression at a time; C's evaluator then
+; makes each operation C's node (\`c-tr-x-eval\`). The maintainer ruled on
+; 2026-11-13: C's part places each operator over expr's passes, with a
+; copy of C's operator table in alchemy text, held to the parser's tree
+; by tests.
+;
+; What is written when: the translation unit's items as each ends (a
+; conditional group as its #endif closes it); a function definition the
+; rules hold to (not an armed one, which may still fall back to its
+; tokens) from its body's \`{\`, its statements as each ends, and each
+; statement that holds statements as it is read (\`c-tr-stream-open\`); a node
+; whose children come in order is written so, and the registers of each
+; child written go. A declaration, a statement that holds no statement,
+; an expression and an armed declaration are held until they end.
+; ---- small helpers
+
+def c-tr-not [b]
+  match b
+    case true false
+    case _ true
+
+def c-tr-and [a b]
+  match a
+    case true b
+    case _ false
+
+def c-tr-or [a b]
+  match a
+    case true true
+    case _ b
+
+def c-tr-nth [n v] (get-path (path n) v)
+
+def c-tr-has [x xs] (c-tr-not (equal 0 (count (filter (fn [y] (equal x y)) xs))))
+
+def c-tr-or-empty [v]
+  match v
+    case missing []
+    case _ (as-vector v)
+
+def c-tr-num-or [d v]
+  match v
+    case missing d
+    case _ v
+
+; ---- tokens
+;
+; A token as the tree keeps it: its name, its text, its span, and the
+; comments the lexer put before it (\`lead\`), each a token of its own.
+
+def c-tr-span [start end line col]
+  record
+    entry :start start
+    entry :end end
+    entry :line line
+    entry :col col
+
+def c-tr-tok-span [t]
+  c-tr-span (get :offset t) (add (get :offset t) (length (get :src t))) (get :row t) (get :col t)
+
+def c-tr-tok [tname src span lead]
+  record
+    entry :t :tok
+    entry :tname tname
+    entry :src src
+    entry :span span
+    entry :lead lead
+
+def c-tr-bare [tok] (c-tr-tok (get :tname tok) (get :src tok) (get :span tok) [])
+
+def c-tr-trivia-name [tname]
+  match tname
+    case "TRIVIA_BLOCK_COMMENT" true
+    case "TRIVIA_LINE_COMMENT" true
+    case "TRIVIA_LINE_CONT" true
+    case _ false
+
+def c-tr-is-tok [v]
+  match (kind v)
+    case :record (equal :tok (get :t v))
+    case _ false
+
+; ---- nodes
+;
+; A node: its kind, its children (tokens, nodes, and placeholders of
+; registers), and its other members as [key value] pairs, in the order
+; they were first set.
+
+def c-tr-node [kind children ex]
+  record
+    entry :t :node
+    entry :kind kind
+    entry :children children
+    entry :ex ex
+
+def c-tr-new [kind] (c-tr-node kind [] [])
+
+def c-tr-is-node [v]
+  match (kind v)
+    case :record (equal :node (get :t v))
+    case _ false
+
+def c-tr-kids [n] (as-vector (get :children n))
+
+def c-tr-with-children [children n] (c-tr-node (get :kind n) children (as-vector (get :ex n)))
+
+def c-tr-push-child [item n] (c-tr-with-children (push item (c-tr-kids n)) n)
+
+def c-tr-push-children [items n] (c-tr-with-children (push-all items (c-tr-kids n)) n)
+
+def c-tr-set-ex [k v n]
+  let [ex (as-vector (get :ex n))]
+    match (c-tr-has k (map (fn [e] (c-tr-nth 0 e)) ex))
+      case false (c-tr-node (get :kind n) (c-tr-kids n) (push [k v] ex))
+      case _ (c-tr-node (get :kind n) (c-tr-kids n) (map (fn [e] (if (equal (c-tr-nth 0 e) k) [k v] e)) ex))
+
+def c-tr-get-ex [k n]
+  match n
+    case missing missing
+    case _
+      let [m (filter (fn [e] (equal (c-tr-nth 0 e) k)) (as-vector (get :ex n)))]
+        match (count m)
+          case 0 missing
+          case _ (c-tr-nth 1 (top m))
+
+def c-tr-set-kind [kind n] (c-tr-node kind (c-tr-kids n) (as-vector (get :ex n)))
+
+; Keep a token: its comments, then itself.
+def c-tr-keep [tok n] (c-tr-push-children (push (c-tr-bare tok) (as-vector (get :lead tok))) n)
+
+; Drop a token: its comments stay, at its place.
+def c-tr-drop [tok n] (c-tr-push-children (as-vector (get :lead tok)) n)
+
+; The child nodes of a node, tokens left out.
+def c-tr-child-nodes [n] (filter c-tr-is-node (c-tr-kids n))
+
+; ---- bags: a rule's u and k, as entries {k v}
+
+def c-tr-kv [key value] (record (entry :k key) (entry :v value))
+
+def c-tr-bag-get [key bag]
+  let [m (filter (fn [e] (equal (get :k e) key)) bag)]
+    match (count m)
+      case 0 missing
+      case _ (get :v (top m))
+
+def c-tr-bag-set [key value bag] (push (c-tr-kv key value) (c-tr-bag-del key bag))
+
+; A register's node replaced in place: the registers stay in the order
+; they were made, which their ids are.
+def c-tr-reg-put [id n regs] (map (fn [e] (if (equal (get :id e) id) (c-tr-rg id n) e)) regs)
+
+def c-tr-bag-del [key bag] (filter (fn [e] (c-tr-not (equal (get :k e) key))) bag)
+
+def c-tr-bag-dels [keys bag] (filter (fn [e] (c-tr-not (c-tr-has (get :k e) keys))) bag)
+
+; ---- frames: the rules on the engine's stack, as the part follows them
+;
+; A frame is a rule: its name and instance; its node (a register's
+; reference, the one it inherited from the rule that pushed it or the one
+; it made); its u and k bags; the registers it made; the child that last
+; closed under it; the rule it replaced (\`prev\`, by name); the first
+; instance of its chain (what a parent reads as its child: its instance,
+; name, node and u); the first token of its open pass; and whether it is
+; the val an expression of one of C's contexts starts at.
+
+def c-tr-frame [name i node u k regs child prev fi fname fnode xroot slot]
+  record
+    entry :name name
+    entry :i i
+    entry :node node
+    entry :u u
+    entry :k k
+    entry :regs regs
+    entry :child child
+    entry :prev prev
+    entry :fi fi
+    entry :fname fname
+    entry :fnode fnode
+    entry :xroot xroot
+    entry :slot slot
+
+; One field of a frame replaced, the most written first.
+def c-tr-fr-set [field value f]
+  match field
+    case :regs (c-tr-frame (get :name f) (get :i f) (get :node f) (get :u f) (get :k f) value (get :child f) (get :prev f) (get :fi f) (get :fname f) (get :fnode f) (get :xroot f) (get :slot f))
+    case :k (c-tr-frame (get :name f) (get :i f) (get :node f) (get :u f) value (get :regs f) (get :child f) (get :prev f) (get :fi f) (get :fname f) (get :fnode f) (get :xroot f) (get :slot f))
+    case :u (c-tr-frame (get :name f) (get :i f) (get :node f) value (get :k f) (get :regs f) (get :child f) (get :prev f) (get :fi f) (get :fname f) (get :fnode f) (get :xroot f) (get :slot f))
+    case :node (c-tr-frame (get :name f) (get :i f) value (get :u f) (get :k f) (get :regs f) (get :child f) (get :prev f) (get :fi f) (get :fname f) (get :fnode f) (get :xroot f) (get :slot f))
+    case :child (c-tr-frame (get :name f) (get :i f) (get :node f) (get :u f) (get :k f) (get :regs f) value (get :prev f) (get :fi f) (get :fname f) (get :fnode f) (get :xroot f) (get :slot f))
+    case :fnode (c-tr-frame (get :name f) (get :i f) (get :node f) (get :u f) (get :k f) (get :regs f) (get :child f) (get :prev f) (get :fi f) (get :fname f) value (get :xroot f) (get :slot f))
+    case :slot (c-tr-frame (get :name f) (get :i f) (get :node f) (get :u f) (get :k f) (get :regs f) (get :child f) (get :prev f) (get :fi f) (get :fname f) (get :fnode f) (get :xroot f) value)
+    case :xroot (c-tr-frame (get :name f) (get :i f) (get :node f) (get :u f) (get :k f) (get :regs f) (get :child f) (get :prev f) (get :fi f) (get :fname f) (get :fnode f) value (get :slot f))
+    case :name (c-tr-frame value (get :i f) (get :node f) (get :u f) (get :k f) (get :regs f) (get :child f) (get :prev f) (get :fi f) (get :fname f) (get :fnode f) (get :xroot f) (get :slot f))
+    case :i (c-tr-frame (get :name f) value (get :node f) (get :u f) (get :k f) (get :regs f) (get :child f) (get :prev f) (get :fi f) (get :fname f) (get :fnode f) (get :xroot f) (get :slot f))
+    case :prev (c-tr-frame (get :name f) (get :i f) (get :node f) (get :u f) (get :k f) (get :regs f) (get :child f) value (get :fi f) (get :fname f) (get :fnode f) (get :xroot f) (get :slot f))
+    case :fi (c-tr-frame (get :name f) (get :i f) (get :node f) (get :u f) (get :k f) (get :regs f) (get :child f) (get :prev f) value (get :fname f) (get :fnode f) (get :xroot f) (get :slot f))
+    case :fname (c-tr-frame (get :name f) (get :i f) (get :node f) (get :u f) (get :k f) (get :regs f) (get :child f) (get :prev f) (get :fi f) value (get :fnode f) (get :xroot f) (get :slot f))
+    case _ f
+
+; ---- the state
+;
+; frames, innermost last; and two records, hot, the fields most passes
+; write, and cold, the rest, so that a write rebuilds only its part.
+;
+; hot: next, what the next open pass is ([:push], [:replace] or [:none]);
+; out, the events this step writes; pend, the comments before the next
+; token a pass takes; xs, the expressions being read, innermost last;
+; nreg, the next register's id.
+;
+; cold: ed, the external declaration's fallback state (c-tr-ed-new); taken,
+; the tokens an armed external declaration has taken, in order; tu,
+; whether the translation unit's opening has been written, and its span;
+; st, the nodes being written as their children end, innermost last
+; (c-tr-stream-open); nextslot, the streamed node the next pushed rule's
+; node is the next child of; lastclosed, the streamed node written last,
+; which its parent then takes as a child already written.
+
+def c-tr-state [frames hot cold]
+  record
+    entry :frames frames
+    entry :hot hot
+    entry :cold cold
+
+def c-tr-hot [next out pend xs nreg]
+  record
+    entry :next next
+    entry :out out
+    entry :pend pend
+    entry :xs xs
+    entry :nreg nreg
+
+def c-tr-cold [ed taken tu st nextslot lastclosed]
+  record
+    entry :ed ed
+    entry :taken taken
+    entry :tu tu
+    entry :st st
+    entry :nextslot nextslot
+    entry :lastclosed lastclosed
+
+; A field of the state.
+def c-tr-sg [field s]
+  match field
+    case :next (get :next (get :hot s))
+    case :out (get :out (get :hot s))
+    case :pend (get :pend (get :hot s))
+    case :xs (get :xs (get :hot s))
+    case :nreg (get :nreg (get :hot s))
+    case :ed (get :ed (get :cold s))
+    case :taken (get :taken (get :cold s))
+    case :tu (get :tu (get :cold s))
+    case :st (get :st (get :cold s))
+    case :nextslot (get :nextslot (get :cold s))
+    case :lastclosed (get :lastclosed (get :cold s))
+    case _ (get field s)
+
+; One field of the state replaced.
+def c-tr-st-set [field value s]
+  match field
+    case :frames (c-tr-state value (get :hot s) (get :cold s))
+    case :next (let [h (get :hot s)] (c-tr-state (get :frames s) (c-tr-hot value (get :out h) (get :pend h) (get :xs h) (get :nreg h)) (get :cold s)))
+    case :out (let [h (get :hot s)] (c-tr-state (get :frames s) (c-tr-hot (get :next h) value (get :pend h) (get :xs h) (get :nreg h)) (get :cold s)))
+    case :pend (let [h (get :hot s)] (c-tr-state (get :frames s) (c-tr-hot (get :next h) (get :out h) value (get :xs h) (get :nreg h)) (get :cold s)))
+    case :xs (let [h (get :hot s)] (c-tr-state (get :frames s) (c-tr-hot (get :next h) (get :out h) (get :pend h) value (get :nreg h)) (get :cold s)))
+    case :nreg (let [h (get :hot s)] (c-tr-state (get :frames s) (c-tr-hot (get :next h) (get :out h) (get :pend h) (get :xs h) value) (get :cold s)))
+    case :ed (let [c (get :cold s)] (c-tr-state (get :frames s) (get :hot s) (c-tr-cold value (get :taken c) (get :tu c) (get :st c) (get :nextslot c) (get :lastclosed c))))
+    case :taken (let [c (get :cold s)] (c-tr-state (get :frames s) (get :hot s) (c-tr-cold (get :ed c) value (get :tu c) (get :st c) (get :nextslot c) (get :lastclosed c))))
+    case :tu (let [c (get :cold s)] (c-tr-state (get :frames s) (get :hot s) (c-tr-cold (get :ed c) (get :taken c) value (get :st c) (get :nextslot c) (get :lastclosed c))))
+    case :st (let [c (get :cold s)] (c-tr-state (get :frames s) (get :hot s) (c-tr-cold (get :ed c) (get :taken c) (get :tu c) value (get :nextslot c) (get :lastclosed c))))
+    case :nextslot (let [c (get :cold s)] (c-tr-state (get :frames s) (get :hot s) (c-tr-cold (get :ed c) (get :taken c) (get :tu c) (get :st c) value (get :lastclosed c))))
+    case :lastclosed (let [c (get :cold s)] (c-tr-state (get :frames s) (get :hot s) (c-tr-cold (get :ed c) (get :taken c) (get :tu c) (get :st c) (get :nextslot c) value)))
+    case _ s
+
+def c-tr-init [] (c-tr-state [] (c-tr-hot [:none] [] [] [] 0) (c-tr-cold (c-tr-ed-new) [] missing [] missing missing))
+
+def c-tr-frames [s] (as-vector (get :frames s))
+def c-tr-depth [s] (count (c-tr-frames s))
+def c-tr-cur [s] (top (c-tr-frames s))
+def c-tr-set-cur [f s] (c-tr-st-set :frames (push f (pop (c-tr-frames s))) s)
+def c-tr-frame-at [i s] (c-tr-nth i (c-tr-frames s))
+; Frame i replaced: the top two by popping and pushing, any other by a
+; walk of the stack.
+def c-tr-frames-set [i f frames]
+  let [n (count frames)]
+    match (sub n i)
+      case 1 (push f (pop frames))
+      case 2 (push (top frames) (push f (pop (pop frames))))
+      case _ (map (fn [j] (if (equal j i) f (c-tr-nth j frames))) (indices frames))
+def c-tr-set-frame-at [i f s] (c-tr-st-set :frames (c-tr-frames-set i f (c-tr-frames s)) s)
+
+; Write events: they leave with this step.
+def c-tr-out [events s] (c-tr-st-set :out (push-all events (as-vector (get :out (get :hot s)))) s)
+
+; ---- u and k
+
+def c-tr-u [key s] (c-tr-bag-get key (as-vector (get :u (c-tr-cur s))))
+def c-tr-u-true [key s] (equal true (c-tr-u key s))
+def c-tr-set-u [key value s] (c-tr-set-cur (c-tr-fr-set :u (c-tr-bag-set key value (as-vector (get :u (c-tr-cur s)))) (c-tr-cur s)) s)
+
+def c-tr-k [key s] (c-tr-bag-get key (as-vector (get :k (c-tr-cur s))))
+def c-tr-k-true [key s] (equal true (c-tr-k key s))
+def c-tr-set-k [key value s] (c-tr-set-cur (c-tr-fr-set :k (c-tr-bag-set key value (as-vector (get :k (c-tr-cur s)))) (c-tr-cur s)) s)
+def c-tr-del-k [key s] (c-tr-set-cur (c-tr-fr-set :k (c-tr-bag-del key (as-vector (get :k (c-tr-cur s)))) (c-tr-cur s)) s)
+def c-tr-del-ks [keys s] (c-tr-set-cur (c-tr-fr-set :k (c-tr-bag-dels keys (as-vector (get :k (c-tr-cur s)))) (c-tr-cur s)) s)
+
+def c-tr-u-at [i key s] (c-tr-bag-get key (as-vector (get :u (c-tr-frame-at i s))))
+def c-tr-set-u-at [i key value s]
+  let [f (c-tr-frame-at i s)]
+    c-tr-set-frame-at i (c-tr-fr-set :u (c-tr-bag-set key value (as-vector (get :u f))) f) s
+
+def c-tr-k-at [i key s] (c-tr-bag-get key (as-vector (get :k (c-tr-frame-at i s))))
+def c-tr-set-k-at [i key value s]
+  let [f (c-tr-frame-at i s)]
+    c-tr-set-frame-at i (c-tr-fr-set :k (c-tr-bag-set key value (as-vector (get :k f))) f) s
+
+; The frame below the current one, the rule a pushed rule's chain
+; returns to.
+def c-tr-parent-index [s] (sub (c-tr-depth s) 2)
+def c-tr-parent [s] (c-tr-frame-at (c-tr-parent-index s) s)
+def c-tr-pu [key s] (c-tr-u-at (c-tr-parent-index s) key s)
+def c-tr-set-pu [key value s] (c-tr-set-u-at (c-tr-parent-index s) key value s)
+
+; ---- registers: a node a rule makes, which it and the rules it reaches
+; write to by reference, as the reader writes to an object. A frame holds
+; the registers it made, its replacements carry them, and its end seals
+; them: a placeholder a node holds (\`c-tr-ph\`) is replaced by the node it
+; names, and the registers go.
+
+def c-tr-ref [id] (record (entry :t :ref) (entry :id id))
+
+; A register: its id and its node.
+def c-tr-rg [id n] (record (entry :id id) (entry :n n))
+
+def c-tr-rg-get [id regs]
+  let [m (filter (fn [e] (equal (get :id e) id)) regs)]
+    match (count m)
+      case 0 missing
+      case _ (get :n (top m))
+
+def c-tr-is-ref [v]
+  match (kind v)
+    case :record (equal :ref (get :t v))
+    case _ false
+
+def c-tr-ph [ref] (record (entry :t :ph) (entry :id (get :id ref)))
+
+def c-tr-is-ph [v]
+  match (kind v)
+    case :record (equal :ph (get :t v))
+    case _ false
+
+; A new register in the current frame, holding n.
+def c-tr-new-reg [n s]
+  let [id (get :nreg (get :hot s))]
+    let [f (c-tr-cur s)]
+      c-tr-st-set :nreg (inc id) (c-tr-set-cur (c-tr-fr-set :regs (push (c-tr-rg id n) (as-vector (get :regs f))) f) s)
+
+def c-tr-last-reg [s] (c-tr-ref (sub (get :nreg (get :hot s)) 1))
+
+; The index of the frame, from i down, that holds register id; -1 for
+; none.
+def c-tr-reg-index [self frames i id]
+  match (compare i 0)
+    case :less -1
+    case _
+      match (c-tr-not (equal 0 (count (filter (fn [e] (equal id (get :id e))) (as-vector (get :regs (c-tr-nth i frames)))))))
+        case true i
+        case _ (self self frames (sub i 1) id)
+
+def c-tr-reg [ref s]
+  match ref
+    case missing missing
+    case _
+      let [frames (c-tr-frames s)]
+        let [i (c-tr-reg-index c-tr-reg-index frames (sub (count frames) 1) (get :id ref))]
+          match (compare i 0)
+            case :less missing
+            case _ (c-tr-rg-get (get :id ref) (as-vector (get :regs (c-tr-nth i frames))))
+
+def c-tr-update-reg [ref upd s]
+  match ref
+    case missing s
+    case _
+      let [frames (c-tr-frames s)]
+        let [i (c-tr-reg-index c-tr-reg-index frames (sub (count frames) 1) (get :id ref))]
+          match (compare i 0)
+            case :less s
+            case _
+              let [f (c-tr-nth i frames)]
+                let [regs (as-vector (get :regs f))]
+                  c-tr-st-set :frames (c-tr-frames-set i (c-tr-fr-set :regs (c-tr-reg-put (get :id ref) (upd (c-tr-rg-get (get :id ref) regs)) regs) f) frames) s
+
+; The node the current rule writes to, and writing it.
+def c-tr-node-ref [s] (get :node (c-tr-cur s))
+def c-tr-node-of [s] (c-tr-reg (c-tr-node-ref s) s)
+def c-tr-update-node [upd s] (c-tr-update-reg (c-tr-node-ref s) upd s)
+
+; The current rule makes a node of its own: written as its children end,
+; where it is the next child of a streamed node and of a kind whose
+; children come in order.
+def c-tr-set-node [n s]
+  let [s1 (c-tr-new-reg n s)]
+    let [s2 (c-tr-set-cur (c-tr-fr-set :node (c-tr-last-reg s1) (c-tr-cur s1)) s1)]
+      let [f (c-tr-cur s2)]
+        match [(get :slot f) (c-tr-has (get :kind n) (c-tr-streamable))]
+          case [missing _] s2
+          case [_ false] s2
+          case [slot true]
+            match (equal slot (c-tr-st-top-id s2))
+              case true (c-tr-stream-open (get :id (c-tr-last-reg s2)) (get :kind n) (get :fi f) (sub (c-tr-depth s2) 1) s2)
+              case _ s2
+
+; A rule takes another rule's node as its own (a reference).
+def c-tr-set-node-ref [ref s] (c-tr-set-cur (c-tr-fr-set :node ref (c-tr-cur s)) s)
+
+; A new register named by a u or k entry of the current rule.
+def c-tr-k-reg [key n s] (let [s1 (c-tr-new-reg n s)] (c-tr-set-k key (c-tr-last-reg s1) s1))
+def c-tr-u-reg [key n s] (let [s1 (c-tr-new-reg n s)] (c-tr-set-u key (c-tr-last-reg s1) s1))
+
+def c-tr-reg-push [ref item s] (c-tr-update-reg ref (fn [n] (c-tr-push-child item n)) s)
+def c-tr-reg-keep [ref tok s] (c-tr-update-reg ref (fn [n] (c-tr-keep tok n)) s)
+def c-tr-reg-drop [ref tok s] (c-tr-update-reg ref (fn [n] (c-tr-drop tok n)) s)
+def c-tr-reg-ex [ref key value s] (c-tr-update-reg ref (fn [n] (c-tr-set-ex key value n)) s)
+
+def c-tr-node-push [item s] (c-tr-update-node (fn [n] (c-tr-push-child item n)) s)
+def c-tr-node-keep [tok s] (c-tr-update-node (fn [n] (c-tr-keep tok n)) s)
+def c-tr-node-drop [tok s] (c-tr-update-node (fn [n] (c-tr-drop tok n)) s)
+def c-tr-node-ex [key value s] (c-tr-update-node (fn [n] (c-tr-set-ex key value n)) s)
+def c-tr-node-get-ex [key s] (c-tr-get-ex key (c-tr-node-of s))
+
+; ---- what a handler sees: the pass (its rule record), its tokens, and
+; which state it is
+
+; The alternate's groups, sorted, and their first, which names the
+; alternate in C's grammar (each of its alternates has one group).
+def c-tr-ctx [rule toks state]
+  let [gs (match (get :alt rule) (case missing []) (case alt (as-vector (get :g alt))))]
+    record
+      entry :rule rule
+      entry :toks toks
+      entry :state state
+      entry :gs gs
+      entry :g (match (count gs) (case 1 (c-tr-nth 0 gs)) (case 0 "") (case _ (string-join "," gs)))
+
+def c-tr-g [ctx] (get :g ctx)
+
+def c-tr-g-has [name ctx] (c-tr-has name (as-vector (get :gs ctx)))
+
+def c-tr-t0 [ctx] (c-tr-nth 0 (as-vector (get :toks ctx)))
+def c-tr-t1 [ctx] (c-tr-nth 1 (as-vector (get :toks ctx)))
+
+; rule.o0 in a close state: the first token of the rule's open pass.
+
+; ---- a pass's tokens, each with the comments before it
+
+def c-tr-before [a b]
+  match (compare a b)
+    case :less true
+    case _ false
+
+def c-tr-trivia-item [t] (c-tr-tok (get :name t) (get :src t) (c-tr-tok-span t) [])
+
+def c-tr-pass-toks [pend toks]
+  map
+    fn [i]
+      let [t (c-tr-nth i toks)]
+        let [from (if (equal i 0) -1 (get :offset (c-tr-nth (sub i 1) toks)))]
+          c-tr-tok (get :name t) (get :src t) (c-tr-tok-span t)
+            map c-tr-trivia-item (filter (fn [p] (c-tr-and (c-tr-before (get :offset p) (get :offset t)) (c-tr-before from (get :offset p)))) pend)
+    indices toks
+
+def c-tr-pend-after [pend toks]
+  match (count toks)
+    case 0 pend
+    case _ (filter (fn [p] (c-tr-before (get :offset (top toks)) (get :offset p))) pend)
+
+; ---- the engine's moves
+
+; The rules an expression is read with: expr's, and the jsonic ones it
+; reaches.
+def c-tr-expr-own [name]
+  match name
+    case "val" true
+    case "expr" true
+    case "paren" true
+    case "ternary" true
+    case "list" true
+    case "map" true
+    case "elem" true
+    case "pair" true
+    case _ false
+
+; A rule's open pass: the rule the last pass's alternate pushed, the one
+; that replaces the rule that alternate closed, or the first.
+def c-tr-enter [rule toks s]
+  let [frames (c-tr-frames s)]
+    let [name (get :name rule)]
+      let [i (get :i rule)]
+        let [o0 missing]
+          match (count frames)
+            case 0 (c-tr-st-set :frames [(c-tr-frame name i missing [] [] [] missing missing i name missing false missing)] s)
+            case _
+              let [old (top frames)]
+                match (get :next (get :hot s))
+                  case [:replace]
+                    c-tr-st-set :frames (push (c-tr-frame name i (get :node old) [] (as-vector (get :k old)) (as-vector (get :regs old)) missing (get :name old) (get :fi old) (get :fname old) (get :fnode old) (get :xroot old) (get :slot old)) (pop frames)) s
+                  case _
+                    let [xroot (c-tr-and (equal "val" name) (c-tr-not (c-tr-expr-own (get :name old))))]
+                      let [slot (c-tr-slot-of name old s)]
+                        c-tr-st-set :nextslot missing (c-tr-st-set :frames (push (c-tr-frame name i (get :node old) [] (as-vector (get :k old)) [] missing missing i name (get :node old) xroot slot) frames) s)
+
+; The streamed node a pushed rule's node becomes the next child of: the
+; one an earlier pass named (nextslot); the streamed node of the rule
+; that pushed it, for a rule that node's children come from; or the slot
+; of a block_item or statement, which hand their child's node on.
+def c-tr-slot-of [name old s]
+  match (get :nextslot (get :cold s))
+    case missing
+      match (count (as-vector (get :st (get :cold s))))
+        case 0 missing
+        case _
+          let [top-st (top (as-vector (get :st (get :cold s))))]
+            match [(equal (get :fi old) (get :fi top-st)) (c-tr-has name (c-tr-slot-children (get :kind top-st)))]
+              case [true true] (get :id top-st)
+              case _
+                match (c-tr-and (equal (get :slot old) (get :id top-st)) (c-tr-has (get :name old) ["block_item" "statement"]))
+                  case true (get :id top-st)
+                  case _ missing
+    case slot slot
+
+def c-tr-alt-field [field rule]
+  match (get :alt rule)
+    case missing ""
+    case alt (get field alt)
+
+def c-tr-next-of [rule]
+  match (c-tr-alt-field :p rule)
+    case ""
+      match (c-tr-alt-field :r rule)
+        case "" [:none]
+        case _ [:replace]
+    case _ [:push]
+
+; After an open pass: the first instance of a chain records its node and
+; u as they are when its open pass ends, which a replacement leaves.
+def c-tr-mark-first [s]
+  let [f (c-tr-cur s)]
+    match (equal (get :fi f) (get :i f))
+      case true (c-tr-set-cur (c-tr-fr-set :fnode (get :node f) f) s)
+      case _ s
+
+; Before a replace: the first instance's node and u as it leaves them.
+def c-tr-leave-first [s]
+  let [f (c-tr-cur s)]
+    match (equal (get :fi f) (get :i f))
+      case true (c-tr-set-cur (c-tr-fr-set :fnode (get :node f) f) s)
+      case _ s
+
+; What a parent's before-close reads of a child chain that has ended:
+; the chain's first instance, its node sealed (\`val\`), its u.
+def c-tr-child-view [f val]
+  record
+    entry :name (get :fname f)
+    entry :last (get :name f)
+    entry :i (get :fi f)
+    entry :node (get :fnode f)
+    entry :val val
+
+; A rule whose close pass neither pushed nor replaced has ended: its
+; registers go to the rule below it, which reads it as its child (an
+; expression's chain hands over the expression's node).
+def c-tr-pop [s]
+  let [s0 (c-tr-stream-end (c-tr-leave-first s))]
+    let [frames (c-tr-frames s0)]
+      let [f (top frames)]
+        let [val (match (get :xroot f) (case true (c-tr-x-result f s0)) (case _ missing))]
+          let [s1 (c-tr-xs-pop f s0)]
+            let [rest (pop (c-tr-frames s1))]
+              match (count rest)
+                case 0 (c-tr-st-set :frames [] s1)
+                case _
+                  let [below (top rest)]
+                    c-tr-st-set :frames (push (c-tr-fr-set :regs (push-all (as-vector (get :regs f)) (as-vector (get :regs below))) (c-tr-fr-set :child (c-tr-child-view f val) below)) (pop rest)) s1
+
+def c-tr-after-pass [state rule s]
+  let [next (c-tr-next-of rule)]
+    match [state next]
+      case [:close [:none]] (c-tr-st-set :next next (c-tr-pop s))
+      case [_ [:replace]] (c-tr-st-set :next next (c-tr-leave-first s))
+      case _ (c-tr-st-set :next next s)
+
+; Every pass: its tokens take the pending comments, an armed declaration
+; records them, the rule is entered at an open pass, its handler runs,
+; and the engine moves on.
+def c-tr-on-pass [state rule s]
+  let [toks (c-tr-pass-toks (as-vector (get :pend (get :hot s))) (as-vector (get :tokens rule)))]
+    let [s1 (c-tr-take toks (c-tr-pend-take rule (c-tr-seen s)))]
+      let [ctx (c-tr-ctx rule toks state)]
+        match state
+          case :open (c-tr-after-pass state rule (c-tr-flush (c-tr-dispatch ctx (c-tr-enter rule toks s1))))
+          case :close (c-tr-after-pass state rule (c-tr-flush (c-tr-dispatch ctx s1)))
+
+; The comments a pass's tokens take leave the pending ones.
+def c-tr-pend-take [rule s]
+  let [pend (as-vector (get :pend (get :hot s)))]
+    match (count pend)
+      case 0 s
+      case _ (c-tr-st-set :pend (c-tr-pend-after pend (as-vector (get :tokens rule))) s)
+
+; A pass has come: the document has a translation unit.
+def c-tr-seen [s]
+  match (get :tu (get :cold s))
+    case missing (c-tr-st-set :tu :pending s)
+    case _ s
+
+def c-tr-step-item [s item]
+  match item
+    case (token t)
+      match (c-tr-trivia-name (get :name t))
+        case true (c-tr-st-set :pend (push t (as-vector (get :pend (get :hot s)))) s)
+        case _ s
+    case (open rule) (c-tr-on-pass :open rule s)
+    case (close rule) (c-tr-on-pass :close rule s)
+
+def c-tr-step [s item]
+  let [s1 (c-tr-step-item s item)]
+    let [out (as-vector (get :out (get :hot s1)))]
+      match (count out)
+        case 0 (transition s1 [])
+        case _ (transition (c-tr-st-set :out [] s1) out)
+; ---- the tree's events
+
+def c-tr-span-events [sp]
+  [object-start (key "start") (scalar (get :start sp)) (key "end") (scalar (get :end sp)) (key "line") (scalar (get :line sp)) (key "col") (scalar (get :col sp)) object-end]
+
+def c-tr-zero-span [] (c-tr-span (sub 0 0) (sub 0 0) (sub 1 0) (sub 1 0))
+
+def c-tr-trivia-events [] [(key "trivia") object-start (key "leading") array-start array-end (key "trailing") array-start array-end object-end]
+
+; The registers an item's placeholders name: the registers of the frame
+; that holds them, in the order they were made, which is their ids', so a
+; placeholder's register is found by its id less the first one's.
+def c-tr-tbl [regs]
+  record
+    entry :regs regs
+    entry :base (match (count regs) (case 0 0) (case _ (get :id (c-tr-nth 0 regs))))
+
+def c-tr-tbl-get [id tbl]
+  let [e (match (compare id (get :base tbl)) (case :less missing) (case _ (c-tr-nth (sub id (get :base tbl)) (as-vector (get :regs tbl)))))]
+    match e
+      case missing (c-tr-rg-get id (as-vector (get :regs tbl)))
+      case _
+        match (equal id (get :id e))
+          case true (get :n e)
+          case _ (c-tr-rg-get id (as-vector (get :regs tbl)))
+
+def c-tr-scalar-events [v]
+  match (kind v)
+    case :vector (flatten [[array-start] (map (fn [x] (scalar x)) (as-vector v)) [array-end]])
+    case _ [(scalar v)]
+
+def c-tr-ex-events [e] (push-all (c-tr-scalar-events (c-tr-nth 1 e)) [(key (c-tr-nth 0 e))])
+
+def c-tr-tok-events [item]
+  flatten [[object-start (key "kind") (scalar "token") (key "tname") (scalar (get :tname item)) (key "src") (scalar (get :src item)) (key "span")] (c-tr-span-events (get :span item)) [object-end]]
+
+; A subtree's events, written bottom up: a node's events are made from
+; its children's, so the evaluation nests four levels for each level of
+; the tree, whatever its depth. What a subtree writes is its events and
+; the span of its first token, comments left out (\`c-tr-wt\`); a node's span
+; is that one, or, where its subtree keeps no token but comments, the
+; span of the nearest node above that keeps one, which its events hold
+; as :span-due until that node, or the item's writer, gives it.
+def c-tr-wt [sp ev]
+  record
+    entry :sp sp
+    entry :ev ev
+
+def c-tr-wt-has-sp [o]
+  match (get :sp o)
+    case missing false
+    case _ true
+
+def c-tr-wt-tok [item]
+  match (c-tr-trivia-name (get :tname item))
+    case true (c-tr-wt missing (c-tr-tok-events item))
+    case _ (c-tr-wt (get :span item) (c-tr-tok-events item))
+
+; The span of the first of outs that has one, or missing.
+def c-tr-wt-first [outs]
+  let [with (filter c-tr-wt-has-sp outs)]
+    match (count with)
+      case 0 missing
+      case _ (get :sp (c-tr-nth 0 with))
+
+def c-tr-wt-span-events [sp]
+  match sp
+    case missing [:span-due]
+    case _ (c-tr-span-events sp)
+
+; What o writes under a node whose span is sp: where o keeps no span of
+; its own, sp where its spans are due.
+def c-tr-wt-under [sp o]
+  match [(get :sp o) sp]
+    case [missing missing] (get :ev o)
+    case [missing _] (flatten (map (fn [e] (match e (case :span-due (c-tr-span-events sp)) (case _ [e]))) (get :ev o)))
+    case _ (get :ev o)
+
+def c-tr-wt-node [item outs]
+  let [sp (c-tr-wt-first outs)]
+    c-tr-wt sp
+      flatten
+        vector
+          [object-start (key "kind") (scalar (get :kind item)) (key "span")]
+          c-tr-wt-span-events sp
+          [(key "children") array-start]
+          flatten (map (fn [o] (c-tr-wt-under sp o)) outs)
+          [array-end]
+          (c-tr-trivia-events)
+          flatten (map c-tr-ex-events (as-vector (get :ex item)))
+          [object-end]
+
+; The node a placeholder names, through the table.
+def c-tr-resolve [self item tbl]
+  match (get :t item)
+    case :ph (self self (c-tr-tbl-get (get :id item) tbl) tbl)
+    case _ item
+
+def c-tr-emit [self item tbl]
+  match (get :t item)
+    case :tok (c-tr-wt-tok item)
+    case :node (c-tr-wt-node item (map (fn [c] (self self (c-tr-resolve c-tr-resolve c tbl) tbl)) (c-tr-kids item)))
+    case _ (c-tr-wt missing [])
+
+; What an item writes, its placeholders named from tbl.
+def c-tr-write [item tbl] (c-tr-emit c-tr-emit (c-tr-resolve c-tr-resolve item tbl) tbl)
+
+; ---- the translation unit, written as its items end
+
+; Write the translation unit's opening once, with the span of its first
+; item's first token. tu is missing until a pass comes (the engine makes
+; none for an empty document, whose value is nothing), :pending until the
+; opening is written, and then its span.
+def c-tr-tu-open-span [sp s]
+  match (get :tu (get :cold s))
+    case :pending (c-tr-out (flatten [[object-start (key "kind") (scalar "translation_unit") (key "span")] (c-tr-span-events sp) [(key "children") array-start]]) (c-tr-st-set :tu sp s))
+    case _ s
+
+; Write one of the translation unit's items, its placeholders named from
+; the table.
+def c-tr-tu-item [item tbl s]
+  let [o (c-tr-write item tbl)]
+    let [s1 (c-tr-tu-open-span (match (get :sp o) (case missing (c-tr-zero-span)) (case f f)) s)]
+      c-tr-out (c-tr-wt-under (get :tu (get :cold s1)) o) s1
+
+def c-tr-tu-close [s]
+  match (get :tu (get :cold s))
+    case missing []
+    case :pending (flatten [[object-start (key "kind") (scalar "translation_unit") (key "span")] (c-tr-span-events (c-tr-zero-span)) [(key "children") array-start array-end] (c-tr-trivia-events) [object-end]])
+    case _ (flatten [[array-end] (c-tr-trivia-events) [object-end]])
+; ---- the nodes written as their children end
+;
+; A function definition's body, and every statement in it that holds
+; statements, is written as it is read: its opening when the rule that
+; makes it starts, each child once it is complete (the child's registers
+; then go), and its end when that rule's chain ends, so the part holds
+; the statements being read, not the function. A node is written so when
+; it is the next child of a node written so (its frame's slot), and its
+; children come in order: they are only ever appended.
+
+def c-tr-streamable [] ["compound_statement" "if_statement" "while_statement" "do_statement" "for_statement" "switch_statement" "labeled_statement"]
+
+; The rules whose node a streamed node of a kind takes as its next child.
+def c-tr-slot-children [kind]
+  match kind
+    case "compound_statement" ["block_item"]
+    case "external_declaration" []
+    case _ ["statement"]
+
+; An entry of st: the node's register, its kind, the chain that made it,
+; and the span of its first token once one is written.
+def c-tr-st-entry [id kind fi at span]
+  record
+    entry :id id
+    entry :kind kind
+    entry :fi fi
+    entry :at at
+    entry :span span
+
+def c-tr-st [s] (as-vector (get :st (get :cold s)))
+
+def c-tr-st-top-id [s]
+  match (count (c-tr-st s))
+    case 0 missing
+    case _ (get :id (top (c-tr-st s)))
+
+; A streamed node's span: its own first token's, or the nearest written
+; node's around it, or the translation unit's.
+def c-tr-st-span-at [i s] (c-tr-st-span-walk c-tr-st-span-walk i s)
+
+def c-tr-st-span-walk [self i s]
+  let [st (c-tr-st s)]
+    match (compare i 0)
+      case :less
+        match (get :tu (get :cold s))
+          case missing (c-tr-zero-span)
+          case :pending (c-tr-zero-span)
+          case sp sp
+      case _
+        match (get :span (c-tr-nth i st))
+          case missing (self self (sub i 1) s)
+          case sp sp
+
+; Every written node with no span yet takes this one: a node's first
+; token is the first of the nodes around it that have none.
+def c-tr-st-set-span [sp s]
+  c-tr-st-set :st (map (fn [e] (match (get :span e) (case missing (c-tr-st-entry (get :id e) (get :kind e) (get :fi e) (get :at e) sp)) (case _ e))) (c-tr-st s)) s
+
+; Open a node: its kind and its children's array.
+def c-tr-stream-open [id kind fi at s]
+  c-tr-st-set :st (push (c-tr-st-entry id kind fi at missing) (c-tr-st s)) (c-tr-out [object-start (key "kind") (scalar kind) (key "children") array-start] s)
+
+; The registers of the frame that holds the top node's register, made
+; after it: the children it has been given since its last write.
+def c-tr-st-frame-index [s] (get :at (top (c-tr-st s)))
+
+def c-tr-st-tbl [s]
+  let [i (c-tr-st-frame-index s)]
+    match (compare i 0)
+      case :less (c-tr-tbl [])
+      case _
+        let [id (c-tr-st-top-id s)]
+          c-tr-tbl (filter (fn [e] (c-tr-before id (get :id e))) (as-vector (get :regs (c-tr-frame-at i s))))
+
+; Write the top node's new children, and let their registers go.
+def c-tr-flush [s]
+  match (count (c-tr-st s))
+    case 0 s
+    case _
+      match (equal (get :fi (c-tr-cur s)) (get :fi (top (c-tr-st s))))
+        case false s
+        case true (c-tr-flush-top s)
+
+def c-tr-flush-top [s]
+  let [id (c-tr-st-top-id s)]
+    let [node (c-tr-rg-get id (as-vector (get :regs (c-tr-frame-at (c-tr-st-frame-index s) s))))]
+      match node
+        case missing s
+        case _
+          let [kids (c-tr-kids node)]
+            match (count kids)
+              case 0 s
+              case _
+                let [s1 (c-tr-stream-items c-tr-stream-items kids 0 (c-tr-st-tbl s) s)]
+                  let [s2 (c-tr-update-reg (c-tr-ref id) (fn [n] (c-tr-with-children [] n)) s1)]
+                    c-tr-st-drop-regs s2
+
+def c-tr-st-drop-regs [s]
+  let [i (c-tr-st-frame-index s)]
+    match (compare i 0)
+      case :less s
+      case _
+        let [id (c-tr-st-top-id s)]
+          let [f (c-tr-frame-at i s)]
+            c-tr-set-frame-at i (c-tr-fr-set :regs (filter (fn [e] (c-tr-not (c-tr-before id (get :id e)))) (as-vector (get :regs f))) f) s
+
+; Write items under the top node, from the ith: a streamed child already
+; written is skipped.
+def c-tr-stream-items [self items i tbl s]
+  match (compare i (count items))
+    case :less
+      let [item (c-tr-nth i items)]
+        match (c-tr-and (c-tr-is-ph item) (equal (get :id item) (get :lastclosed (get :cold s))))
+          case true (self self items (inc i) tbl s)
+          case _ (self self items (inc i) tbl (c-tr-stream-item item tbl s))
+    case _ s
+
+def c-tr-stream-item [item tbl s]
+  let [n (sub (count (c-tr-st s)) 1)]
+    let [o (c-tr-write item tbl)]
+      let [s1 (match [(get :sp o) (get :span (top (c-tr-st s)))] (case [missing _] s) (case [_ missing] (c-tr-st-set-span (get :sp o) s)) (case _ s))]
+        c-tr-out (c-tr-wt-under (c-tr-st-span-at n s1) o) s1
+
+; The chain that made the top node ends: its last children, then its end.
+def c-tr-stream-end [s]
+  match (count (c-tr-st s))
+    case 0 s
+    case _
+      match (equal (get :fi (c-tr-cur s)) (get :fi (top (c-tr-st s))))
+        case false s
+        case true (c-tr-stream-close (c-tr-flush-top s))
+
+def c-tr-stream-close [s]
+  let [st (c-tr-st s)]
+    let [e (top st)]
+      let [node (c-tr-reg (c-tr-ref (get :id e)) s)]
+        let [sp (c-tr-st-span-at (sub (count st) 1) s)]
+          let [events (flatten [[array-end] (c-tr-trivia-events) [(key "span")] (c-tr-span-events sp) (flatten (map c-tr-ex-events (c-tr-or-empty (get :ex node)))) [object-end]])]
+            c-tr-st-set :lastclosed (get :id e) (c-tr-st-set :st (pop st) (c-tr-out events s))
+
+; ---- a function definition, written from its body's start
+
+; At a function body's \`{\`, a strict declaration at the translation
+; unit's top level is written as it is read: the translation unit's
+; opening where it is due, the external declaration's opening, its
+; specifiers and the declarator its first init declarator holds, and
+; then the body, a streamed child of the declaration.
+def c-tr-fn-stream [s]
+  let [p (c-tr-parent-index s)]
+    match (c-tr-and (equal "external_declaration" (get :name (c-tr-frame-at p s))) (c-tr-and (c-tr-not (c-tr-ed-true :armed s)) (c-tr-fn-at-top p s)))
+      case false s
+      case true
+        let [tbl (c-tr-tbl (as-vector (get :regs (c-tr-cur s))))]
+          let [specs (c-tr-write (c-tr-ph (c-tr-u :specs s)) tbl)]
+            let [kids (c-tr-kids (c-tr-reg (c-tr-u :idl s) s))]
+              let [decl (match (count kids) (case 0 missing) (case _ (c-tr-fn-declarator (c-tr-nth 0 kids) s)))]
+                let [dout (match decl (case missing missing) (case d (c-tr-write d tbl)))]
+                  let [sp (match (get :sp specs) (case missing (match dout (case missing missing) (case d (get :sp d)))) (case f f))]
+                    let [ed (c-tr-frame-at p s)]
+                      let [s1 (c-tr-tu-open-span (match sp (case missing (c-tr-zero-span)) (case f f)) s)]
+                        let [s2 (c-tr-stream-open (get :id (get :node ed)) "external_declaration" (get :fi ed) p s1)]
+                          let [s3 (match sp (case missing s2) (case f (c-tr-st-set-span f s2)))]
+                            let [span (c-tr-st-span-at (sub (count (c-tr-st s3)) 1) s3)]
+                              let [s4 (c-tr-out (c-tr-wt-under span specs) s3)]
+                                let [s5 (match dout (case missing s4) (case d (c-tr-out (c-tr-wt-under span d) s4)))]
+                                  c-tr-set-ed :streaming true (c-tr-st-set :nextslot (get :id (get :node ed)) s5)
+
+; The external declaration's items loop is the translation unit's.
+def c-tr-fn-at-top [p s]
+  let [loop (c-tr-frame-at (sub p 1) s)]
+    c-tr-and (equal "extdecl_loop" (get :name loop)) (c-tr-same-ref (get :node loop) (get :node (c-tr-frame-at 0 s)))
+
+; The declarator the first init declarator holds, lifted as
+; @simple-decl-finalize-fn lifts it.
+def c-tr-fn-declarator [first s]
+  let [fnode (c-tr-item-node first s)]
+    match (equal "init_declarator" (c-tr-kind-of fnode))
+      case false missing
+      case _
+        let [kids (c-tr-kids fnode)]
+          match (count kids)
+            case 0 missing
+            case _
+              match (equal "declarator" (c-tr-kind-of (c-tr-item-node (c-tr-nth 0 kids) s)))
+                case true (c-tr-nth 0 kids)
+                case _ missing
+; ---- the fallback's state of the external declaration
+;
+; armed, failed, unknown, trailing; streaming, whether it is written as
+; it is read (c-tr-fn-stream); scopes, the local scopes an asm operand
+; opens, innermost last, each [failed start], start the count of the
+; tokens taken when it opened; and fail, whether the rules have failed
+; where the parse is: the declaration, or the innermost local scope.
+
+def c-tr-ed-rec [armed failed unknown trailing streaming scopes fail]
+  record
+    entry :armed armed
+    entry :failed failed
+    entry :unknown unknown
+    entry :trailing trailing
+    entry :streaming streaming
+    entry :scopes scopes
+    entry :fail fail
+
+def c-tr-ed-new [] (c-tr-ed-rec false false false false false [] false)
+
+def c-tr-ed [key s] (get key (get :ed (get :cold s)))
+def c-tr-ed-true [key s] (equal true (c-tr-ed key s))
+
+; One field of the fallback's state replaced, and fail kept.
+def c-tr-set-ed [key value s]
+  c-tr-st-set :ed (c-tr-ed-fail (c-tr-ed-with key value (get :ed (get :cold s)))) s
+
+def c-tr-ed-with [key value e]
+  match key
+    case :armed (c-tr-ed-rec value (get :failed e) (get :unknown e) (get :trailing e) (get :streaming e) (get :scopes e) (get :fail e))
+    case :failed (c-tr-ed-rec (get :armed e) value (get :unknown e) (get :trailing e) (get :streaming e) (get :scopes e) (get :fail e))
+    case :unknown (c-tr-ed-rec (get :armed e) (get :failed e) value (get :trailing e) (get :streaming e) (get :scopes e) (get :fail e))
+    case :trailing (c-tr-ed-rec (get :armed e) (get :failed e) (get :unknown e) value (get :streaming e) (get :scopes e) (get :fail e))
+    case :streaming (c-tr-ed-rec (get :armed e) (get :failed e) (get :unknown e) (get :trailing e) value (get :scopes e) (get :fail e))
+    case :scopes (c-tr-ed-rec (get :armed e) (get :failed e) (get :unknown e) (get :trailing e) (get :streaming e) value (get :fail e))
+    case :fail (c-tr-ed-rec (get :armed e) (get :failed e) (get :unknown e) (get :trailing e) (get :streaming e) (get :scopes e) value)
+    case _ e
+
+; fail, from the declaration's failed and the innermost scope's.
+def c-tr-ed-fail [e]
+  let [scopes (as-vector (get :scopes e))]
+    let [f (match (count scopes) (case 0 (equal true (get :failed e))) (case _ (c-tr-or (equal true (get :failed e)) (equal true (c-tr-nth 0 (top scopes))))))]
+      c-tr-ed-with :fail f e
+
+def c-tr-scopes [s] (as-vector (c-tr-ed :scopes s))
+
+def c-tr-failed [s] (c-tr-ed-true :fail s)
+
+def c-tr-mark-failed [s]
+  let [scopes (c-tr-scopes s)]
+    match (count scopes)
+      case 0 (c-tr-set-ed :failed true s)
+      case _ (c-tr-set-ed :scopes (push [true (c-tr-nth 1 (top scopes))] (pop scopes)) s)
+
+def c-tr-open-scope [s] (c-tr-set-ed :scopes (push [false (count (as-vector (get :taken (get :cold s))))] (c-tr-scopes s)) s)
+def c-tr-close-scope [s]
+  let [scopes (c-tr-scopes s)]
+    match (count scopes)
+      case 0 s
+      case _ (c-tr-set-ed :scopes (pop scopes) s)
+
+; The tokens taken since the innermost scope opened.
+def c-tr-scope-tokens [s]
+  let [scopes (c-tr-scopes s)]
+    let [taken (as-vector (get :taken (get :cold s)))]
+      match (count scopes)
+        case 0 []
+        case _
+          let [from (c-tr-nth 1 (top scopes))]
+            map (fn [i] (c-tr-nth i taken)) (filter (fn [i] (c-tr-not (c-tr-before i from))) (indices taken))
+
+; The tokens an armed declaration takes, which it is made of where the
+; rules fail, and those of a local scope.
+def c-tr-take [toks s]
+  match (c-tr-or (c-tr-ed-true :armed s) (c-tr-not (equal 0 (count (c-tr-scopes s)))))
+    case true (c-tr-st-set :taken (push-all toks (as-vector (get :taken (get :cold s)))) s)
+    case _ s
+
+; ---- the rules above the fallback: the translation unit, the items
+; loop, the conditional groups, the external declaration
+
+def c-tr-openers [] ["if" "ifdef" "ifndef"]
+
+; The conditional directive an external declaration's node holds, where
+; its directive is one of names.
+def c-tr-conditional-of [node names s]
+  let [dirs (filter (fn [c] (equal "conditional_directive" (c-tr-kind-of c))) (map (fn [c] (c-tr-item-node c s)) (c-tr-kids node)))]
+    match (count dirs)
+      case 0 missing
+      case _
+        let [d (c-tr-nth 0 dirs)]
+          match (c-tr-has (c-tr-get-ex "directive" d) names)
+            case true d
+            case _ missing
+
+; The child that closed under the current rule, once: missing where it
+; is the one the rule took last (u's lastChild).
+def c-tr-fresh-child [s]
+  let [c (get :child (c-tr-cur s))]
+    match c
+      case missing missing
+      case _
+        match (equal (get :i c) (c-tr-u :lastChild s))
+          case true missing
+          case _ c
+
+def c-tr-child [s] (get :child (c-tr-cur s))
+
+; Whether the current rule writes to the translation unit's node.
+def c-tr-at-top [s]
+  let [root (get :node (c-tr-frame-at 0 s))]
+    match [(c-tr-node-ref s) root]
+      case [missing _] false
+      case [_ missing] false
+      case [a b] (equal (get :id a) (get :id b))
+
+def c-tr-h-translation_unit [phase ctx s]
+  match phase
+    case :bo (c-tr-set-node (c-tr-new "translation_unit") s)
+    case _ s
+
+def c-tr-h-extdecl_loop [phase ctx s]
+  match phase
+    case :bc
+      let [c (c-tr-fresh-child s)]
+        match c
+          case missing s
+          case _
+            match (get :node c)
+              case missing s
+              case ref
+                let [node (c-tr-reg ref s)]
+                  let [s1 (c-tr-set-u :lastChild (get :i c) s)]
+                    match (c-tr-kind-of node)
+                      case "external_declaration"
+                        match (c-tr-conditional-of node (c-tr-openers) s1)
+                          case missing (c-tr-loop-item ref s1)
+                          case _ (c-tr-set-u :opener ref s1)
+                      case "conditional_group" (c-tr-loop-item ref s1)
+                      case _ s1
+    case _ s
+
+; An item of the loop: written, where the loop is the translation unit's,
+; and its registers go; otherwise a child of the branch it is in.
+def c-tr-loop-item [ref s]
+  match [(c-tr-at-top s) (c-tr-ed-true :streaming s)]
+    case [true true] (c-tr-set-cur (c-tr-fr-set :regs [] (c-tr-cur s)) s)
+    case [true _]
+      let [tbl (c-tr-tbl (as-vector (get :regs (c-tr-cur s))))]
+        let [s1 (c-tr-tu-item (c-tr-ph ref) tbl s)]
+          match (c-tr-u :opener s1)
+            case missing (c-tr-set-cur (c-tr-fr-set :regs [] (c-tr-cur s1)) s1)
+            case _ s1
+    case _ (c-tr-node-push (c-tr-ph ref) s)
+
+def c-tr-h-conditional_group [phase ctx s]
+  match phase
+    case :bo (c-tr-set-pu :opener missing (c-tr-set-u :opener (c-tr-pu :opener s) (c-tr-set-node (c-tr-new "conditional_group") s)))
+    case :bc
+      let [c (c-tr-fresh-child s)]
+        match c
+          case missing s
+          case _
+            match (get :node c)
+              case missing s
+              case ref
+                let [s1 (c-tr-set-u :lastChild (get :i c) s)]
+                  match (c-tr-ref-kind ref s1)
+                    case "conditional_branch" (c-tr-node-push (c-tr-ph ref) s1)
+                    case "external_declaration" (c-tr-set-u :endifTaken true (c-tr-node-push (c-tr-ph ref) s1))
+                    case _ s1
+    case _ s
+
+; A branch's first child is its directive's external declaration.
+def c-tr-take-branch-head [head s]
+  let [node (c-tr-reg head s)]
+    let [dirs (filter (fn [c] (equal "conditional_directive" (c-tr-kind-of c))) (map (fn [c] (c-tr-item-node c s)) (c-tr-kids node)))]
+      let [kind (match (count dirs) (case 0 "unknown") (case _ (c-tr-get-ex "directive" (c-tr-nth 0 dirs))))]
+        c-tr-set-u :headTaken true (c-tr-node-ex "branchKind" kind (c-tr-node-push (c-tr-ph head) s))
+
+def c-tr-h-conditional_branch [phase ctx s]
+  match phase
+    case :bo
+      let [s1 (c-tr-set-node (c-tr-new "conditional_branch") s)]
+        match (c-tr-pu :opener s1)
+          case missing s1
+          case opener (c-tr-take-branch-head opener (c-tr-set-pu :opener missing s1))
+    case :bc
+      let [c (get :child (c-tr-cur s))]
+        match c
+          case missing s
+          case _
+            match (equal (get :i c) (c-tr-u :lastChild s))
+              case true s
+              case _
+                let [s1 (c-tr-set-u :lastChild (get :i c) s)]
+                  match [(get :name c) (c-tr-u-true :headTaken s1)]
+                    case ["external_declaration" false]
+                      match (get :node c)
+                        case missing s1
+                        case head (c-tr-take-branch-head head s1)
+                    case ["extdecl_loop" _] (c-tr-set-u :itemsTaken true s1)
+                    case _ s1
+    case _ s
+
+; Splice the declaration a dispatch rule built into the external
+; declaration's node: simple_declaration's children become its own; a
+; static_assert or asm statement is its one child.
+def c-tr-splice [s]
+  let [c (c-tr-child s)]
+    match c
+      case missing s
+      case _
+        match (get :node c)
+          case missing s
+          case ref
+            match (c-tr-or (c-tr-same-ref ref (c-tr-node-ref s)) (c-tr-ed-true :streaming s))
+              case true
+                match (c-tr-ed-true :streaming s)
+                  case true (c-tr-node-ex "declKind" (c-tr-num-or "declaration" (c-tr-get-ex "declKind" (c-tr-reg ref s))) s)
+                  case _ s
+              case _
+                let [cn (c-tr-reg ref s)]
+                  match (c-tr-has (get :name c) ["static_assert_declaration" "asm_statement"])
+                    case true (c-tr-node-ex "declKind" "declaration" (c-tr-update-node (fn [n] (c-tr-with-children [(c-tr-ph ref)] n)) s))
+                    case _ (c-tr-node-ex "declKind" (c-tr-num-or "declaration" (c-tr-get-ex "declKind" cn)) (c-tr-update-node (fn [n] (c-tr-with-children (c-tr-kids cn) n)) s))
+
+; Finish an external declaration: its kind.
+def c-tr-finish-decl [s]
+  match (c-tr-ed-true :unknown s)
+    case true (c-tr-node-ex "declKind" "unknown" s)
+    case _
+      match (c-tr-node-get-ex "declKind" s)
+        case missing (c-tr-node-ex "declKind" "unknown" s)
+        case _ s
+
+def c-tr-h-external_declaration [phase ctx s]
+  match phase
+    case :bo (c-tr-st-set :taken [] (c-tr-st-set :ed (c-tr-ed-new) (c-tr-set-node (c-tr-new "external_declaration") s)))
+    case :alt
+      match (c-tr-g ctx)
+        case "extdecl-pp-armed" (c-tr-set-ed :armed true s)
+        case "extdecl-armed" (c-tr-set-ed :armed true s)
+        case "extdecl-armed-c23-attr" (c-tr-set-ed :armed true s)
+        case "extdecl-unknown" (c-tr-set-ed :unknown true (c-tr-set-ed :armed true s))
+        case "extdecl-fallback"
+          c-tr-set-ed :unknown true
+            c-tr-update-node (fn [n] (c-tr-with-children (flatten (map (fn [t] (push (c-tr-bare t) (as-vector (get :lead t)))) (as-vector (get :taken (get :cold s))))) n)) s
+        case "extdecl-end-eof" (c-tr-finish-decl (c-tr-splice s))
+        case "extdecl-trailing" (c-tr-set-ed :trailing true (c-tr-splice s))
+        case "extdecl-end" (c-tr-finish-decl (c-tr-splice s))
+        case _ s
+    case _ s
+
+def c-tr-h-unknown_declaration [phase ctx s]
+  match phase
+    case :alt
+      match (c-tr-g ctx)
+        case "unk-tok" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case "unk-eof" (c-tr-finish-decl s)
+        case "unk-end" (c-tr-finish-decl s)
+        case _ s
+    case _ s
+; ---- what a handler reads of the rules around it
+
+; The register of the node a rule at frame index i writes to.
+def c-tr-node-ref-at [i s] (get :node (c-tr-frame-at i s))
+
+; The child view of the current rule, and its node's register.
+def c-tr-child-ref [s]
+  match (c-tr-child s)
+    case missing missing
+    case c (get :node c)
+
+def c-tr-child-is [names s]
+  match (c-tr-child s)
+    case missing false
+    case c (c-tr-has (get :name c) names)
+
+; The kind of the child's node: its register's, or an expression's.
+def c-tr-child-node [s]
+  match (c-tr-child s)
+    case missing missing
+    case c
+      match (get :val c)
+        case missing (c-tr-reg (get :node c) s)
+        case v v
+
+; A child's node as an item of a tree: a placeholder of its register, or
+; the expression it is.
+def c-tr-child-item [s]
+  match (c-tr-child s)
+    case missing missing
+    case c
+      match (get :val c)
+        case missing
+          match (get :node c)
+            case missing missing
+            case ref (c-tr-ph ref)
+        case v v
+
+; Whether the child's node is the current rule's own (a child that made
+; none writes to its parent's).
+def c-tr-child-is-own-node [s]
+  match [(c-tr-child-ref s) (c-tr-node-ref s)]
+    case [missing _] false
+    case [_ missing] false
+    case [a b] (equal (get :id a) (get :id b))
+
+def c-tr-same-ref [a b]
+  match [a b]
+    case [missing _] false
+    case [_ missing] false
+    case _ (equal (get :id a) (get :id b))
+
+; The kind of a register's node, or of a node.
+def c-tr-kind-of [v]
+  match v
+    case missing missing
+    case _
+      match (c-tr-is-ref v)
+        case true missing
+        case _ (get :kind v)
+
+def c-tr-ref-kind [ref s]
+  match (c-tr-reg ref s)
+    case missing missing
+    case n (get :kind n)
+
+; Whether a rule's node at frame index i is of the kind given.
+def c-tr-node-kind-is [kind s] (equal kind (c-tr-ref-kind (c-tr-node-ref s) s))
+
+; The index of the nearest frame, from i down and at most limit of them,
+; whose u holds key; -1 for none.
+def c-tr-u-index [self s i key limit]
+  match [(compare i 0) (compare limit 1)]
+    case [:less _] -1
+    case [_ :less] -1
+    case _
+      match (c-tr-u-at i key s)
+        case missing (self self s (sub i 1) key (sub limit 1))
+        case _ i
+
+; specOwner: the nearest rule, the current one or one below it, at most
+; eight, whose u holds the specifier list; the parent where none does.
+def c-tr-spec-owner [s]
+  let [i (c-tr-u-index c-tr-u-index s (sub (c-tr-depth s) 1) :specs 8)]
+    match (compare i 0)
+      case :less (c-tr-parent-index s)
+      case _ i
+
+def c-tr-owner-specs [s] (c-tr-u-at (c-tr-spec-owner s) :specs s)
+
+; The k entries a declaration starts without.
+def c-tr-decl-clear-ks []
+  [:ssNode :ssKwTaken :ssTagTaken :ssBodyTaken :esNode :esKwTaken :esTagTaken :esUtypeTaken :esBodyTaken :esUtypeAttached :elNode :elOpened :takenEnums :mdlNode :mdlOpened :takenSecs :takenItems :ilNode :ilOpened :iiNode :hasDesig :tookEq :declarator :directDeclarator :lastPointer :tookCond :tookBody :tookThen :elseSeen :tookElse :tookWhile :tookSemi :tookInit :tookIter :tookControls]
+
+def c-tr-stmt-clear-ks [] [:tookCond :tookBody :tookThen :elseSeen :tookElse :tookWhile :tookSemi :tookInit :tookIter :tookControls]
+
+; ---- simple_declaration
+
+def c-tr-absorb-storage [tok s]
+  let [i (c-tr-spec-owner s)]
+    let [s1 (c-tr-reg-keep (c-tr-u-at i :specs s) tok s)]
+      match (get :tname tok)
+        case "KW_TYPEDEF" (c-tr-set-u-at i :isTypedef true s1)
+        case _ s1
+
+def c-tr-absorb-type [tok s] (c-tr-reg-keep (c-tr-owner-specs s) tok s)
+
+def c-tr-absorb-paren [tok s]
+  let [specs (c-tr-owner-specs s)]
+    c-tr-set-k :prunTarget specs (c-tr-reg-keep specs tok s)
+
+def c-tr-sd-bc [s] (c-tr-sd-bc-body (c-tr-sd-bc-tagged (c-tr-sd-bc-decl s)))
+
+def c-tr-sd-bc-decl [s]
+  let [c (c-tr-child s)]
+    match (c-tr-and (c-tr-child-is ["init_declarator"] s) (c-tr-not (equal (get :i c) (c-tr-u :lastDeclarator s))))
+      case false s
+      case _
+        match (c-tr-child-node s)
+          case missing s
+          case cn
+            match (equal "init_declarator" (get :kind cn))
+              case false s
+              case _
+                let [s1 (c-tr-reg-push (c-tr-u :idl s) (c-tr-child-item s) (c-tr-set-u :lastDeclarator (get :i c) s))]
+                  let [dn (c-tr-get-ex "declaredName" cn)]
+                    let [names (c-tr-or-empty (c-tr-u :declaredNames s1))]
+                      let [s2 (match [(c-tr-u-true :lenient s1) dn (count names)] (case [true missing _] s1) (case [true _ 0] s1) (case [true _ 1] (c-tr-set-u :declaredName missing (c-tr-set-u :declaredNames [] s1))) (case [true _ _] (c-tr-set-u :declaredNames (pop names) s1)) (case _ s1))]
+                        let [s3 (c-tr-set-u :lenient false s2)]
+                          match dn
+                            case missing s3
+                            case _
+                              let [s4 (c-tr-set-u :declaredNames (push dn (c-tr-or-empty (c-tr-u :declaredNames s3))) s3)]
+                                match (c-tr-u :declaredName s4)
+                                  case missing (c-tr-set-u :declaredName dn s4)
+                                  case _ s4
+
+def c-tr-sd-bc-tagged [s]
+  match (c-tr-and (c-tr-child-is ["struct_specifier" "enum_specifier"] s) (c-tr-not (c-tr-u-true :taggedSpecAttached s)))
+    case false s
+    case _
+      match (c-tr-child-item s)
+        case missing s
+        case item (c-tr-set-u :taggedSpecAttached true (c-tr-reg-push (c-tr-u :specs s) item s))
+
+def c-tr-sd-bc-body [s]
+  match (c-tr-and (c-tr-child-is ["compound_statement"] s) (equal missing (c-tr-u :fnBody s)))
+    case false s
+    case _
+      match (equal "compound_statement" (c-tr-kind-of (c-tr-child-node s)))
+        case true (c-tr-set-u :fnBody (c-tr-child-item s) s)
+        case _ s
+
+; The condition @sd-may-declarate's side effect: a declarator with no
+; comma before it.
+def c-tr-sd-may-declarate [s]
+  let [kids (c-tr-kids (c-tr-reg (c-tr-u :idl s) s))]
+    match (count kids)
+      case 0 s
+      case _
+        let [last (top kids)]
+          match (c-tr-and (c-tr-is-tok last) (equal "PUNC_COMMA" (get :tname last)))
+            case true s
+            case _ (c-tr-set-u :lenient true s)
+
+def c-tr-sd-finalize [ctx s]
+  let [s1 (c-tr-node-push (c-tr-ph (c-tr-u :specs s)) s)]
+    let [idl (c-tr-reg (c-tr-u :idl s1) s1)]
+      let [s2 (match (count (c-tr-kids idl)) (case 0 s1) (case _ (c-tr-node-push (c-tr-ph (c-tr-u :idl s1)) s1)))]
+        c-tr-node-keep (c-tr-t0 ctx) s2
+
+; A function definition: specifiers, the first declarator's declarator,
+; the body.
+def c-tr-sd-finalize-fn [s]
+  let [s1 (c-tr-node-push (c-tr-ph (c-tr-u :specs s)) (c-tr-node-ex "declKind" "function_definition" (c-tr-set-u :fnDefDone true s)))]
+    let [kids (c-tr-kids (c-tr-reg (c-tr-u :idl s1) s1))]
+      let [s2 (match (count kids) (case 0 s1) (case _ (c-tr-sd-lift-declarator (c-tr-nth 0 kids) s1)))]
+        c-tr-node-push (c-tr-u :fnBody s2) s2
+
+; A tree item's node: a placeholder's register's, or the node itself.
+def c-tr-item-node [item s]
+  match (c-tr-is-ph item)
+    case true (c-tr-reg (c-tr-ref (get :id item)) s)
+    case _ item
+
+def c-tr-sd-lift-declarator [first s]
+  let [fnode (c-tr-item-node first s)]
+    match (equal "init_declarator" (c-tr-kind-of fnode))
+      case false s
+      case _
+        let [kids (c-tr-kids fnode)]
+          match (count kids)
+            case 0 s
+            case _
+              match (equal "declarator" (c-tr-kind-of (c-tr-item-node (c-tr-nth 0 kids) s)))
+                case true (c-tr-node-push (c-tr-nth 0 kids) s)
+                case _ s
+
+def c-tr-h-simple_declaration [phase ctx s]
+  match phase
+    case :bo
+      let [s0 (c-tr-node-ex "declKind" "declaration" (c-tr-set-node (c-tr-new "declaration") s))]
+        c-tr-del-ks (c-tr-decl-clear-ks) (c-tr-u-reg :idl (c-tr-new "init_declarator_list") (c-tr-u-reg :specs (c-tr-new "declaration_specifiers") s0))
+    case :bc (c-tr-sd-bc s)
+    case :alt
+      match (c-tr-g ctx)
+        case "simple-decl-storage" (c-tr-absorb-storage (c-tr-t0 ctx) s)
+        case "simple-decl-type" (c-tr-absorb-type (c-tr-t0 ctx) s)
+        case "simple-decl-fn-end" (c-tr-sd-finalize-fn s)
+        case "simple-decl-fn-body" (c-tr-fn-stream (c-tr-set-u :startedFnBody true s))
+        case "simple-decl-first-decl" (c-tr-sd-may-declarate s)
+        case "simple-decl-first-decl-ptr" (c-tr-sd-may-declarate s)
+        case "simple-decl-first-decl-paren" (c-tr-sd-may-declarate s)
+        case "simple-decl-comma" (c-tr-reg-keep (c-tr-u :idl s) (c-tr-t0 ctx) s)
+        case "simple-decl-end" (c-tr-sd-finalize ctx s)
+        case _ s
+    case _ s
+
+; ---- spec_loop
+
+def c-tr-h-spec_loop [phase ctx s]
+  match phase
+    case :bc (c-tr-spec-loop-bc s)
+    case :alt
+      match (c-tr-g ctx)
+        case "spec-loop-bitint" (c-tr-absorb-type (c-tr-t0 ctx) s)
+        case "spec-loop-storage" (c-tr-absorb-storage (c-tr-t0 ctx) s)
+        case "spec-loop-storage-ext" (c-tr-absorb-storage (c-tr-t0 ctx) s)
+        case "spec-loop-kw" (c-tr-absorb-type (c-tr-t0 ctx) s)
+        case "spec-loop-kw-ext" (c-tr-absorb-type (c-tr-t0 ctx) s)
+        case "spec-loop-paren-ext" (c-tr-absorb-paren (c-tr-t0 ctx) s)
+        case "spec-loop-paren" (c-tr-absorb-paren (c-tr-t0 ctx) s)
+        case "spec-loop-type" (c-tr-absorb-type (c-tr-t0 ctx) s)
+        case "spec-loop-more-bitint" (c-tr-absorb-type (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+def c-tr-spec-loop-bc [s]
+  let [c (c-tr-child s)]
+    match c
+      case missing s
+      case _
+        match (c-tr-child-item s)
+          case missing s
+          case item
+            let [taken (c-tr-k :takenTagged s)]
+              match (c-tr-and (c-tr-child-is ["struct_specifier" "enum_specifier" "attribute_spec_gcc" "attribute_spec_msvc" "attribute_spec_c23"] s) (c-tr-not (equal (get :i c) taken)))
+                case false s
+                case _
+                  match (c-tr-owner-specs s)
+                    case missing s
+                    case ref (c-tr-set-k :takenTagged (get :i c) (c-tr-reg-push ref item s))
+
+; ---- bit_int_paren: _BitInt's ( width )
+
+def c-tr-h-bit_int_paren [phase ctx s]
+  match phase
+    case :bc
+      match (c-tr-k-true :bipValAttached s)
+        case true s
+        case _
+          match (c-tr-child-is ["val"] s)
+            case false s
+            case _
+              match [(c-tr-child-item s) (c-tr-owner-specs s)]
+                case [missing _] s
+                case [_ missing] s
+                case [item specs] (c-tr-set-k :bipValAttached true (c-tr-reg-push specs item s))
+    case :alt
+      match (c-tr-g ctx)
+        case "bip-lparen" (c-tr-bip-take (c-tr-t0 ctx) s)
+        case "bip-rparen" (c-tr-bip-take (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+def c-tr-bip-take [tok s]
+  match (c-tr-owner-specs s)
+    case missing s
+    case specs (c-tr-reg-keep specs tok s)
+
+; ---- paren_run: a balanced ( ... ), flat
+
+def c-tr-h-paren_run [phase ctx s]
+  match phase
+    case :alt
+      match (c-tr-g ctx)
+        case "prun-take" (c-tr-prun-take (c-tr-t0 ctx) s)
+        case _ s
+    case :ac
+      match (compare (c-tr-num-or 0 (c-tr-k :prunDepth s)) 1)
+        case :less (c-tr-del-ks [:prunTarget :prunDepth] s)
+        case _ s
+    case _ s
+
+def c-tr-prun-take [tok s]
+  let [s1 (match (c-tr-k :prunTarget s) (case missing (c-tr-node-keep tok s)) (case ref (c-tr-reg-keep ref tok s)))]
+    let [d (c-tr-num-or 0 (c-tr-k :prunDepth s1))]
+      match (get :tname tok)
+        case "PUNC_LPAREN" (c-tr-set-k :prunDepth (add d 1) s1)
+        case "PUNC_RPAREN" (c-tr-set-k :prunDepth (sub d 1) s1)
+        case _ s1
+
+; ---- init_declarator: a declarator and its initializer
+
+def c-tr-h-init_declarator [phase ctx s]
+  match phase
+    case :bo
+      match (c-tr-node-kind-is "init_declarator" s)
+        case true s
+        case _ (c-tr-k-reg :directDeclarator (c-tr-new "direct_declarator") (c-tr-k-reg :declarator (c-tr-new "declarator") (c-tr-set-node (c-tr-new "init_declarator") s)))
+    case :bc (c-tr-idecl-bc s)
+    case :alt
+      match (c-tr-g ctx)
+        case "idecl-paren" (c-tr-idecl-paren-open (c-tr-t0 ctx) s)
+        case "idecl-id" (c-tr-idecl-name (c-tr-t0 ctx) s)
+        case "idecl-paren-rparen" (c-tr-set-k :named true (c-tr-set-k :parenClosed true (c-tr-reg-keep (c-tr-k :directDeclarator s) (c-tr-t0 ctx) s)))
+        case "idecl-id-after-ptrs" (c-tr-idecl-name (c-tr-t0 ctx) s)
+        case "idecl-eq" (c-tr-set-u :hasInit true (c-tr-set-u :eq (c-tr-t0 ctx) s))
+        case _ s
+    case _ s
+
+def c-tr-idecl-paren-open [tok s]
+  let [dd (c-tr-k :directDeclarator s)]
+    let [decl (c-tr-k :declarator s)]
+      c-tr-set-k :idclParenPending true (c-tr-node-push (c-tr-ph decl) (c-tr-reg-push decl (c-tr-ph dd) (c-tr-reg-keep dd tok s)))
+
+def c-tr-idecl-name [tok s]
+  let [dd (c-tr-k :directDeclarator s)]
+    let [decl (c-tr-k :declarator s)]
+      let [name (get :src tok)]
+        let [s1 (c-tr-reg-ex dd "declaredName" name (c-tr-reg-keep dd tok s))]
+          let [s2 (c-tr-reg-ex decl "declaredName" name (c-tr-reg-push decl (c-tr-ph dd) s1))]
+            c-tr-set-k :named true (c-tr-node-ex "declaredName" name (c-tr-node-push (c-tr-ph decl) s2))
+
+def c-tr-idecl-bc [s]
+  let [c (c-tr-child s)]
+    match c
+      case missing s
+      case _
+        match (c-tr-child-item s)
+          case missing s
+          case item
+            match (c-tr-and (c-tr-child-is ["attribute_spec_gcc" "attribute_spec_msvc" "asm_label"] s) (c-tr-not (equal (get :i c) (c-tr-u :lastSuffix s))))
+              case true (c-tr-set-u :lastSuffix (get :i c) (c-tr-node-push item s))
+              case _
+                match (c-tr-u-true :hasInit s)
+                  case false s
+                  case _
+                    let [init (match (equal "initializer" (c-tr-kind-of (c-tr-child-node s))) (case true item) (case _ (c-tr-push-child item (c-tr-new "initializer"))))]
+                      c-tr-node-push init (c-tr-node-keep (c-tr-u :eq s) s)
+
+; ---- initializer: \`= value\`'s value, an expression or a brace list
+
+def c-tr-h-initializer [phase ctx s]
+  match phase
+    case :bo (c-tr-set-node (c-tr-new "initializer") s)
+    case :bc
+      match (c-tr-child-item s)
+        case missing s
+        case item (c-tr-node-push item s)
+    case _ s
+
+; ---- paren_inner_declarator: the ( * name ) of a declarator
+
+def c-tr-h-paren_inner_declarator [phase ctx s]
+  match phase
+    case :bo
+      match (c-tr-k-true :pidInit s)
+        case true s
+        case _ (c-tr-k-reg :directDeclarator (c-tr-new "direct_declarator") (c-tr-k-reg :declarator (c-tr-new "declarator") (c-tr-set-k :pidInit true s)))
+    case :alt
+      match (c-tr-g ctx)
+        case "pid-id" (c-tr-pid-name (c-tr-t0 ctx) s)
+        case "pid-id-after-ptrs" (c-tr-pid-name (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+def c-tr-pid-name [tok s]
+  let [dd (c-tr-k :directDeclarator s)]
+    let [decl (c-tr-k :declarator s)]
+      let [name (get :src tok)]
+        let [s1 (c-tr-set-k :named true (c-tr-reg-ex decl "declaredName" name (c-tr-reg-push decl (c-tr-ph dd) (c-tr-reg-ex dd "declaredName" name (c-tr-reg-keep dd tok s)))))]
+          match (c-tr-k-true :attached s1)
+            case true s1
+            case _
+              let [p (c-tr-parent-index s1)]
+                let [odd (c-tr-k-at p :directDeclarator s1)]
+                  let [odecl (c-tr-k-at p :declarator s1)]
+                    let [s2 (c-tr-reg-ex odd "declaredName" name (c-tr-reg-push odd (c-tr-ph decl) s1))]
+                      let [s3 (c-tr-reg-ex odecl "declaredName" name s2)]
+                        c-tr-set-k :attached true (c-tr-reg-ex (c-tr-node-ref-at p s3) "declaredName" name s3)
+
+; ---- array_postfix: [ size ]
+
+def c-tr-h-array_postfix [phase ctx s]
+  match phase
+    case :bo (c-tr-set-node (c-tr-new "array_postfix") s)
+    case :bc
+      match (c-tr-and (c-tr-child-is ["val"] s) (equal missing (c-tr-u :size s)))
+        case false s
+        case _
+          match (c-tr-child-item s)
+            case missing s
+            case item (c-tr-set-u :size true (c-tr-node-push item s))
+    case :alt
+      match (c-tr-g ctx)
+        case "arr-open" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case "arr-end-empty" (c-tr-arr-close (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+; The array postfix, closed, onto the declarator of the rule that pushed
+; it: init_declarator's direct declarator, or a parameter's declarator.
+def c-tr-arr-close [tok s]
+  let [s1 (c-tr-node-keep tok s)]
+    let [p (c-tr-parent-index s1)]
+      let [me (c-tr-ph (c-tr-node-ref s1))]
+        match (c-tr-k-at p :directDeclarator s1)
+          case missing
+            match (c-tr-k-at p :declarator s1)
+              case missing s1
+              case decl (c-tr-reg-push decl me s1)
+          case dd (c-tr-reg-push dd me s1)
+
+def c-tr-h-array_qualifier_loop [phase ctx s]
+  match phase
+    case :alt
+      match (c-tr-has (c-tr-g ctx) ["aql-static" "aql-const" "aql-volatile" "aql-restrict" "aql-atomic" "aql-star"])
+        case true (c-tr-reg-keep (c-tr-node-ref-at (c-tr-parent-index s) s) (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+; ---- pointer_list: * qualifiers ...
+
+def c-tr-h-pointer_list [phase ctx s]
+  match phase
+    case :alt
+      match (c-tr-g ctx)
+        case "ptr"
+          let [p (c-tr-parent-index s)]
+            let [s1 (c-tr-new-reg (c-tr-keep (c-tr-t0 ctx) (c-tr-new "pointer")) s)]
+              let [ptr (c-tr-last-reg s1)]
+                c-tr-set-k :lastPointer ptr (c-tr-reg-push (c-tr-k-at p :declarator s1) (c-tr-ph ptr) s1)
+        case _ s
+    case _ s
+
+def c-tr-h-pointer_qualifier_loop [phase ctx s]
+  match phase
+    case :alt
+      match (c-tr-has (c-tr-g ctx) ["pql-qual" "pql-qual-ext"])
+        case true
+          match (c-tr-k-at (c-tr-parent-index s) :lastPointer s)
+            case missing s
+            case ptr (c-tr-reg-keep ptr (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+; ---- function_postfix: ( parameters )
+
+def c-tr-h-function_postfix [phase ctx s]
+  match phase
+    case :bo (c-tr-k-reg :ptl (c-tr-new "parameter_type_list") (c-tr-set-node (c-tr-new "function_postfix") s))
+    case :alt
+      match (c-tr-g ctx)
+        case "fn-open" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case "fn-end-empty" (c-tr-attach-fn-postfix (c-tr-node-keep (c-tr-t0 ctx) s))
+        case _ s
+    case _ s
+
+def c-tr-attach-fn-postfix [s]
+  match (c-tr-k-at (c-tr-parent-index s) :directDeclarator s)
+    case missing s
+    case dd (c-tr-reg-push dd (c-tr-ph (c-tr-node-ref s)) s)
+
+def c-tr-h-identifier_list [phase ctx s]
+  match phase
+    case :bo
+      match (c-tr-node-kind-is "identifier_list" s)
+        case true s
+        case _ (c-tr-set-node (c-tr-new "identifier_list") s)
+    case :alt
+      match (c-tr-g ctx)
+        case "idl-first" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case "idl-more" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case "idl-comma" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case "idl-end" (c-tr-reg-push (c-tr-node-ref-at (c-tr-parent-index s) s) (c-tr-ph (c-tr-node-ref s)) s)
+        case _ s
+    case _ s
+
+; ---- parameter_type_list: the parameters, written into function_postfix's
+
+def c-tr-h-parameter_type_list [phase ctx s]
+  match phase
+    case :alt
+      let [p (c-tr-parent-index s)]
+        let [ptl (c-tr-k-at p :ptl s)]
+          match (c-tr-g ctx)
+            case "ptl-ellipsis"
+              let [s1 (c-tr-new-reg (c-tr-keep (c-tr-t1 ctx) (c-tr-new "parameter_variadic")) (c-tr-reg-keep ptl (c-tr-t0 ctx) s))]
+                let [s2 (c-tr-reg-ex ptl "variadic" true (c-tr-reg-push ptl (c-tr-ph (c-tr-last-reg s1)) s1))]
+                  c-tr-ptl-attach p ptl s2
+            case "ptl-more" (c-tr-reg-keep ptl (c-tr-t0 ctx) s)
+            case "ptl-end" (c-tr-ptl-attach p ptl s)
+            case _ s
+    case _ s
+
+def c-tr-ptl-attach [p ptl s]
+  match ptl
+    case missing s
+    case _
+      match (count (c-tr-kids (c-tr-reg ptl s)))
+        case 0 s
+        case _ (c-tr-reg-push (c-tr-node-ref-at p s) (c-tr-ph ptl) s)
+
+; ---- parameter_declaration
+
+def c-tr-h-parameter_declaration [phase ctx s]
+  match phase
+    case :bo
+      match (c-tr-node-kind-is "parameter_declaration" s)
+        case true s
+        case _ (c-tr-set-k :named false (c-tr-set-k :assembled false (c-tr-set-k :directDeclarator missing (c-tr-set-k :declarator missing (c-tr-k-reg :specs (c-tr-new "declaration_specifiers") (c-tr-set-node (c-tr-new "parameter_declaration") s))))))
+    case :bc (c-tr-param-bc s)
+    case :alt
+      match (c-tr-g ctx)
+        case "param-storage" (c-tr-reg-keep (c-tr-k :specs s) (c-tr-t0 ctx) s)
+        case "param-type" (c-tr-reg-keep (c-tr-k :specs s) (c-tr-t0 ctx) s)
+        case "param-ptr" (c-tr-param-pointer (c-tr-t0 ctx) s)
+        case "param-ptr-qual" (c-tr-param-pointer-qual (c-tr-t0 ctx) s)
+        case "param-ptr-qual-ext" (c-tr-param-pointer-qual (c-tr-t0 ctx) s)
+        case "param-paren-rparen" (c-tr-param-paren-close (c-tr-t0 ctx) s)
+        case "param-paren" (c-tr-param-paren-open (c-tr-t0 ctx) s)
+        case "param-id" (c-tr-param-name (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+def c-tr-param-bc [s]
+  let [s1 (match (c-tr-k-true :specsAttached s) (case true s) (case _ (c-tr-set-k :specsAttached true (c-tr-node-push (c-tr-ph (c-tr-k :specs s)) s))))]
+    let [s2 (match [(c-tr-k-true :declAttached s1) (c-tr-k :declarator s1)] (case [false missing] s1) (case [false decl] (c-tr-set-k :declAttached true (c-tr-node-push (c-tr-ph decl) s1))) (case _ s1))]
+      match (c-tr-k-true :ptlAttached s2)
+        case true s2
+        case _
+          let [p (c-tr-parent-index s2)]
+            match (equal "parameter_type_list" (get :name (c-tr-frame-at p s2)))
+              case false s2
+              case _
+                match (c-tr-k-at (sub p 1) :ptl s2)
+                  case missing s2
+                  case ptl (c-tr-set-k :ptlAttached true (c-tr-reg-push ptl (c-tr-ph (c-tr-node-ref s2)) s2))
+
+; The declarator a parameter's tokens write to, made where it has none.
+def c-tr-param-decl [s]
+  match (c-tr-k :declarator s)
+    case missing (c-tr-k-reg :declarator (c-tr-new "declarator") s)
+    case _ s
+
+def c-tr-param-pointer [tok s]
+  let [s1 (c-tr-param-decl s)]
+    let [s2 (c-tr-new-reg (c-tr-keep tok (c-tr-new "pointer")) s1)]
+      let [ptr (c-tr-last-reg s2)]
+        c-tr-set-k :lastPointer ptr (c-tr-reg-push (c-tr-k :declarator s2) (c-tr-ph ptr) s2)
+
+def c-tr-param-pointer-qual [tok s]
+  match (c-tr-k :lastPointer s)
+    case missing s
+    case ptr (c-tr-reg-keep ptr tok s)
+
+def c-tr-param-paren-close [tok s]
+  match (c-tr-k :declarator s)
+    case missing s
+    case decl (c-tr-set-k :paramParenDone true (c-tr-set-k :paramParenPending false (c-tr-reg-keep decl tok s)))
+
+def c-tr-param-paren-open [tok s]
+  let [s1 (c-tr-param-decl s)]
+    c-tr-set-k :paramParenPending true (c-tr-reg-keep (c-tr-k :declarator s1) tok s1)
+
+def c-tr-param-name [tok s]
+  let [name (get :src tok)]
+    let [s1 (c-tr-node-ex "declaredName" name s)]
+      let [s2 (c-tr-new-reg (c-tr-set-ex "declaredName" name (c-tr-keep tok (c-tr-new "direct_declarator"))) s1)]
+        let [dd (c-tr-last-reg s2)]
+          match (c-tr-k :declarator s2)
+            case missing
+              let [s3 (c-tr-new-reg (c-tr-set-ex "declaredName" name (c-tr-push-child (c-tr-ph dd) (c-tr-new "declarator"))) s2)]
+                c-tr-set-k :declarator (c-tr-last-reg s3) s3
+            case decl (c-tr-reg-ex decl "declaredName" name (c-tr-reg-push decl (c-tr-ph dd) s2))
+
+def c-tr-h-param_paren_inner [phase ctx s]
+  match phase
+    case :alt
+      match (c-tr-g ctx)
+        case "ppi-ptr" (c-tr-ppi-pointer (c-tr-no-token) s)
+        case "ppi-ptr-qual" (c-tr-param-pointer-qual (c-tr-t0 ctx) s)
+        case "ppi-ptr-qual-ext" (c-tr-param-pointer-qual (c-tr-t0 ctx) s)
+        case "ppi-id" (c-tr-ppi-name (c-tr-t0 ctx) s)
+        case "ppi-id-after-ptr" (c-tr-ppi-name (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+; The engine's placeholder token, which a rule's close token is in its
+; open state: @ppi-pointer reads rule.c0 at an open pass, so the pointer
+; keeps it, an empty token at the document's start.
+; Its numbers are counted, as a token's position is, rather than spelled:
+; a number spelled in the program keeps its lexeme.
+def c-tr-no-token [] (c-tr-tok "" "" (c-tr-span (sub 0 0) (sub 0 0) (sub 1 0) (sub 1 0)) [])
+
+; The parameter's declarator, made where it has none (owner.k.declarator).
+def c-tr-ppi-owner-decl [s]
+  let [p (c-tr-parent-index s)]
+    match (c-tr-k-at p :declarator s)
+      case missing
+        let [s1 (c-tr-new-reg (c-tr-new "declarator") s)]
+          c-tr-set-k-at p :declarator (c-tr-last-reg s1) s1
+      case _ s
+
+def c-tr-ppi-pointer [tok s]
+  let [s1 (c-tr-ppi-owner-decl s)]
+    let [s2 (c-tr-new-reg (c-tr-keep tok (c-tr-new "pointer")) s1)]
+      let [ptr (c-tr-last-reg s2)]
+        c-tr-set-k :lastPointer ptr (c-tr-reg-push (c-tr-k-at (c-tr-parent-index s2) :declarator s2) (c-tr-ph ptr) s2)
+
+def c-tr-ppi-name [tok s]
+  let [s1 (c-tr-ppi-owner-decl s)]
+    let [p (c-tr-parent-index s1)]
+      let [name (get :src tok)]
+        let [s2 (c-tr-new-reg (c-tr-set-ex "declaredName" name (c-tr-keep tok (c-tr-new "direct_declarator"))) s1)]
+          let [decl (c-tr-k-at p :declarator s2)]
+            let [s3 (c-tr-reg-ex decl "declaredName" name (c-tr-reg-push decl (c-tr-ph (c-tr-last-reg s2)) s2))]
+              c-tr-set-k :ppiNamed true (c-tr-reg-ex (c-tr-node-ref-at p s3) "declaredName" name s3)
+
+def c-tr-h-param_spec_loop [phase ctx s]
+  match phase
+    case :bc
+      let [c (c-tr-child s)]
+        match c
+          case missing s
+          case _
+            match (c-tr-and (c-tr-child-is ["struct_specifier" "enum_specifier"] s) (c-tr-not (equal (get :i c) (c-tr-u :takenTagged s))))
+              case false s
+              case _
+                match [(c-tr-child-item s) (c-tr-k-at (c-tr-parent-index s) :specs s)]
+                  case [missing _] s
+                  case [_ missing] s
+                  case [item specs] (c-tr-set-u :takenTagged (get :i c) (c-tr-reg-push specs item s))
+    case :alt
+      match (c-tr-has (c-tr-g ctx) ["param-spec-storage" "param-spec-more"])
+        case true (c-tr-reg-keep (c-tr-k-at (c-tr-parent-index s) :specs s) (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+; ---- C's operators: a copy of C_OP_TABLE (ts/src/expr-grammar.ts),
+; which the part places each operator by. A test in every runtime holds
+; this copy to the table the reader uses, entry for entry.
+;
+; Each entry: [name kind src left right], kind one of "infix" "prefix"
+; "suffix" "ternary" "paren" "cast", src the operator's token (a paren's
+; or a cast's opener), and -1 where the table gives no binding power.
+; BEGIN C_OP_TABLE
+def c-tr-op-table []
+  vector
+    ["comma" "infix" "," 1000 1001]
+    ["assign" "infix" "=" 2001 2000]
+    ["plus_a" "infix" "+=" 2001 2000]
+    ["minus_a" "infix" "-=" 2001 2000]
+    ["star_a" "infix" "*=" 2001 2000]
+    ["slash_a" "infix" "/=" 2001 2000]
+    ["pct_a" "infix" "%=" 2001 2000]
+    ["lsh_a" "infix" "<<=" 2001 2000]
+    ["rsh_a" "infix" ">>=" 2001 2000]
+    ["amp_a" "infix" "&=" 2001 2000]
+    ["crt_a" "infix" "^=" 2001 2000]
+    ["pipe_a" "infix" "|=" 2001 2000]
+    ["tern" "ternary" "?" 3001 3000]
+    ["or" "infix" "||" 4000 4001]
+    ["and" "infix" "&&" 5000 5001]
+    ["bor" "infix" "|" 6000 6001]
+    ["bxor" "infix" "^" 7000 7001]
+    ["band" "infix" "&" 8000 8001]
+    ["eq" "infix" "==" 9000 9001]
+    ["ne" "infix" "!=" 9000 9001]
+    ["lt" "infix" "<" 10000 10001]
+    ["le" "infix" "<=" 10000 10001]
+    ["gt" "infix" ">" 10000 10001]
+    ["ge" "infix" ">=" 10000 10001]
+    ["lsh" "infix" "<<" 11000 11001]
+    ["rsh" "infix" ">>" 11000 11001]
+    ["plus" "infix" "+" 12000 12001]
+    ["minus" "infix" "-" 12000 12001]
+    ["star" "infix" "*" 13000 13001]
+    ["slash" "infix" "/" 13000 13001]
+    ["pct" "infix" "%" 13000 13001]
+    ["pre_inc" "prefix" "++" -1 16000]
+    ["pre_dec" "prefix" "--" -1 16000]
+    ["unary_p" "prefix" "+" -1 16000]
+    ["unary_n" "prefix" "-" -1 16000]
+    ["lnot" "prefix" "!" -1 16000]
+    ["bnot" "prefix" "~" -1 16000]
+    ["deref" "prefix" "*" -1 16000]
+    ["addr" "prefix" "&" -1 16000]
+    ["sizeof" "prefix" "sizeof" -1 16000]
+    ["alignof" "prefix" "_Alignof" -1 16000]
+    ["alignof_g" "prefix" "alignof" -1 16000]
+    ["gnualignof" "prefix" "__alignof__" -1 16000]
+    ["gnualignof_s" "prefix" "__alignof" -1 16000]
+    ["cast" "cast" "(" -1 16000]
+    ["post_inc" "suffix" "++" 17000 -1]
+    ["post_dec" "suffix" "--" 17000 -1]
+    ["dot" "infix" "." 17000 17001]
+    ["arrow" "infix" "->" 17000 17001]
+    ["paren" "paren" "(" -1 -1]
+    ["call" "paren" "(" 17000 -1]
+    ["subscript" "paren" "[" 17000 -1]
+; END C_OP_TABLE
+
+def c-tr-op [e]
+  record
+    entry :name (c-tr-nth 0 e)
+    entry :kind (c-tr-nth 1 e)
+    entry :src (c-tr-nth 2 e)
+    entry :left (c-tr-nth 3 e)
+    entry :right (c-tr-nth 4 e)
+
+; The table's operators, once; and those of each kind an operator token
+; is read as.
+def c-tr-ops
+  map c-tr-op (c-tr-op-table)
+
+def c-tr-infix-ops
+  filter (fn [o] (equal "infix" (get :kind o))) c-tr-ops
+
+def c-tr-prefix-ops
+  filter (fn [o] (equal "prefix" (get :kind o))) c-tr-ops
+
+def c-tr-suffix-ops
+  filter (fn [o] (equal "suffix" (get :kind o))) c-tr-ops
+
+; The operator spelled src among ops.
+def c-tr-op-in [ops src]
+  let [m (filter (fn [o] (equal src (get :src o))) ops)]
+    match (count m)
+      case 0 missing
+      case _ (c-tr-nth 0 m)
+
+def c-tr-op-of [kind src]
+  match kind
+    case "infix" (c-tr-op-in c-tr-infix-ops src)
+    case "prefix" (c-tr-op-in c-tr-prefix-ops src)
+    case "suffix" (c-tr-op-in c-tr-suffix-ops src)
+    case _ missing
+
+def c-tr-op-named [name]
+  let [m (filter (fn [o] (equal name (get :name o))) c-tr-ops)]
+    match (count m)
+      case 0 missing
+      case _ (c-tr-nth 0 m)
+
+; ---- an expression being read
+;
+; A context: an expression from one of C's contexts (:root), a paren's
+; content (:group, :call or :sub), or a conditional's middle term
+; (:tmid). It holds the expression's open operators, outermost first
+; (\`spine\`, each [op tok terms open colon]: an operator whose last term
+; is the next entry, or the next term to come), the value read where no
+; operator is open (\`val\`), whether a value has just ended (\`ready\`),
+; and for a paren its opener, its separators, its finished terms and the
+; term before it (a call's callee, a subscript's array). fi names the
+; chain of the val a :root context starts at.
+
+def c-tr-xc [kind fi spine val ready items open seps callee]
+  record
+    entry :kind kind
+    entry :fi fi
+    entry :spine spine
+    entry :val val
+    entry :ready ready
+    entry :items items
+    entry :open open
+    entry :seps seps
+    entry :callee callee
+
+def c-tr-xc-set [field value c]
+  c-tr-xc
+    if (equal field :kind) value (get :kind c)
+    if (equal field :fi) value (get :fi c)
+    if (equal field :spine) value (as-vector (get :spine c))
+    if (equal field :val) value (get :val c)
+    if (equal field :ready) value (get :ready c)
+    if (equal field :items) value (as-vector (get :items c))
+    if (equal field :open) value (get :open c)
+    if (equal field :seps) value (as-vector (get :seps c))
+    if (equal field :callee) value (get :callee c)
+
+def c-tr-xs [s] (as-vector (get :xs (get :hot s)))
+def c-tr-xc-cur [s] (top (c-tr-xs s))
+def c-tr-xc-put [c s] (c-tr-st-set :xs (push c (pop (c-tr-xs s))) s)
+def c-tr-xc-push [c s] (c-tr-st-set :xs (push c (c-tr-xs s)) s)
+def c-tr-xc-has [s] (c-tr-not (equal 0 (count (c-tr-xs s))))
+
+; An operation of the expression: its operator, its token, its terms,
+; and the opener and separators of a paren, the \`:\` of a conditional.
+def c-tr-xn [op tok terms open seps colon]
+  record
+    entry :t :x
+    entry :op op
+    entry :tok tok
+    entry :terms terms
+    entry :open open
+    entry :seps seps
+    entry :colon colon
+
+def c-tr-is-xn [v]
+  match (kind v)
+    case :record (equal :x (get :t v))
+    case _ false
+
+; A spine entry: [op tok terms open colon].
+def c-tr-xe [op tok terms open colon] [op tok terms open colon]
+def c-tr-xe-op [e] (c-tr-nth 0 e)
+def c-tr-xe-terms [e] (as-vector (c-tr-nth 2 e))
+def c-tr-xe-with-terms [terms e] [(c-tr-nth 0 e) (c-tr-nth 1 e) terms (c-tr-nth 3 e) (c-tr-nth 4 e)]
+def c-tr-xe-node [e] (c-tr-xn (c-tr-nth 0 e) (c-tr-nth 1 e) (c-tr-xe-terms e) (c-tr-nth 3 e) [] (c-tr-nth 4 e))
+
+def c-tr-op-right [op] (get :right op)
+
+; The entries from i on, collapsed into one operation, the deepest first.
+def c-tr-xe-collapse [self spine i]
+  match (compare i (sub (count spine) 1))
+    case :less
+      let [inner (self self spine (inc i))]
+        let [e (c-tr-nth i spine)]
+          c-tr-xn (c-tr-nth 0 e) (c-tr-nth 1 e) (push inner (c-tr-xe-terms e)) (c-tr-nth 3 e) [] (c-tr-nth 4 e)
+    case _ (c-tr-xe-node (c-tr-nth i spine))
+
+; The first entry, from i on, whose right binding power is at least left:
+; where an infix operator wraps the expression; -1 for none.
+def c-tr-xe-wrap-at [self spine i left]
+  match (compare i (count spine))
+    case :less
+      match (compare (c-tr-op-right (c-tr-xe-op (c-tr-nth i spine))) left)
+        case :less (self self spine (inc i) left)
+        case _ i
+    case _ -1
+
+def c-tr-xs-take [n v] (map (fn [i] (c-tr-nth i v)) (filter (fn [i] (c-tr-before i n)) (indices v)))
+
+; A value ends where the context's operand goes: the deepest entry's next
+; term, or the context's value.
+def c-tr-x-operand [x s]
+  let [c (c-tr-xc-cur s)]
+    let [spine (as-vector (get :spine c))]
+      match (count spine)
+        case 0 (c-tr-xc-put (c-tr-xc-set :ready true (c-tr-xc-set :val x c)) s)
+        case _ (c-tr-xc-put (c-tr-xc-set :ready true (c-tr-xc-set :spine (push (c-tr-xe-with-terms (push x (c-tr-xe-terms (top spine))) (top spine)) (pop spine)) c)) s)
+
+; An infix operator, or a conditional's \`?\`, placed by its binding powers
+; as tabnas/expr's placeInfix places it: it takes as its first term as
+; much of the expression before it as binds no looser than its left.
+def c-tr-x-infix [op tok s]
+  let [c (c-tr-xc-cur s)]
+    c-tr-xc-put (c-tr-xc-set :ready false (c-tr-xc-set :val missing (c-tr-xc-set :spine (c-tr-x-infix-spine op tok c) c))) s
+
+def c-tr-x-infix-spine [op tok c]
+  let [spine (as-vector (get :spine c))]
+    match (count spine)
+      case 0 [(c-tr-xe op tok [(get :val c)] missing missing)]
+      case _
+        let [i (c-tr-xe-wrap-at c-tr-xe-wrap-at spine 0 (get :left op))]
+          match (compare i 0)
+            case :less
+              let [d (top spine)]
+                let [terms (c-tr-xe-terms d)]
+                  push (c-tr-xe op tok [(top terms)] missing missing) (push (c-tr-xe-with-terms (pop terms) d) (pop spine))
+            case _ (push (c-tr-xe op tok [(c-tr-xe-collapse c-tr-xe-collapse spine i)] missing missing) (c-tr-xs-take i spine))
+
+; A prefix operator, at an operand's place.
+def c-tr-x-prefix [op tok open s]
+  let [c (c-tr-xc-cur s)]
+    c-tr-xc-put (c-tr-xc-set :ready false (c-tr-xc-set :spine (push (c-tr-xe op tok [] open missing) (as-vector (get :spine c))) c)) s
+
+; The operand a postfix operator takes, out of the context: the value, a
+; member access the operator binds no tighter than (which it takes
+; whole), or the deepest entry's last term. Answers [operand state].
+def c-tr-x-take-postfix [left s]
+  let [c (c-tr-xc-cur s)]
+    let [spine (as-vector (get :spine c))]
+      match (count spine)
+        case 0 [(get :val c) (c-tr-xc-put (c-tr-xc-set :val missing c) s)]
+        case _
+          let [d (top spine)]
+            match (compare left (c-tr-op-right (c-tr-xe-op d)))
+              case :less [(c-tr-xe-node d) (c-tr-xc-put (c-tr-xc-set :spine (pop spine) c) s)]
+              case _
+                let [terms (c-tr-xe-terms d)]
+                  [(top terms) (c-tr-xc-put (c-tr-xc-set :spine (push (c-tr-xe-with-terms (pop terms) d) (pop spine)) c) s)]
+
+def c-tr-x-suffix [op tok s]
+  let [r (c-tr-x-take-postfix (get :left op) s)]
+    c-tr-x-operand (c-tr-xn op tok [(c-tr-nth 0 r)] missing [] missing) (c-tr-nth 1 r)
+
+; A paren opens: after a value, a call or a subscript, whose first term
+; is the value it takes; otherwise a group, whose content follows.
+def c-tr-x-open [tok s]
+  let [c (c-tr-xc-cur s)]
+    match [(get :ready c) (get :src tok)]
+      case [true "("] (c-tr-x-open-postfix "call" tok s)
+      case [true "["] (c-tr-x-open-postfix "subscript" tok s)
+      case _ (c-tr-xc-push (c-tr-xc :group missing [] missing false [] tok [] missing) s)
+
+def c-tr-x-open-postfix [name tok s]
+  let [r (c-tr-x-take-postfix 17000 s)]
+    c-tr-xc-push (c-tr-xc (if (equal name "call") :call :sub) missing [] missing false [] tok [] (c-tr-nth 0 r)) (c-tr-nth 1 r)
+
+; The value a context's expression ends with, its open operators closed.
+def c-tr-x-end-value [c]
+  let [spine (as-vector (get :spine c))]
+    match (count spine)
+      case 0 (get :val c)
+      case _ (c-tr-xe-collapse c-tr-xe-collapse spine 0)
+
+; A separator in a call's arguments: the term before it is done.
+def c-tr-x-sep [tok s]
+  let [c (c-tr-xc-cur s)]
+    c-tr-xc-put (c-tr-xc-set :ready false (c-tr-xc-set :val missing (c-tr-xc-set :spine [] (c-tr-xc-set :seps (push tok (as-vector (get :seps c))) (c-tr-xc-set :items (push (c-tr-x-end-value c) (as-vector (get :items c))) c))))) s
+
+; A paren closes: its node is a term of the expression around it, or,
+; for a group that holds a type name alone, a cast, whose operand follows.
+def c-tr-x-close [tok s]
+  let [c (c-tr-xc-cur s)]
+    let [last (c-tr-x-end-value c)]
+      let [items (match last (case missing (as-vector (get :items c))) (case _ (push last (as-vector (get :items c)))))]
+        let [s1 (c-tr-st-set :xs (pop (c-tr-xs s)) s)]
+          match (get :kind c)
+            case :call (c-tr-x-operand (c-tr-xn (c-tr-op-named "call") tok (push-all items [(get :callee c)]) (get :open c) (as-vector (get :seps c)) missing) s1)
+            case :sub (c-tr-x-operand (c-tr-xn (c-tr-op-named "subscript") tok (push-all items [(get :callee c)]) (get :open c) [] missing) s1)
+            case _
+              match (c-tr-and (equal 1 (count items)) (equal "type_name" (c-tr-kind-of (c-tr-item-node (c-tr-nth 0 items) s1))))
+                case true (c-tr-x-cast-entry tok (get :open c) (c-tr-nth 0 items) s1)
+                case _ (c-tr-x-operand (c-tr-xn (c-tr-op-named "paren") tok items (get :open c) [] missing) s1)
+
+; A cast: a prefix whose first term is its type name, its operand next.
+def c-tr-x-cast-entry [tok open typename s]
+  let [c (c-tr-xc-cur s)]
+    c-tr-xc-put (c-tr-xc-set :ready false (c-tr-xc-set :spine (push (c-tr-xe (c-tr-op-named "cast") tok [typename] open missing) (as-vector (get :spine c))) c)) s
+
+; A conditional's \`?\`: placed as an infix operator, and its middle term
+; read as an expression of its own.
+def c-tr-x-question [tok s]
+  c-tr-xc-push (c-tr-xc :tmid missing [] missing false [] tok [] missing) (c-tr-x-infix (c-tr-op-named "tern") tok s)
+
+; Its \`:\`: the middle term is the conditional's second, and the last
+; follows.
+def c-tr-x-colon [tok s]
+  let [mid (c-tr-x-end-value (c-tr-xc-cur s))]
+    let [s1 (c-tr-st-set :xs (pop (c-tr-xs s)) s)]
+      let [c (c-tr-xc-cur s1)]
+        let [spine (as-vector (get :spine c))]
+          let [d (top spine)]
+            c-tr-xc-put (c-tr-xc-set :ready false (c-tr-xc-set :spine (push [(c-tr-nth 0 d) (c-tr-nth 1 d) (push mid (c-tr-xe-terms d)) (c-tr-nth 3 d) tok] (pop spine)) c)) s1
+; ---- an expression's operations as C's nodes (evaluateCExpr)
+
+; Whether a term is a node of the tree: a node, or a placeholder of a
+; register's node.
+def c-tr-x-is-node [t s]
+  match t
+    case missing false
+    case _ (c-tr-or (c-tr-is-node t) (c-tr-is-ph t))
+
+def c-tr-x-push [t out s]
+  match (c-tr-x-is-node t s)
+    case true (c-tr-push-child t out)
+    case _ out
+
+def c-tr-x-drop [tok out]
+  match tok
+    case missing out
+    case _ (c-tr-drop tok out)
+
+def c-tr-x-keep [tok out]
+  match tok
+    case missing out
+    case _ (c-tr-keep tok out)
+
+def c-tr-x-term [i terms] (c-tr-nth i terms)
+
+def c-tr-x-infix-node [kind x terms s]
+  c-tr-x-push (c-tr-x-term 1 terms) (c-tr-x-drop (get :tok x) (c-tr-x-push (c-tr-x-term 0 terms) (c-tr-new kind) s)) s
+
+def c-tr-x-comma [x terms s]
+  let [left (c-tr-x-term 0 terms)]
+    let [out (match (equal "comma_expression" (c-tr-kind-of (c-tr-item-node left s))) (case true (c-tr-item-node left s)) (case _ (c-tr-x-push left (c-tr-new "comma_expression") s)))]
+      c-tr-x-push (c-tr-x-term 1 terms) (c-tr-x-drop (get :tok x) out) s
+
+def c-tr-x-member [x terms s]
+  let [name (c-tr-x-term 1 terms)]
+    let [out (c-tr-x-push name (c-tr-x-drop (get :tok x) (c-tr-x-push (c-tr-x-term 0 terms) (c-tr-new "member_expression") s)) s)]
+      let [nm (c-tr-get-ex "name" (c-tr-item-node name s))]
+        let [out1 (match (kind nm) (case :string (c-tr-set-ex "memberName" nm out)) (case _ out))]
+          c-tr-set-ex "op" (get :src (get :op x)) out1
+
+def c-tr-x-conditional [x terms s]
+  c-tr-x-push (c-tr-x-term 2 terms) (c-tr-x-drop (get :colon x) (c-tr-x-push (c-tr-x-term 1 terms) (c-tr-x-drop (get :tok x) (c-tr-x-push (c-tr-x-term 0 terms) (c-tr-new "conditional_expression") s)) s)) s
+
+def c-tr-x-unary [x terms s]
+  c-tr-x-push (c-tr-x-term 0 terms) (c-tr-x-drop (get :tok x) (c-tr-set-ex "op" (get :src (get :op x)) (c-tr-new "unary_expression"))) s
+
+def c-tr-x-postfix [x terms s]
+  c-tr-set-ex "op" (get :src (get :op x)) (c-tr-x-drop (get :tok x) (c-tr-x-push (c-tr-x-term 0 terms) (c-tr-new "postfix_unary_expression") s))
+
+; The first token a node keeps, comments left out.
+def c-tr-first-tok [n]
+  let [toks (filter (fn [c] (c-tr-and (c-tr-is-tok c) (c-tr-not (c-tr-trivia-name (get :tname c))))) (c-tr-kids n))]
+    match (count toks)
+      case 0 missing
+      case _ (c-tr-nth 0 toks)
+
+def c-tr-x-call [x terms s]
+  let [callee (c-tr-x-term 0 terms)]
+    let [cnode (c-tr-item-node callee s)]
+      let [out0 (c-tr-x-push callee (c-tr-new "call_expression") s)]
+        let [out (match (equal "identifier_expression" (c-tr-kind-of cnode)) (case true (c-tr-set-ex "isMacro" (equal "MACRO_NAME" (get :tname (c-tr-first-tok cnode))) (c-tr-set-ex "callee" (c-tr-get-ex "name" cnode) out0))) (case _ out0))]
+          let [seps (as-vector (get :seps x))]
+            let [args (map (fn [i] (c-tr-x-term i terms)) (filter (fn [i] (c-tr-not (equal i 0))) (indices terms)))]
+              let [mid (flatten (map (fn [j] (push-all (c-tr-x-if-node (c-tr-nth j args) s) (if (equal j 0) [] (c-tr-x-lead (c-tr-nth (sub j 1) seps))))) (indices args)))]
+                let [al (c-tr-x-drop (get :tok x) (c-tr-push-children mid (c-tr-x-drop (get :open x) (c-tr-new "argument_list"))))]
+                  c-tr-push-child al out
+
+def c-tr-x-if-node [t s]
+  match (c-tr-x-is-node t s)
+    case true [t]
+    case _ []
+
+; A dropped token's comments, as items.
+def c-tr-x-lead [tok]
+  match tok
+    case missing []
+    case _ (as-vector (get :lead tok))
+
+def c-tr-x-subscript [x terms s]
+  let [out (c-tr-x-push (c-tr-x-term 0 terms) (c-tr-new "subscript_expression") s)]
+    let [idx (map (fn [i] (c-tr-x-term i terms)) (filter (fn [i] (c-tr-not (equal i 0))) (indices terms)))]
+      let [il (c-tr-x-drop (get :tok x) (c-tr-push-children (filter (fn [t] (c-tr-x-is-node t s)) idx) (c-tr-x-drop (get :open x) (c-tr-new "index_list"))))]
+        c-tr-push-child il out
+
+def c-tr-x-group [x terms s]
+  c-tr-x-drop (get :tok x) (c-tr-push-children (filter (fn [t] (c-tr-x-is-node t s)) terms) (c-tr-x-drop (get :open x) (c-tr-new "paren_expression")))
+
+def c-tr-x-postfix-kinds [] ["member_expression" "subscript_expression" "call_expression" "postfix_unary_expression"]
+
+; A cast, or a compound literal where the operand's postfix chain is
+; built over a brace list.
+def c-tr-x-cast [x terms s]
+  let [tn (c-tr-x-term 0 terms)]
+    let [operand (c-tr-x-term 1 terms)]
+      let [parens (fn [kind body] (c-tr-x-push body (c-tr-x-keep (get :tok x) (c-tr-x-push tn (c-tr-x-keep (get :open x) (c-tr-new kind)) s)) s))]
+        match (equal "initializer_list" (c-tr-kind-of (c-tr-item-node operand s)))
+          case true (parens "compound_literal" operand)
+          case _
+            match (c-tr-x-patch c-tr-x-patch operand parens s)
+              case missing (parens "cast_expression" operand)
+              case patched patched
+
+; The postfix chain over a brace list, with the brace list made a
+; compound literal: missing where the chain does not end at one.
+def c-tr-x-patch [self n parens s]
+  match (c-tr-and (c-tr-is-node n) (c-tr-has (get :kind n) (c-tr-x-postfix-kinds)))
+    case false missing
+    case _
+      let [kids (c-tr-kids n)]
+        let [ix (filter (fn [i] (c-tr-x-is-node (c-tr-nth i kids) s)) (indices kids))]
+          match (count ix)
+            case 0 missing
+            case _
+              let [j (c-tr-nth 0 ix)]
+                let [first (c-tr-nth j kids)]
+                  let [rep (match (equal "initializer_list" (c-tr-kind-of (c-tr-item-node first s))) (case true (parens "compound_literal" first)) (case _ (self self first parens s)))]
+                    match rep
+                      case missing missing
+                      case r (c-tr-with-children (map (fn [i] (if (equal i j) r (c-tr-nth i kids))) (indices kids)) n)
+
+; An operation as C's node, its terms first.
+def c-tr-x-eval [self x s]
+  match (c-tr-is-xn x)
+    case false x
+    case _
+      let [terms (map (fn [t] (self self t s)) (as-vector (get :terms x)))]
+        let [op (get :op x)]
+          match [(get :kind op) (get :name op)]
+            case ["cast" _] (c-tr-x-cast x terms s)
+            case ["paren" "call"] (c-tr-x-call x terms s)
+            case ["paren" "subscript"] (c-tr-x-subscript x terms s)
+            case ["paren" _] (c-tr-x-group x terms s)
+            case ["ternary" _] (c-tr-x-conditional x terms s)
+            case ["infix" "comma"] (c-tr-x-comma x terms s)
+            case ["infix" "dot"] (c-tr-x-member x terms s)
+            case ["infix" "arrow"] (c-tr-x-member x terms s)
+            case ["infix" name]
+              match (c-tr-has name ["assign" "plus_a" "minus_a" "star_a" "slash_a" "pct_a" "lsh_a" "rsh_a" "amp_a" "crt_a" "pipe_a"])
+                case true (c-tr-set-ex "op" (get :src op) (c-tr-x-infix-node "assignment_expression" x terms s))
+                case _ (c-tr-set-ex "op" (get :src op) (c-tr-x-infix-node "binary_expression" x terms s))
+            case ["prefix" _] (c-tr-x-unary x terms s)
+            case ["suffix" _] (c-tr-x-postfix x terms s)
+            case _ (c-tr-push-children (filter (fn [t] (c-tr-x-is-node t s)) terms) (c-tr-new "expression"))
+
+; ---- the rules expr reads an expression with
+
+; A literal or an identifier, from its one token.
+def c-tr-x-atom [kind tok]
+  let [n (c-tr-keep tok (c-tr-new kind))]
+    match kind
+      case "literal_expression" (c-tr-set-ex "value" (get :src tok) (c-tr-set-ex "literalKind" (get :tname tok) n))
+      case _ (c-tr-set-ex "name" (get :src tok) n)
+
+def c-tr-x-atom-kind [ctx]
+  match (c-tr-or (c-tr-g-has "c-id" ctx) (c-tr-or (c-tr-g-has "c-macro" ctx) (c-tr-g-has "c-typedef" ctx)))
+    case true "identifier_expression"
+    case _ "literal_expression"
+
+; The C rules a val pushes for a term, whose node is the term.
+def c-tr-term-rules [] ["type_name" "sizeof_type_form" "initializer_list" "string_atom" "generic_selection" "statement_expression"]
+
+def c-tr-h-val [phase ctx s]
+  match phase
+    case :bo
+      let [f (c-tr-cur s)]
+        match (c-tr-and (equal true (get :xroot f)) (equal (get :i f) (get :fi f)))
+          case true (c-tr-xc-push (c-tr-xc :root (get :fi f) [] missing false [] missing [] missing) s)
+          case _ s
+    case :alt
+      match [(get :state ctx) (c-tr-g-has "c-atom" ctx) (c-tr-g-has "c-str" ctx)]
+        case [:open true false] (c-tr-x-operand (c-tr-x-atom (c-tr-x-atom-kind ctx) (c-tr-t0 ctx)) s)
+        case _ s
+    case :bc
+      let [c (c-tr-child s)]
+        match c
+          case missing s
+          case _
+            match (c-tr-and (c-tr-has (get :name c) (c-tr-term-rules)) (c-tr-not (equal (get :i c) (c-tr-u :seenTerm s))))
+              case false s
+              case _
+                match (c-tr-child-item s)
+                  case missing s
+                  case item (c-tr-x-operand item (c-tr-set-u :seenTerm (get :i c) s))
+    case _ s
+
+def c-tr-h-expr [phase ctx s]
+  match phase
+    case :alt
+      match [(get :state ctx) (c-tr-t0 ctx)]
+        case [_ missing] s
+        case [:open tok]
+          match [(c-tr-g-has "expr-infix" ctx) (c-tr-g-has "expr-prefix" ctx) (c-tr-g-has "expr-suffix" ctx) (c-tr-g-has "expr-ternary-bound" ctx)]
+            case [true _ _ _] (c-tr-x-infix (c-tr-op-of "infix" (get :src tok)) tok s)
+            case [_ true _ _] (c-tr-x-prefix (c-tr-op-of "prefix" (get :src tok)) tok missing s)
+            case [_ _ true _] (c-tr-x-suffix (c-tr-op-of "suffix" (get :src tok)) tok s)
+            case [_ _ _ true] (c-tr-x-question tok s)
+            case _ s
+        case [:close tok]
+          match (c-tr-and (equal ":" (get :src tok)) (c-tr-g-has "expr-ternary-bound" ctx))
+            case true (c-tr-x-colon tok s)
+            case _ s
+    case _ s
+
+def c-tr-h-paren [phase ctx s]
+  match phase
+    case :alt
+      match [(get :state ctx) (c-tr-t0 ctx)]
+        case [_ missing] s
+        case [:open tok] (c-tr-x-open tok s)
+        case [:close tok]
+          match [(get :src tok) (c-tr-g-has "expr-sep" ctx) (c-tr-g-has "close" ctx)]
+            case ["," true _] (c-tr-x-sep tok s)
+            case [_ _ true] (c-tr-x-close tok s)
+            case _ s
+    case _ s
+
+; ---- the expression an xroot val's chain hands its context
+
+; The node of the expression the chain f began, once it ends.
+def c-tr-x-result [f s]
+  match (c-tr-failed s)
+    case true missing
+    case _
+      let [cs (filter (fn [c] (equal (get :fi f) (get :fi c))) (c-tr-xs s))]
+        match (count cs)
+          case 0 missing
+          case _
+            match (c-tr-x-end-value (top (c-tr-xs s)))
+              case missing missing
+              case v (c-tr-x-eval c-tr-x-eval v s)
+
+; The contexts the chain f began, and every one after them, go.
+def c-tr-xs-pop [f s]
+  match (get :xroot f)
+    case true
+      let [xs (c-tr-xs s)]
+        let [at (filter (fn [i] (equal (get :fi f) (get :fi (c-tr-nth i xs)))) (indices xs))]
+          match (count at)
+            case 0 s
+            case _ (c-tr-st-set :xs (c-tr-xs-take (c-tr-nth 0 at) xs) s)
+    case _ s
+; ---- statements
+
+; A rule takes a tree item as its node: a placeholder's register, or a
+; register made for a value.
+def c-tr-set-node-item [item s]
+  match (c-tr-is-ph item)
+    case true (c-tr-set-node-ref (c-tr-ref (get :id item)) s)
+    case _ (c-tr-set-node item s)
+
+; The child's node, where it has one: its item.
+def c-tr-child-has-node [s] (c-tr-not (equal missing (c-tr-child-item s)))
+
+def c-tr-h-compound_statement [phase ctx s]
+  match phase
+    case :bo (c-tr-set-node (c-tr-new "compound_statement") s)
+    case :bc
+      let [c (c-tr-child s)]
+        match c
+          case missing s
+          case _
+            match (c-tr-and (equal "block_item" (get :name c)) (c-tr-and (c-tr-child-has-node s) (c-tr-not (equal (get :i c) (c-tr-k :taken s)))))
+              case true (c-tr-set-k :taken (get :i c) (c-tr-node-push (c-tr-child-item s) s))
+              case _ s
+    case :alt
+      match (c-tr-g ctx)
+        case "cs-open" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case "cs-end" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+; block_item and statement relay their child's node.
+def c-tr-h-block_item [phase ctx s]
+  match phase
+    case :bc
+      match (c-tr-child-item s)
+        case missing s
+        case item (c-tr-set-node-item item s)
+    case _ s
+
+def c-tr-h-statement [phase ctx s]
+  match phase
+    case :bc
+      match [(c-tr-node-kind-is "expression_statement" s) (c-tr-child-item s)]
+        case [true missing] s
+        case [_ missing] s
+        case [_ item]
+          match (equal "preprocessor_directive" (get :name (c-tr-child s)))
+            case true
+              let [kids (c-tr-kids (c-tr-item-node item s))]
+                match (count kids)
+                  case 0 (c-tr-set-node-item item s)
+                  case _ (c-tr-set-node-item (c-tr-nth 0 kids) s)
+            case _ (c-tr-set-node-item item s)
+    case :alt
+      match (c-tr-g ctx)
+        case "stmt-empty" (c-tr-set-node (c-tr-keep (c-tr-t0 ctx) (c-tr-new "expression_statement")) s)
+        case _ s
+    case _ s
+
+def c-tr-h-expression_statement [phase ctx s]
+  match phase
+    case :bo (c-tr-set-node (c-tr-new "expression_statement") s)
+    case :bc
+      match (c-tr-and (c-tr-child-is ["val"] s) (c-tr-not (c-tr-u-true :exprAttached s)))
+        case false s
+        case _
+          match (c-tr-child-item s)
+            case missing s
+            case item (c-tr-set-u :exprAttached true (c-tr-node-push item s))
+    case :alt
+      match (c-tr-g ctx)
+        case "es-end" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+def c-tr-h-jump_statement [phase ctx s]
+  match phase
+    case :bo
+      match (c-tr-node-kind-is "jump_statement" s)
+        case true s
+        case _ (c-tr-set-node (c-tr-new "jump_statement") s)
+    case :bc
+      match (c-tr-and (c-tr-child-is ["val"] s) (c-tr-and (c-tr-k-true :tookExpr s) (c-tr-not (c-tr-k-true :exprAttached s))))
+        case false s
+        case _
+          match (c-tr-child-item s)
+            case missing s
+            case item (c-tr-set-k :exprAttached true (c-tr-node-push item s))
+    case :alt
+      match (c-tr-g ctx)
+        case "js-return" (c-tr-js-keyword (c-tr-t0 ctx) s)
+        case "js-break" (c-tr-js-keyword (c-tr-t0 ctx) s)
+        case "js-continue" (c-tr-js-keyword (c-tr-t0 ctx) s)
+        case "js-goto" (c-tr-js-keyword (c-tr-t0 ctx) s)
+        case "js-end" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case "js-take-label" (c-tr-set-k :tookLabel true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "js-take-expr" (c-tr-set-k :tookExpr true s)
+        case _ s
+    case _ s
+
+def c-tr-js-keyword [tok s] (c-tr-set-k :started true (c-tr-node-keep tok (c-tr-node-ex "jumpKind" (get :src tok) s)))
+
+def c-tr-h-paren_condition [phase ctx s]
+  match phase
+    case :bo (c-tr-set-node (c-tr-new "paren_condition") s)
+    case :bc
+      match (c-tr-and (c-tr-child-is ["val"] s) (c-tr-not (c-tr-u-true :exprAttached s)))
+        case false s
+        case _
+          match (c-tr-child-item s)
+            case missing s
+            case item (c-tr-set-u :exprAttached true (c-tr-node-push item s))
+    case :alt
+      match (c-tr-g ctx)
+        case "pc-open" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case "pc-end" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+; The node of a control statement: its own, or, on re-entry, the one its
+; k names.
+def c-tr-stmt-bo [name kname s]
+  let [f (c-tr-cur s)]
+    match [(equal name (get :prev f)) (c-tr-k kname s)]
+      case [true missing] (c-tr-stmt-new name kname s)
+      case [true ref] (c-tr-set-node-ref ref s)
+      case _ (c-tr-stmt-new name kname s)
+
+def c-tr-stmt-new [name kname s]
+  let [s1 (c-tr-set-node (c-tr-new name) s)]
+    c-tr-del-ks (c-tr-stmt-clear-ks) (c-tr-set-k kname (c-tr-node-ref s1) s1)
+
+; A control statement's child: its condition, then its statements, each
+; once.
+def c-tr-stmt-take [flag s]
+  match (c-tr-child-item s)
+    case missing s
+    case item (c-tr-set-k flag true (c-tr-node-push item s))
+
+def c-tr-h-if_statement [phase ctx s]
+  match phase
+    case :bo (c-tr-stmt-bo "if_statement" :ifNode s)
+    case :bc
+      match (c-tr-child-has-node s)
+        case false s
+        case _
+          match [(get :name (c-tr-child s)) (c-tr-k-true :tookCond s) (c-tr-k-true :tookThen s) (c-tr-k-true :elseSeen s) (c-tr-k-true :tookElse s)]
+            case ["paren_condition" false _ _ _] (c-tr-stmt-take :tookCond s)
+            case ["statement" _ false _ _] (c-tr-stmt-take :tookThen s)
+            case ["statement" _ true true false] (c-tr-stmt-take :tookElse s)
+            case _ s
+    case :alt
+      match (c-tr-g ctx)
+        case "if-kw" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case "if-else-end" (c-tr-set-k :elseSeen true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "if-else-decl" (c-tr-set-k :elseSeen true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "if-else-decl-1" (c-tr-set-k :elseSeen true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "if-else" (c-tr-set-k :elseSeen true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case _ s
+    case _ s
+
+def c-tr-h-while_statement [phase ctx s]
+  match phase
+    case :bo (c-tr-stmt-bo "while_statement" :whileNode s)
+    case :bc
+      match (c-tr-child-has-node s)
+        case false s
+        case _
+          match [(get :name (c-tr-child s)) (c-tr-k-true :tookCond s) (c-tr-k-true :tookBody s)]
+            case ["paren_condition" false _] (c-tr-stmt-take :tookCond s)
+            case ["statement" _ false] (c-tr-stmt-take :tookBody s)
+            case _ s
+    case :alt
+      match (c-tr-g ctx)
+        case "while-kw" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+def c-tr-h-do_statement [phase ctx s]
+  match phase
+    case :bo (c-tr-stmt-bo "do_statement" :doNode s)
+    case :bc
+      match (c-tr-child-has-node s)
+        case false s
+        case _
+          match [(get :name (c-tr-child s)) (c-tr-k-true :tookBody s) (c-tr-k-true :tookCond s)]
+            case ["statement" false _] (c-tr-stmt-take :tookBody s)
+            case ["paren_condition" _ false] (c-tr-stmt-take :tookCond s)
+            case _ s
+    case :alt
+      match (c-tr-g ctx)
+        case "do-kw" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case "do-while" (c-tr-set-k :tookWhile true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "do-while-bare" (c-tr-set-k :tookWhile true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "do-end" (c-tr-set-k :tookSemi true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case _ s
+    case _ s
+
+def c-tr-h-switch_statement [phase ctx s]
+  match phase
+    case :bo (c-tr-stmt-bo "switch_statement" :switchNode s)
+    case :bc
+      match (c-tr-child-has-node s)
+        case false s
+        case _
+          match [(get :name (c-tr-child s)) (c-tr-k-true :tookCond s) (c-tr-k-true :tookBody s)]
+            case ["paren_condition" false _] (c-tr-stmt-take :tookCond s)
+            case ["statement" _ false] (c-tr-stmt-take :tookBody s)
+            case _ s
+    case :alt
+      match (c-tr-g ctx)
+        case "switch-kw" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+def c-tr-h-for_statement [phase ctx s]
+  match phase
+    case :bo (c-tr-stmt-bo "for_statement" :forNode s)
+    case :bc
+      match (c-tr-child-has-node s)
+        case false s
+        case _
+          match [(get :name (c-tr-child s)) (c-tr-k-true :tookControls s) (c-tr-k-true :tookBody s)]
+            case ["for_controls" false _] (c-tr-stmt-take :tookControls s)
+            case ["statement" _ false] (c-tr-stmt-take :tookBody s)
+            case _ s
+    case :alt
+      match (c-tr-g ctx)
+        case "for-kw" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+def c-tr-h-for_controls [phase ctx s]
+  match phase
+    case :bo (c-tr-stmt-bo "for_controls" :fcNode s)
+    case :bc
+      match (c-tr-child-has-node s)
+        case false s
+        case _
+          match [(get :name (c-tr-child s)) (c-tr-k-true :tookInit s) (c-tr-k-true :tookCond s) (c-tr-k-true :tookIter s)]
+            case ["for_init" false _ _] (c-tr-stmt-take :tookInit s)
+            case ["for_cond" _ false _] (c-tr-stmt-take :tookCond s)
+            case ["for_iter" _ _ false] (c-tr-stmt-take :tookIter s)
+            case _ s
+    case :alt
+      match (c-tr-g ctx)
+        case "fc-open" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case "fc-end" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+; for_init, for_cond and for_iter: an expression, or a declaration, and
+; the \`;\` after.
+def c-tr-for-part-bo [kind s]
+  match (c-tr-node-kind-is kind s)
+    case true s
+    case _ (c-tr-set-node (c-tr-new kind) s)
+
+def c-tr-for-part-bc [s]
+  match (c-tr-child-item s)
+    case missing s
+    case item
+      match [(c-tr-k :took s) (get :name (c-tr-child s))]
+        case ["decl" "simple_declaration"] (c-tr-node-push item s)
+        case ["expr" "val"] (c-tr-node-push item s)
+        case _ s
+
+def c-tr-h-for_init [phase ctx s]
+  match phase
+    case :bo (c-tr-for-part-bo "for_init" s)
+    case :bc (c-tr-for-part-bc s)
+    case :alt
+      match (c-tr-g ctx)
+        case "fi-empty" (c-tr-set-k :took "empty" (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "fi-decl-storage" (c-tr-set-k :took "decl" s)
+        case "fi-decl-type" (c-tr-set-k :took "decl" s)
+        case "fi-expr" (c-tr-set-k :took "expr" s)
+        case "fi-semi" (c-tr-set-k :tookSemi true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case _ s
+    case _ s
+
+def c-tr-h-for_cond [phase ctx s]
+  match phase
+    case :bo (c-tr-for-part-bo "for_cond" s)
+    case :bc (c-tr-for-part-bc s)
+    case :alt
+      match (c-tr-g ctx)
+        case "fcond-empty" (c-tr-set-k :took "empty" (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "fcond-expr" (c-tr-set-k :took "expr" s)
+        case "fcond-semi" (c-tr-set-k :tookSemi true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case _ s
+    case _ s
+
+def c-tr-h-for_iter [phase ctx s]
+  match phase
+    case :bo (c-tr-for-part-bo "for_iter" s)
+    case :bc (c-tr-for-part-bc s)
+    case :alt
+      match (c-tr-g ctx)
+        case "fiter-expr" (c-tr-set-k :took "expr" s)
+        case _ s
+    case _ s
+
+def c-tr-h-labeled_statement [phase ctx s]
+  match phase
+    case :bo (c-tr-set-node (c-tr-new "labeled_statement") s)
+    case :bc
+      match (c-tr-child-item s)
+        case missing s
+        case item
+          match [(c-tr-u :kind s) (get :name (c-tr-child s)) (c-tr-u-true :exprAttached s) (c-tr-u-true :tookBody s)]
+            case ["case" "val" false _] (c-tr-set-u :exprAttached true (c-tr-node-push item s))
+            case [_ "statement" _ false] (c-tr-set-u :tookBody true (c-tr-node-push item s))
+            case _ s
+    case :alt
+      match (c-tr-g ctx)
+        case "lbl-case" (c-tr-set-u :kind "case" (c-tr-node-keep (c-tr-t0 ctx) (c-tr-node-ex "labelKind" "case" s)))
+        case "lbl-default" (c-tr-set-u :kind "default" (c-tr-node-keep (c-tr-t0 ctx) (c-tr-node-ex "labelKind" "default" s)))
+        case "lbl-name" (c-tr-set-u :kind "label" (c-tr-node-keep (c-tr-t0 ctx) (c-tr-node-ex "labelName" (get :src (c-tr-t0 ctx)) (c-tr-node-ex "labelKind" "label" s))))
+        case "lbl-expr" (c-tr-set-u :tookExpr true s)
+        case "lbl-colon-end" (c-tr-set-u :tookColon true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "lbl-colon-decl" (c-tr-set-u :tookColon true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "lbl-colon-decl-1" (c-tr-set-u :tookColon true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "lbl-colon" (c-tr-set-u :tookColon true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case _ s
+    case _ s
+; ---- the forms C's grammar reads inside expressions, and initializers
+
+; A rule a replace loop re-enters keeps its node, which its k names; a
+; fresh one makes it, with the k entries given reset.
+def c-tr-loop-bo [name kname kind resets s]
+  let [f (c-tr-cur s)]
+    match [(equal name (get :prev f)) (c-tr-k kname s)]
+      case [true missing] (c-tr-loop-new kname kind resets s)
+      case [true ref] (c-tr-set-node-ref ref s)
+      case _ (c-tr-loop-new kname kind resets s)
+
+def c-tr-loop-new [kname kind resets s]
+  let [s1 (c-tr-set-node kind s)]
+    c-tr-set-ks resets (c-tr-set-k kname (c-tr-node-ref s1) s1)
+
+; Set several k entries, [key value] each.
+def c-tr-set-ks [pairs s]
+  match (count pairs)
+    case 0 s
+    case _ (c-tr-set-cur (c-tr-fr-set :k (c-tr-bag-sets pairs (as-vector (get :k (c-tr-cur s)))) (c-tr-cur s)) s)
+
+def c-tr-bag-sets [pairs bag] (push-all (map (fn [p] (c-tr-kv (c-tr-nth 0 p) (c-tr-nth 1 p))) pairs) (c-tr-bag-dels (map (fn [p] (c-tr-nth 0 p)) pairs) bag))
+
+; A token's depth change: an opener deepens, a closer returns.
+def c-tr-depth-step [tok d]
+  match (get :tname tok)
+    case "PUNC_LPAREN" (add d 1)
+    case "PUNC_LBRACKET" (add d 1)
+    case "PUNC_RPAREN" (sub d 1)
+    case "PUNC_RBRACKET" (sub d 1)
+    case _ d
+
+def c-tr-h-type_name [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "type_name" :tnNode (c-tr-new "type_name") [[:tnTaken false] [:depth 0]] s)
+    case :alt
+      match (c-tr-has (c-tr-g ctx) ["tn-first" "tn-more"])
+        case true
+          let [tok (c-tr-t0 ctx)]
+            c-tr-set-k :depth (c-tr-depth-step tok (c-tr-num-or 0 (c-tr-k :depth s))) (c-tr-set-k :tnTaken true (c-tr-node-keep tok s))
+        case _ s
+    case _ s
+
+def c-tr-h-sizeof_type_form [phase ctx s]
+  match phase
+    case :bo (c-tr-set-node (c-tr-new "unary_expression") s)
+    case :bc
+      match (c-tr-and (c-tr-child-is ["type_name"] s) (c-tr-not (c-tr-k-true :typeNameAttached s)))
+        case false s
+        case _
+          match (c-tr-child-item s)
+            case missing s
+            case item (c-tr-set-k :typeNameAttached true (c-tr-node-push item s))
+    case :alt
+      match (c-tr-g ctx)
+        case "stf-lparen" (c-tr-set-k :tookLparen true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "stf-rparen" (c-tr-set-k :tookRparen true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case g
+          match (c-tr-has g ["stf-sizeof" "stf-alignof" "stf-alignof-2" "stf-alignof-3" "stf-alignof-4"])
+            case true (c-tr-set-k :kwTaken true (c-tr-node-keep (c-tr-t0 ctx) (c-tr-node-ex "op" (get :src (c-tr-t0 ctx)) s)))
+            case _ s
+    case _ s
+
+def c-tr-h-initializer_list [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "initializer_list" :ilNode (c-tr-new "initializer_list") [[:opened false] [:takenItems missing]] s)
+    case :bc
+      let [c (c-tr-child s)]
+        match c
+          case missing s
+          case _
+            match (c-tr-and (equal "initializer_item" (get :name c)) (c-tr-and (c-tr-child-has-node s) (c-tr-not (equal (get :i c) (c-tr-k :takenItems s)))))
+              case true (c-tr-set-k :takenItems (get :i c) (c-tr-node-push (c-tr-child-item s) s))
+              case _ s
+    case :alt
+      match (c-tr-g ctx)
+        case "il-open" (c-tr-set-k :opened true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "il-end" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case "il-comma" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+def c-tr-h-initializer_item [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "initializer_item" :iiNode (c-tr-new "initializer_item") [[:hasDesig false] [:tookEq false] [:gotValue false] [:desigAttached false]] s)
+    case :bc
+      match (c-tr-child-item s)
+        case missing s
+        case item
+          match [(get :name (c-tr-child s)) (c-tr-k-true :desigAttached s) (c-tr-k-true :gotValue s)]
+            case ["designation" false _] (c-tr-set-k :desigAttached true (c-tr-node-push item s))
+            case ["initializer_list" _ false] (c-tr-set-k :gotValue true (c-tr-node-push (c-tr-push-child item (c-tr-new "initializer")) s))
+            case ["val" _ false] (c-tr-set-k :gotValue true (c-tr-node-push item s))
+            case _ s
+    case :alt
+      match (c-tr-g ctx)
+        case "ii-desig" (c-tr-set-k :hasDesig true s)
+        case "ii-idx-desig" (c-tr-set-k :hasDesig true s)
+        case "ii-nested" (c-tr-set-k :nestedKind "list" s)
+        case "ii-val-list" (c-tr-set-k :nestedKind "list" s)
+        case "ii-eq" (c-tr-set-k :tookEq true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case _ s
+    case _ s
+
+def c-tr-h-designation [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "designation" :dsNode (c-tr-new "designation") [[:takenDrs missing]] s)
+    case :bc
+      let [c (c-tr-child s)]
+        match c
+          case missing s
+          case _
+            match (c-tr-and (equal "designator" (get :name c)) (c-tr-and (c-tr-child-has-node s) (c-tr-not (equal (get :i c) (c-tr-k :takenDrs s)))))
+              case true (c-tr-set-k :takenDrs (get :i c) (c-tr-node-push (c-tr-child-item s) s))
+              case _ s
+    case _ s
+
+def c-tr-h-designator [phase ctx s]
+  match phase
+    case :bc
+      match (c-tr-and (equal "index" (c-tr-k :kind s)) (c-tr-and (c-tr-child-is ["val"] s) (c-tr-not (c-tr-k-true :idxExprAttached s))))
+        case false s
+        case _
+          match (c-tr-child-item s)
+            case missing s
+            case item (c-tr-set-k :idxExprAttached true (c-tr-node-push item s))
+    case :alt
+      match (c-tr-g ctx)
+        case "dr-dot" (c-tr-set-k :kind "member" (c-tr-node-keep (c-tr-t0 ctx) (c-tr-set-node (c-tr-new "member_designator") s)))
+        case "dr-lbracket" (c-tr-set-k :kind "index" (c-tr-node-keep (c-tr-t0 ctx) (c-tr-set-node (c-tr-new "index_designator") s)))
+        case "dr-id" (c-tr-set-k :tookId true (c-tr-node-keep (c-tr-t0 ctx) (c-tr-node-ex "memberName" (get :src (c-tr-t0 ctx)) s)))
+        case "dr-rbracket" (c-tr-set-k :tookRbracket true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case _ s
+    case _ s
+
+def c-tr-h-generic_selection [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "generic_selection" :gsNode (c-tr-new "generic_selection") [] s)
+    case :bc
+      let [c (c-tr-child s)]
+        match [c (c-tr-child-item s)]
+          case [missing _] s
+          case [_ missing] s
+          case [_ item]
+            let [taken (c-tr-k :takenAssocs s)]
+              match [(get :name c) (c-tr-k-true :ctrlTaken s) (equal (get :i c) taken)]
+                case ["generic_controlling_expression" false _] (c-tr-set-k :ctrlTaken true (c-tr-node-push item s))
+                case ["generic_association" _ false] (c-tr-set-k :lastWasAssoc true (c-tr-set-k :takenAssocs (get :i c) (c-tr-node-push item s)))
+                case _ s
+    case :alt
+      match (c-tr-g ctx)
+        case "gs-kw" (c-tr-set-k :kwTaken true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "gs-lparen" (c-tr-set-k :lparenTaken true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "gs-comma" (c-tr-set-k :lastWasAssoc false (c-tr-set-k :commaTaken true (c-tr-node-keep (c-tr-t0 ctx) s)))
+        case "gs-more-comma" (c-tr-set-k :lastWasAssoc false (c-tr-set-k :commaTaken true (c-tr-node-keep (c-tr-t0 ctx) s)))
+        case "gs-rparen" (c-tr-set-k :rparenTaken true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case _ s
+    case _ s
+
+def c-tr-h-generic_controlling_expression [phase ctx s]
+  match phase
+    case :bo (c-tr-set-node (c-tr-new "generic_controlling_expression") s)
+    case :bc
+      match (c-tr-and (c-tr-child-is ["val"] s) (c-tr-not (c-tr-u-true :exprAttached s)))
+        case false s
+        case _
+          match (c-tr-child-item s)
+            case missing s
+            case item (c-tr-set-u :exprAttached true (c-tr-node-push item s))
+    case _ s
+
+def c-tr-h-generic_association [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "generic_association" :gaNode (c-tr-new "generic_association") [[:gaKind missing] [:gaColonTaken false] [:gaValueTaken false] [:gaTypeAttached false]] s)
+    case :bc
+      match (c-tr-child-item s)
+        case missing s
+        case item
+          match [(get :name (c-tr-child s)) (c-tr-k-true :gaTypeAttached s) (c-tr-k-true :gaValueTaken s)]
+            case ["type_name_assoc" false _] (c-tr-set-k :gaTypeAttached true (c-tr-node-push item s))
+            case ["val" _ false] (c-tr-set-k :gaValueTaken true (c-tr-node-push item s))
+            case _ s
+    case :alt
+      match (c-tr-g ctx)
+        case "ga-default" (c-tr-set-k :gaKind "default" (c-tr-node-keep (c-tr-t0 ctx) (c-tr-node-ex "associationKind" "default" s)))
+        case "ga-type" (c-tr-set-k :gaKind "type" (c-tr-node-ex "associationKind" "type" s))
+        case "ga-colon" (c-tr-set-k :gaColonTaken true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case _ s
+    case _ s
+
+def c-tr-h-type_name_assoc [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "type_name_assoc" :tnaNode (c-tr-new "type_name") [[:tnaDepth 0]] s)
+    case :alt
+      match (c-tr-has (c-tr-g ctx) ["tna-first" "tna-more"])
+        case true
+          let [tok (c-tr-t0 ctx)]
+            c-tr-set-k :tnaDepth (c-tr-depth-step tok (c-tr-num-or 0 (c-tr-k :tnaDepth s))) (c-tr-node-keep tok s)
+        case _ s
+    case _ s
+
+def c-tr-h-statement_expression [phase ctx s]
+  match phase
+    case :bo (c-tr-set-node (c-tr-new "statement_expression") s)
+    case :bc
+      match (c-tr-and (c-tr-child-is ["compound_statement"] s) (c-tr-not (c-tr-k-true :bodyAttached s)))
+        case false s
+        case _
+          match (c-tr-child-item s)
+            case missing s
+            case item (c-tr-set-k :bodyAttached true (c-tr-node-push item s))
+    case :alt
+      match (c-tr-g ctx)
+        case "se-open" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case "se-end" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+def c-tr-h-string_atom [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "string_atom" :saNode (c-tr-set-ex "literalKind" "LIT_STRING" (c-tr-new "literal_expression")) [[:taken false]] s)
+    case :alt
+      match (c-tr-has (c-tr-g ctx) ["sa-first" "sa-more"])
+        case true
+          let [tok (c-tr-t0 ctx)]
+            let [s1 (c-tr-node-keep tok s)]
+              match (c-tr-k-true :taken s1)
+                case false (c-tr-set-k :taken true (c-tr-node-ex "value" (get :src tok) s1))
+                case _ (c-tr-node-ex "value" (string-join "" [(c-tr-num-or "" (c-tr-node-get-ex "value" s1)) (get :src tok)]) s1)
+        case _ s
+    case _ s
+
+def c-tr-h-compound_literal_body [phase ctx s]
+  match phase
+    case :bc
+      match (c-tr-and (c-tr-child-is ["initializer_list"] s) (c-tr-not (c-tr-k-true :relayed s)))
+        case false s
+        case _
+          match (c-tr-child-item s)
+            case missing s
+            case item (c-tr-set-k :relayed true (c-tr-set-node-item item s))
+    case _ s
+; ---- struct, union and enum specifiers
+
+def c-tr-node-set-kind [kind s] (c-tr-update-node (fn [n] (c-tr-set-kind kind n)) s)
+
+; Take a child once: k's entry names the child taken last, the one each
+; later before-close sees again until the rule pushes another.
+def c-tr-take-once [kname s]
+  let [c (c-tr-child s)]
+    match (equal (get :i c) (c-tr-k kname s))
+      case true s
+      case _ (c-tr-set-k kname (get :i c) (c-tr-node-push (c-tr-child-item s) s))
+
+def c-tr-h-struct_specifier [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "struct_specifier" :ssNode (c-tr-new "struct_specifier") [[:ssKwTaken false] [:ssTagTaken false] [:ssBodyTaken false]] s)
+    case :bc
+      match (c-tr-and (c-tr-child-is ["member_decl_list"] s) (c-tr-and (c-tr-child-has-node s) (c-tr-not (c-tr-k-true :ssBodyTaken s))))
+        case true (c-tr-set-k :ssBodyTaken true (c-tr-node-push (c-tr-child-item s) s))
+        case _ s
+    case :alt
+      match (c-tr-g ctx)
+        case "ss-struct" (c-tr-set-k :ssKwTaken true (c-tr-node-keep (c-tr-t0 ctx) (c-tr-node-set-kind "struct_specifier" s)))
+        case "ss-union" (c-tr-set-k :ssKwTaken true (c-tr-node-keep (c-tr-t0 ctx) (c-tr-node-set-kind "union_specifier" s)))
+        case "ss-tag" (c-tr-ss-tag (c-tr-t0 ctx) s)
+        case "ss-tag-td" (c-tr-ss-tag (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+def c-tr-ss-tag [tok s] (c-tr-set-k :ssTagTaken true (c-tr-node-ex "tagName" (get :src tok) (c-tr-node-keep tok s)))
+
+def c-tr-h-member_decl_list [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "member_decl_list" :mdlNode (c-tr-new "member_decl_list") [[:mdlOpened false] [:takenMembers missing]] s)
+    case :bc
+      match (c-tr-and (c-tr-child-is ["struct_declaration"] s) (c-tr-child-has-node s))
+        case true (c-tr-take-once :takenMembers s)
+        case _ s
+    case :alt
+      match (c-tr-g ctx)
+        case "mdl-open" (c-tr-set-k :mdlOpened true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "mdl-end" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case "mdl-empty" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+def c-tr-h-struct_declaration [phase ctx s]
+  match phase
+    case :bo
+      let [f (c-tr-cur s)]
+        match [(equal "struct_declaration" (get :prev f)) (c-tr-k :sdNode s)]
+          case [true missing] (c-tr-sd-new s)
+          case [true ref] (c-tr-set-node-ref ref s)
+          case _ (c-tr-sd-new s)
+    case :bc (c-tr-sdecl-bc-tagged (c-tr-sdecl-bc-sdr s))
+    case :alt
+      match (c-tr-g ctx)
+        case "sd-storage" (c-tr-absorb-type (c-tr-t0 ctx) s)
+        case "sd-type" (c-tr-absorb-type (c-tr-t0 ctx) s)
+        case "sd-decl-comma" (c-tr-reg-keep (c-tr-u :sdl s) (c-tr-t0 ctx) s)
+        case "sd-end" (c-tr-sdecl-semi (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+def c-tr-sd-new [s]
+  let [s1 (c-tr-set-node (c-tr-new "struct_declaration") s)]
+    let [s2 (c-tr-u-reg :sdl (c-tr-new "struct_declarator_list") (c-tr-u-reg :specs (c-tr-new "specifier_qualifier_list") s1))]
+      c-tr-set-ks [[:sdSpecsAttached false] [:sdSdlAttached false] [:sdAnyDecl false] [:takenSdrs missing] [:takenTagged missing]] (c-tr-set-k :sdNode (c-tr-node-ref s2) s2)
+
+def c-tr-sdecl-bc-sdr [s]
+  let [c (c-tr-child s)]
+    match [c (c-tr-child-item s)]
+      case [missing _] s
+      case [_ missing] s
+      case [_ item]
+        match (c-tr-and (equal "struct_declarator" (get :name c)) (c-tr-not (equal (get :i c) (c-tr-k :takenSdrs s))))
+          case true (c-tr-set-k :takenSdrs (get :i c) (c-tr-set-k :sdAnyDecl true (c-tr-reg-push (c-tr-u :sdl s) item s)))
+          case _ s
+
+def c-tr-sdecl-bc-tagged [s]
+  let [c (c-tr-child s)]
+    match [c (c-tr-child-item s)]
+      case [missing _] s
+      case [_ missing] s
+      case [_ item]
+        match (c-tr-and (c-tr-has (get :name c) ["struct_specifier" "enum_specifier"]) (c-tr-not (equal (get :i c) (c-tr-k :takenTagged s))))
+          case true (c-tr-set-k :takenTagged (get :i c) (c-tr-reg-push (c-tr-u :specs s) item s))
+          case _ s
+
+def c-tr-sdecl-semi [tok s]
+  let [s1 (match (c-tr-k-true :sdSpecsAttached s) (case true s) (case _ (c-tr-set-k :sdSpecsAttached true (c-tr-node-push (c-tr-ph (c-tr-u :specs s)) s))))]
+    let [s2 (match [(c-tr-k-true :sdSdlAttached s1) (count (c-tr-kids (c-tr-reg (c-tr-u :sdl s1) s1)))] (case [false 0] s1) (case [false _] (c-tr-set-k :sdSdlAttached true (c-tr-node-push (c-tr-ph (c-tr-u :sdl s1)) s1))) (case _ s1))]
+      c-tr-node-keep tok s2
+
+def c-tr-h-struct_declarator [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "struct_declarator" :sdrNode (c-tr-new "struct_declarator") [[:sdrDeclTaken false] [:sdrBfTaken false] [:sdrAnonBf false]] s)
+    case :bc
+      match (c-tr-child-item s)
+        case missing s
+        case item
+          match [(get :name (c-tr-child s)) (c-tr-k-true :sdrDeclTaken s) (c-tr-k-true :sdrBfTaken s)]
+            case ["init_declarator" false _]
+              let [idl (c-tr-item-node item s)]
+                let [decls (filter (fn [k] (equal "declarator" (c-tr-kind-of (c-tr-item-node k s)))) (c-tr-kids idl))]
+                  match (count decls)
+                    case 0 (c-tr-set-k :sdrDeclTaken true s)
+                    case _
+                      let [s1 (c-tr-node-push (c-tr-nth 0 decls) s)]
+                        let [dn (c-tr-get-ex "declaredName" idl)]
+                          let [s2 (match dn (case missing s1) (case _ (c-tr-node-ex "declaredName" dn s1)))]
+                            c-tr-set-k :sdrDeclTaken true s2
+            case ["bitfield_width" _ false] (c-tr-set-k :sdrBfTaken true (c-tr-node-push item s))
+            case _ s
+    case :alt
+      match (c-tr-g ctx)
+        case "sdr-bf-only" (c-tr-set-k :sdrAnonBf true s)
+        case _ s
+    case _ s
+
+def c-tr-h-bitfield_width [phase ctx s]
+  match phase
+    case :bo (c-tr-set-node (c-tr-new "bitfield_width") s)
+    case :bc
+      match (c-tr-and (c-tr-child-is ["val"] s) (c-tr-not (c-tr-k-true :bfExprAttached s)))
+        case false s
+        case _
+          match (c-tr-child-item s)
+            case missing s
+            case item (c-tr-set-k :bfExprAttached true (c-tr-node-push item s))
+    case :alt
+      match (c-tr-g ctx)
+        case "bfw-colon" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+def c-tr-h-enum_specifier [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "enum_specifier" :esNode (c-tr-new "enum_specifier") [[:esKwTaken false] [:esTagTaken false] [:esUtypeTaken false] [:esUtypeAttached false] [:esBodyTaken false]] s)
+    case :bc
+      match (c-tr-child-item s)
+        case missing s
+        case item
+          match [(get :name (c-tr-child s)) (c-tr-k-true :esUtypeAttached s) (c-tr-k-true :esBodyTaken s)]
+            case ["enum_utype_specs" false _] (c-tr-set-k :esUtypeAttached true (c-tr-node-push-all (c-tr-kids (c-tr-item-node item s)) s))
+            case ["enumerator_list" _ false] (c-tr-set-k :esBodyTaken true (c-tr-node-push item s))
+            case _ s
+    case :alt
+      match (c-tr-g ctx)
+        case "es-enum" (c-tr-set-k :esKwTaken true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "es-tag" (c-tr-es-tag (c-tr-t0 ctx) s)
+        case "es-tag-td" (c-tr-es-tag (c-tr-t0 ctx) s)
+        case "es-utype" (c-tr-set-k :esUtypeTaken true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case _ s
+    case _ s
+
+def c-tr-es-tag [tok s] (c-tr-set-k :esTagTaken true (c-tr-node-ex "tagName" (get :src tok) (c-tr-node-keep tok s)))
+
+def c-tr-node-push-all [items s] (c-tr-update-node (fn [n] (c-tr-push-children items n)) s)
+
+def c-tr-h-enum_utype_specs [phase ctx s]
+  match phase
+    case :bo
+      let [s1 (c-tr-set-node (c-tr-new "declaration_specifiers") s)]
+        c-tr-set-u :specs (c-tr-node-ref s1) s1
+    case :alt
+      match (c-tr-g ctx)
+        case "eus-type" (c-tr-reg-keep (c-tr-u :specs s) (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+def c-tr-h-enumerator_list [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "enumerator_list" :elNode (c-tr-new "enumerator_list") [[:elOpened false] [:takenEnums missing]] s)
+    case :bc
+      match (c-tr-and (c-tr-child-is ["enumerator"] s) (c-tr-child-has-node s))
+        case true (c-tr-take-once :takenEnums s)
+        case _ s
+    case :alt
+      match (c-tr-g ctx)
+        case "el-open" (c-tr-set-k :elOpened true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "el-end" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case "el-comma" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+def c-tr-h-enumerator [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "enumerator" :enrNode (c-tr-new "enumerator") [] s)
+    case :bc
+      let [s1 (c-tr-enr-bc-value s)]
+        c-tr-enr-bc-attr s1
+    case :alt
+      match (c-tr-g ctx)
+        case "enr-id" (c-tr-enr-name (c-tr-t0 ctx) s)
+        case "enr-td" (c-tr-enr-name (c-tr-t0 ctx) s)
+        case "enr-eq" (c-tr-set-k :enrEqTaken true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case _ s
+    case _ s
+
+def c-tr-enr-name [tok s] (c-tr-set-k :enrNameTaken true (c-tr-node-ex "declaredName" (get :src tok) (c-tr-node-keep tok s)))
+
+def c-tr-enr-bc-value [s]
+  match (c-tr-and (c-tr-child-is ["val"] s) (c-tr-not (c-tr-k-true :enrValueAttached s)))
+    case false s
+    case _
+      match (c-tr-child-item s)
+        case missing s
+        case item (c-tr-set-k :enrValueAttached true (c-tr-node-push (c-tr-push-child item (c-tr-new "initializer")) s))
+
+def c-tr-enr-bc-attr [s]
+  match (c-tr-and (c-tr-child-is ["attribute_spec_c23"] s) (c-tr-child-has-node s))
+    case false s
+    case _
+      let [c (c-tr-child s)]
+        match (equal (get :i c) (c-tr-k :enrAttrTaken s))
+          case true s
+          case _ (c-tr-set-k :enrAttrTaken (get :i c) (c-tr-node-push (c-tr-child-item s) s))
+; ---- attributes and static_assert
+
+; Take the child once: the child a rule last took is the one each later
+; before-close sees again until it pushes another.
+def c-tr-take-item-once [names kname s]
+  match (c-tr-and (c-tr-child-is names s) (c-tr-child-has-node s))
+    case true
+      let [c (c-tr-child s)]
+        match (equal (get :i c) (c-tr-k kname s))
+          case true s
+          case _ (c-tr-set-k kname (get :i c) (c-tr-node-push (c-tr-child-item s) s))
+    case _ s
+
+def c-tr-h-attribute_spec_gcc [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "attribute_spec_gcc" :asgNode (c-tr-set-ex "attributeForm" "gcc" (c-tr-new "attribute_spec")) [] s)
+    case :bc
+      let [s1 (c-tr-take-item-once ["attribute_item"] :takenItems s)]
+        match (equal (c-tr-k :takenItems s) (c-tr-k :takenItems s1))
+          case true s1
+          case _ (c-tr-set-k :asgLastWasItem true s1)
+    case :alt
+      match (c-tr-g ctx)
+        case "asg-attr" (c-tr-set-k :asgKwTaken true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "asg-attr-1" (c-tr-set-k :asgKwTaken true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "asg-outer-lp" (c-tr-set-k :asgOuterLparen true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "asg-inner-lp" (c-tr-set-k :asgInnerLparen true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "asg-comma" (c-tr-set-k :asgLastWasItem false (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "asg-inner-rp" (c-tr-set-k :asgInnerRparen true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "asg-outer-rp" (c-tr-set-k :asgOuterRparen true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case _ s
+    case _ s
+
+def c-tr-h-attribute_spec_msvc [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "attribute_spec_msvc" :asm2Node (c-tr-set-ex "attributeForm" "msvc" (c-tr-new "attribute_spec")) [] s)
+    case :bc
+      let [s1 (c-tr-take-item-once ["attribute_item"] :takenItems s)]
+        match (equal (c-tr-k :takenItems s) (c-tr-k :takenItems s1))
+          case true s1
+          case _ (c-tr-set-k :asm2LastWasItem true s1)
+    case :alt
+      match (c-tr-g ctx)
+        case "asm2-decl" (c-tr-set-k :asm2KwTaken true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "asm2-lp" (c-tr-set-k :asm2Lparen true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "asm2-comma" (c-tr-set-k :asm2LastWasItem false (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "asm2-rp" (c-tr-set-k :asm2Rparen true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case _ s
+    case _ s
+
+def c-tr-h-attribute_spec_c23 [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "attribute_spec_c23" :as23Node (c-tr-set-ex "attributeForm" "c23" (c-tr-new "attribute_spec")) [] s)
+    case :bc
+      let [s1 (c-tr-take-item-once ["attribute_item"] :takenItems s)]
+        match (equal (c-tr-k :takenItems s) (c-tr-k :takenItems s1))
+          case true s1
+          case _ (c-tr-set-k :as23LastWasItem true s1)
+    case :alt
+      match (c-tr-g ctx)
+        case "as23-open" (c-tr-set-k :as23Open true (c-tr-node-keep (c-tr-t1 ctx) (c-tr-node-keep (c-tr-t0 ctx) s)))
+        case "as23-comma" (c-tr-set-k :as23LastWasItem false (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "as23-close" (c-tr-set-k :as23Closed true (c-tr-node-keep (c-tr-t1 ctx) (c-tr-node-keep (c-tr-t0 ctx) s)))
+        case _ s
+    case _ s
+
+def c-tr-h-attribute_item [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "attribute_item" :aiNode (c-tr-new "attribute_item") [] s)
+    case :bc
+      match (c-tr-and (c-tr-child-is ["attribute_argument_list"] s) (c-tr-and (c-tr-child-has-node s) (c-tr-not (c-tr-k-true :aiArgsTaken s))))
+        case true (c-tr-set-k :aiArgsTaken true (c-tr-node-push (c-tr-child-item s) s))
+        case _ s
+    case :alt
+      match (c-tr-g ctx)
+        case "ai-c1" (c-tr-set-k :aiColon1 true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "ai-c2" (c-tr-set-k :aiColon2 true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "ai-pname-id" (c-tr-ai-prefixed (c-tr-t0 ctx) s)
+        case "ai-pname-kw" (c-tr-ai-prefixed (c-tr-t0 ctx) s)
+        case g
+          match (c-tr-has g ["ai-id" "ai-td" "ai-macro" "ai-kw"])
+            case true (c-tr-set-k :aiNameTaken true (c-tr-node-ex "attributeName" (get :src (c-tr-t0 ctx)) (c-tr-node-keep (c-tr-t0 ctx) s)))
+            case _ s
+    case _ s
+
+def c-tr-ai-prefixed [tok s]
+  let [s1 (c-tr-node-keep tok s)]
+    let [s2 (c-tr-node-ex "attributePrefix" (c-tr-node-get-ex "attributeName" s1) s1)]
+      c-tr-set-k :aiPrefixed true (c-tr-node-ex "attributeName" (get :src tok) s2)
+
+def c-tr-h-attribute_argument_list [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "attribute_argument_list" :aalNode (c-tr-new "attribute_argument_list") [] s)
+    case :bc (c-tr-take-item-once ["val"] :takenArgs s)
+    case :alt
+      match (c-tr-g ctx)
+        case "aal-open" (c-tr-set-k :aalLparen true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "aal-end" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case "aal-comma" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+def c-tr-h-static_assert_declaration [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "static_assert_declaration" :saNode (c-tr-new "static_assert_declaration") [] s)
+    case :bc
+      match (c-tr-and (c-tr-child-is ["val"] s) (c-tr-child-has-node s))
+        case false s
+        case _
+          match [(c-tr-k-true :saCondTaken s) (c-tr-k-true :saComma s) (c-tr-k-true :saMsgTaken s)]
+            case [false _ _] (c-tr-set-k :saCondTaken true (c-tr-node-push (c-tr-child-item s) s))
+            case [true true false] (c-tr-set-k :saMsgTaken true (c-tr-node-push (c-tr-child-item s) s))
+            case _ s
+    case :alt
+      match (c-tr-g ctx)
+        case "sa-kw" (c-tr-set-k :saKwTaken true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "sa-kw-1" (c-tr-set-k :saKwTaken true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "sa-lp" (c-tr-set-k :saLparen true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "sa-comma" (c-tr-set-k :saComma true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "sa-rp" (c-tr-set-k :saRparen true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "sa-end" (c-tr-set-k :saSemi true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case _ s
+    case _ s
+; ---- the preprocessor's directives
+
+def c-tr-h-preprocessor_directive [phase ctx s]
+  match phase
+    case :bo (c-tr-set-node (c-tr-set-ex "declKind" "declaration" (c-tr-new "preprocessor_directive_wrapper")) s)
+    case :bc
+      match (c-tr-and (c-tr-child-has-node s) (c-tr-not (c-tr-k-true :directiveAttached s)))
+        case false s
+        case _
+          match (c-tr-child-is ["define_directive" "undef_directive" "include_directive" "conditional_directive" "simple_directive"] s)
+            case true (c-tr-set-k :directiveAttached true (c-tr-node-push (c-tr-child-item s) s))
+            case _ s
+    case _ s
+
+def c-tr-h-define_directive [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "define_directive" :defNode (c-tr-new "define_directive") [] s)
+    case :bc
+      match (c-tr-child-item s)
+        case missing s
+        case item
+          match [(get :name (c-tr-child s)) (c-tr-k-true :defParamsTaken s) (c-tr-k-true :defBodyTaken s)]
+            case ["macro_parameter_list" false _]
+              let [mpl (c-tr-item-node item s)]
+                let [s1 (c-tr-node-ex "macroParams" (c-tr-or-empty (c-tr-get-ex "macroParams" mpl)) (c-tr-node-ex "macroKind" "function-like" (c-tr-node-push item s)))]
+                  let [s2 (match (c-tr-get-ex "macroVariadic" mpl) (case true (c-tr-node-ex "macroVariadic" true s1)) (case _ s1))]
+                    c-tr-set-k :defParamsTaken true s2
+            case ["macro_body" _ false]
+              let [s1 (c-tr-node-push item s)]
+                let [s2 (match (c-tr-node-get-ex "macroKind" s1) (case missing (c-tr-node-ex "macroKind" "object-like" s1)) (case _ s1))]
+                  c-tr-set-k :defBodyTaken true s2
+            case _ s
+    case :alt
+      match (c-tr-g ctx)
+        case "def-hash" (c-tr-set-k :defHashTaken true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "def-kw" (c-tr-set-k :defKwTaken true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "def-end" (c-tr-set-k :defNewlineTaken true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case g
+          match (c-tr-has g ["def-name-id" "def-name-mn" "def-name-td"])
+            case true (c-tr-set-k :defNameTaken true (c-tr-node-ex "macroName" (get :src (c-tr-t0 ctx)) (c-tr-node-keep (c-tr-t0 ctx) s)))
+            case _ s
+    case _ s
+
+def c-tr-h-macro_parameter_list [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "macro_parameter_list" :mplNode (c-tr-set-ex "macroParams" [] (c-tr-new "macro_parameter_list")) [] s)
+    case :alt
+      match (c-tr-g ctx)
+        case "mpl-open" (c-tr-set-k :mplOpen true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "mpl-end" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case "mpl-comma" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case "mpl-ellipsis" (c-tr-node-ex "macroVariadic" true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "mpl-other" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case g
+          match (c-tr-has g ["mpl-id" "mpl-td" "mpl-mn"])
+            case true
+              let [s1 (c-tr-node-keep (c-tr-t0 ctx) s)]
+                c-tr-node-ex "macroParams" (push (get :src (c-tr-t0 ctx)) (c-tr-or-empty (c-tr-node-get-ex "macroParams" s1))) s1
+            case _ s
+    case _ s
+
+def c-tr-h-macro_body [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "macro_body" :mbNode (c-tr-new "macro_body") [] s)
+    case :alt
+      match (c-tr-has (c-tr-g ctx) ["mb-first" "mb-tok"])
+        case true (c-tr-set-k :mbAny true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case _ s
+    case _ s
+
+def c-tr-h-undef_directive [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "undef_directive" :undNode (c-tr-new "undef_directive") [] s)
+    case :alt
+      match (c-tr-g ctx)
+        case "undef-hash" (c-tr-set-k :undHashTaken true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "undef-kw" (c-tr-set-k :undKwTaken true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "undef-end" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case "undef-tail" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case g
+          match (c-tr-has g ["undef-name-id" "undef-name-mn" "undef-name-td"])
+            case true (c-tr-set-k :undNameTaken true (c-tr-node-ex "macroName" (get :src (c-tr-t0 ctx)) (c-tr-node-keep (c-tr-t0 ctx) s)))
+            case _ s
+    case _ s
+
+def c-tr-h-include_directive [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "include_directive" :incNode (c-tr-new "include_directive") [] s)
+    case :bc
+      match (c-tr-and (c-tr-child-is ["header_form"] s) (c-tr-and (c-tr-child-has-node s) (c-tr-not (c-tr-k-true :incFormTaken s))))
+        case true (c-tr-set-k :incFormTaken true (c-tr-node-push (c-tr-child-item s) s))
+        case _ s
+    case :alt
+      match (c-tr-g ctx)
+        case "inc-hash" (c-tr-set-k :incHashTaken true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "inc-kw" (c-tr-set-k :incKwTaken true (c-tr-node-ex "includeForm" (get :src (c-tr-t0 ctx)) (c-tr-node-keep (c-tr-t0 ctx) s)))
+        case "inc-h"
+          let [src (get :src (c-tr-t0 ctx))]
+            c-tr-set-k :incHeaderTaken true (c-tr-node-ex "headerKind" (if (starts-with "<" src) "angled" "quoted") (c-tr-node-ex "headerName" src (c-tr-node-keep (c-tr-t0 ctx) s)))
+        case "inc-end" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+def c-tr-h-header_form [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "header_form" :hfNode (c-tr-new "header_form") [] s)
+    case :alt
+      match (c-tr-has (c-tr-g ctx) ["hf-first" "hf-tok"])
+        case true (c-tr-set-k :hfAny true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case _ s
+    case _ s
+
+def c-tr-h-conditional_directive [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "conditional_directive" :condNode (c-tr-new "conditional_directive") [] s)
+    case :alt
+      match (c-tr-g ctx)
+        case "cond-hash" (c-tr-set-k :condHashTaken true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "cond-kw" (c-tr-set-k :condKwTaken true (c-tr-node-ex "directive" (get :src (c-tr-t0 ctx)) (c-tr-node-keep (c-tr-t0 ctx) s)))
+        case "cond-end" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case "cond-tok" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+def c-tr-directive-kind [src]
+  match src
+    case "pragma" "pragma_directive"
+    case "error" "error_directive"
+    case "warning" "warning_directive"
+    case "line" "line_directive"
+    case _ "unknown_directive"
+
+def c-tr-h-simple_directive [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "simple_directive" :sd2Node (c-tr-new "unknown_directive") [] s)
+    case :alt
+      match (c-tr-g ctx)
+        case "sd2-hash" (c-tr-set-k :sd2HashTaken true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "sd2-kw" (c-tr-set-k :sd2KwTaken true (c-tr-node-set-kind (c-tr-directive-kind (get :src (c-tr-t0 ctx))) (c-tr-node-keep (c-tr-t0 ctx) s)))
+        case "sd2-end" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case "sd2-tok" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+; ---- inline assembly
+
+def c-tr-bracket-depth [toks] (add 0 (count (filter (fn [t] (c-tr-has (get :tname t) ["PUNC_LPAREN" "PUNC_LBRACKET"])) toks)))
+def c-tr-bracket-depth-of [toks] (sub (c-tr-bracket-depth toks) (count (filter (fn [t] (c-tr-has (get :tname t) ["PUNC_RPAREN" "PUNC_RBRACKET"])) toks)))
+
+def c-tr-h-asm_statement [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "asm_statement" :asmNode (c-tr-set-ex "qualifiers" [] (c-tr-new "asm_statement")) [[:sectionIdx 0]] s)
+    case :bc
+      match (c-tr-child-item s)
+        case missing s
+        case item
+          let [c (c-tr-child s)]
+            let [taken (c-tr-k :takenSecs s)]
+              match [(get :name c) (c-tr-k-true :templateTaken s) (equal (get :i c) taken)]
+                case ["asm_template" false _] (c-tr-set-k :templateTaken true (c-tr-node-push item s))
+                case ["asm_section" _ false]
+                  let [idx (c-tr-num-or 0 (c-tr-k :sectionIdx s))]
+                    let [kind (c-tr-nth idx ["asm_outputs" "asm_inputs" "asm_clobbers" "asm_labels"])]
+                      let [s1 (match kind (case missing s) (case _ (c-tr-update-reg (get :node c) (fn [n] (c-tr-set-kind kind n)) s)))]
+                        c-tr-set-k :takenSecs (get :i c) (c-tr-set-k :lastWasColon false (c-tr-set-k :sectionIdx (inc idx) (c-tr-node-push item s1)))
+                case _ s
+    case :alt
+      match (c-tr-g ctx)
+        case "asm-lparen" (c-tr-set-k :lparenTaken true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "asm-section-colon" (c-tr-set-k :lastWasColon true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "asm-rparen" (c-tr-set-k :rparenTaken true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case "asm-end" (c-tr-set-k :semiTaken true (c-tr-node-keep (c-tr-t0 ctx) s))
+        case g
+          match [(c-tr-has g ["asm-asm" "asm-asm-1" "asm-asm-2"]) (c-tr-has g ["asm-q-v" "asm-q-vv" "asm-q-v3" "asm-q-i" "asm-q-ii" "asm-q-i3" "asm-q-g"])]
+            case [true _] (c-tr-set-k :started true (c-tr-node-keep (c-tr-t0 ctx) s))
+            case [_ true]
+              let [tok (c-tr-t0 ctx)]
+                c-tr-node-keep tok (c-tr-node-ex "qualifiers" (push (get :src tok) (c-tr-or-empty (c-tr-node-get-ex "qualifiers" s))) s)
+            case _ s
+    case _ s
+
+def c-tr-h-asm_template [phase ctx s]
+  match phase
+    case :bo (c-tr-set-node (c-tr-new "asm_template") s)
+    case :bc
+      match (c-tr-and (c-tr-child-is ["val"] s) (c-tr-not (c-tr-u-true :exprAttached s)))
+        case false s
+        case _
+          match (c-tr-child-item s)
+            case missing s
+            case item (c-tr-set-u :exprAttached true (c-tr-node-push item s))
+    case _ s
+
+def c-tr-h-asm_section [phase ctx s]
+  match phase
+    case :bo (c-tr-loop-bo "asm_section" :asecNode (c-tr-new "asm_section") [[:asecOpened false] [:takenItems missing]] s)
+    case :bc
+      match (c-tr-and (c-tr-child-is ["asm_operand" "asm_clobber" "asm_label_ref"] s) (c-tr-child-has-node s))
+        case true (c-tr-take-once :takenItems s)
+        case _ s
+    case :alt
+      match (c-tr-g ctx)
+        case "asec-comma" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+def c-tr-h-asm_operand [phase ctx s]
+  match phase
+    case :bo (c-tr-open-scope (c-tr-set-node (c-tr-new "asm_operand") s))
+    case :bc
+      let [c (c-tr-child s)]
+        match [c (c-tr-child-item s)]
+          case [missing _] s
+          case [_ missing] s
+          case [_ item]
+            match (equal (get :i c) (c-tr-u :lastChild s))
+              case true s
+              case _
+                match (get :name c)
+                  case "asm_name" (c-tr-set-u :lastChild (get :i c) (c-tr-set-u :name true (c-tr-node-push item s)))
+                  case "asm_constraint" (c-tr-set-u :lastChild (get :i c) (c-tr-set-u :constraint true (c-tr-node-push item s)))
+                  case "asm_value" (c-tr-set-u :lastChild (get :i c) (c-tr-set-u :value true (c-tr-node-push item s)))
+                  case _ s
+    case :alt
+      match (c-tr-g ctx)
+        case "catch-aop"
+          let [toks (c-tr-scope-tokens s)]
+            c-tr-close-scope (c-tr-set-k :aorDepth (c-tr-bracket-depth-of toks) (c-tr-update-node (fn [n] (c-tr-with-children (flatten (map (fn [t] (push (c-tr-bare t) (as-vector (get :lead t)))) toks)) n)) s))
+        case "aop-end-comma" (c-tr-close-scope s)
+        case "aop-end-colon" (c-tr-close-scope s)
+        case "aop-end-rparen" (c-tr-close-scope s)
+        case "aop-rest" (c-tr-close-scope (c-tr-set-k :aorDepth (c-tr-bracket-depth-of (c-tr-scope-tokens s)) s))
+        case _ s
+    case _ s
+
+def c-tr-h-asm_operand_rest [phase ctx s]
+  match phase
+    case :alt
+      match (c-tr-g ctx)
+        case "aor-comma" (c-tr-set-u :ended true s)
+        case "aor-colon" (c-tr-set-u :ended true s)
+        case "aor-rparen" (c-tr-set-u :ended true s)
+        case "aor-take"
+          let [tok (c-tr-t0 ctx)]
+            c-tr-set-k :aorDepth (c-tr-depth-step tok (c-tr-num-or 0 (c-tr-k :aorDepth s))) (c-tr-node-keep tok s)
+        case _ s
+    case _ s
+
+def c-tr-h-asm_name [phase ctx s]
+  match phase
+    case :bo (c-tr-set-node (c-tr-new "asm_name") s)
+    case :alt
+      match (c-tr-g ctx)
+        case "aname"
+          let [toks (as-vector (get :toks ctx))]
+            c-tr-node-keep (c-tr-nth 2 toks) (c-tr-node-keep (c-tr-nth 1 toks) (c-tr-node-keep (c-tr-nth 0 toks) s))
+        case _ s
+    case _ s
+
+def c-tr-h-asm_constraint [phase ctx s]
+  match phase
+    case :bo (c-tr-set-node (c-tr-new "asm_constraint") s)
+    case :alt
+      match (c-tr-g ctx)
+        case "acon" (c-tr-node-ex "value" (get :src (c-tr-t0 ctx)) (c-tr-node-keep (c-tr-t0 ctx) s))
+        case _ s
+    case _ s
+
+def c-tr-h-asm_value [phase ctx s]
+  match phase
+    case :bo (c-tr-set-node (c-tr-new "asm_value") s)
+    case :bc
+      match (c-tr-and (c-tr-child-is ["val"] s) (c-tr-not (c-tr-u-true :exprAttached s)))
+        case false s
+        case _
+          match (c-tr-child-item s)
+            case missing s
+            case item (c-tr-set-u :exprAttached true (c-tr-node-push item s))
+    case :alt
+      match (c-tr-g ctx)
+        case "aval-open" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case "aval-close" (c-tr-node-keep (c-tr-t0 ctx) s)
+        case _ s
+    case _ s
+
+def c-tr-h-asm_label [phase ctx s]
+  match phase
+    case :bo (c-tr-set-node (c-tr-new "asm_label") s)
+    case :alt
+      match (c-tr-g ctx)
+        case "alab" (c-tr-set-k :prunDepth 0 (c-tr-del-k :prunTarget (c-tr-node-keep (c-tr-t0 ctx) s)))
+        case _ s
+    case _ s
+
+def c-tr-h-asm_clobber [phase ctx s]
+  match phase
+    case :bo (c-tr-set-node (c-tr-new "asm_clobber") s)
+    case :alt
+      match (c-tr-g ctx)
+        case "acl-take" (c-tr-node-ex "value" (get :src (c-tr-t0 ctx)) (c-tr-node-keep (c-tr-t0 ctx) s))
+        case _ s
+    case _ s
+
+def c-tr-h-asm_label_ref [phase ctx s]
+  match phase
+    case :bo (c-tr-set-node (c-tr-new "asm_label_ref") s)
+    case :alt
+      match (c-tr-g ctx)
+        case "alr-take" (c-tr-node-ex "labelName" (get :src (c-tr-t0 ctx)) (c-tr-node-keep (c-tr-t0 ctx) s))
+        case _ s
+    case _ s
+; ---- the dispatch: the handlers of a rule, by its name, the rules met
+; most often first
+
+def c-tr-handler [name]
+  match name
+    case "val" c-tr-h-val
+    case "expr" c-tr-h-expr
+    case "paren" c-tr-h-paren
+    case "block_item" c-tr-h-block_item
+    case "statement" c-tr-h-statement
+    case "expression_statement" c-tr-h-expression_statement
+    case "compound_statement" c-tr-h-compound_statement
+    case "initializer_item" c-tr-h-initializer_item
+    case "initializer_list" c-tr-h-initializer_list
+    case "init_declarator" c-tr-h-init_declarator
+    case "simple_declaration" c-tr-h-simple_declaration
+    case "spec_loop" c-tr-h-spec_loop
+    case "initializer" c-tr-h-initializer
+    case "paren_condition" c-tr-h-paren_condition
+    case "if_statement" c-tr-h-if_statement
+    case "jump_statement" c-tr-h-jump_statement
+    case "for_statement" c-tr-h-for_statement
+    case "for_controls" c-tr-h-for_controls
+    case "for_init" c-tr-h-for_init
+    case "for_cond" c-tr-h-for_cond
+    case "for_iter" c-tr-h-for_iter
+    case "external_declaration" c-tr-h-external_declaration
+    case "extdecl_loop" c-tr-h-extdecl_loop
+    case "string_atom" c-tr-h-string_atom
+    case "array_postfix" c-tr-h-array_postfix
+    case "pointer_list" c-tr-h-pointer_list
+    case "pointer_qualifier_loop" c-tr-h-pointer_qualifier_loop
+    case "function_postfix" c-tr-h-function_postfix
+    case "parameter_type_list" c-tr-h-parameter_type_list
+    case "parameter_declaration" c-tr-h-parameter_declaration
+    case "param_spec_loop" c-tr-h-param_spec_loop
+    case "type_name" c-tr-h-type_name
+    case "sizeof_type_form" c-tr-h-sizeof_type_form
+    case "labeled_statement" c-tr-h-labeled_statement
+    case "while_statement" c-tr-h-while_statement
+    case "do_statement" c-tr-h-do_statement
+    case "switch_statement" c-tr-h-switch_statement
+    case "translation_unit" c-tr-h-translation_unit
+    case "conditional_group" c-tr-h-conditional_group
+    case "conditional_branch" c-tr-h-conditional_branch
+    case "unknown_declaration" c-tr-h-unknown_declaration
+    case "bit_int_paren" c-tr-h-bit_int_paren
+    case "paren_run" c-tr-h-paren_run
+    case "paren_inner_declarator" c-tr-h-paren_inner_declarator
+    case "array_qualifier_loop" c-tr-h-array_qualifier_loop
+    case "identifier_list" c-tr-h-identifier_list
+    case "param_paren_inner" c-tr-h-param_paren_inner
+    case "designation" c-tr-h-designation
+    case "designator" c-tr-h-designator
+    case "generic_selection" c-tr-h-generic_selection
+    case "generic_controlling_expression" c-tr-h-generic_controlling_expression
+    case "generic_association" c-tr-h-generic_association
+    case "type_name_assoc" c-tr-h-type_name_assoc
+    case "statement_expression" c-tr-h-statement_expression
+    case "compound_literal_body" c-tr-h-compound_literal_body
+    case "struct_specifier" c-tr-h-struct_specifier
+    case "member_decl_list" c-tr-h-member_decl_list
+    case "struct_declaration" c-tr-h-struct_declaration
+    case "struct_declarator" c-tr-h-struct_declarator
+    case "bitfield_width" c-tr-h-bitfield_width
+    case "enum_specifier" c-tr-h-enum_specifier
+    case "enum_utype_specs" c-tr-h-enum_utype_specs
+    case "enumerator_list" c-tr-h-enumerator_list
+    case "enumerator" c-tr-h-enumerator
+    case "attribute_spec_gcc" c-tr-h-attribute_spec_gcc
+    case "attribute_spec_msvc" c-tr-h-attribute_spec_msvc
+    case "attribute_spec_c23" c-tr-h-attribute_spec_c23
+    case "attribute_item" c-tr-h-attribute_item
+    case "attribute_argument_list" c-tr-h-attribute_argument_list
+    case "static_assert_declaration" c-tr-h-static_assert_declaration
+    case "preprocessor_directive" c-tr-h-preprocessor_directive
+    case "define_directive" c-tr-h-define_directive
+    case "macro_parameter_list" c-tr-h-macro_parameter_list
+    case "macro_body" c-tr-h-macro_body
+    case "undef_directive" c-tr-h-undef_directive
+    case "include_directive" c-tr-h-include_directive
+    case "header_form" c-tr-h-header_form
+    case "conditional_directive" c-tr-h-conditional_directive
+    case "simple_directive" c-tr-h-simple_directive
+    case "asm_statement" c-tr-h-asm_statement
+    case "asm_template" c-tr-h-asm_template
+    case "asm_section" c-tr-h-asm_section
+    case "asm_operand" c-tr-h-asm_operand
+    case "asm_operand_rest" c-tr-h-asm_operand_rest
+    case "asm_name" c-tr-h-asm_name
+    case "asm_constraint" c-tr-h-asm_constraint
+    case "asm_value" c-tr-h-asm_value
+    case "asm_label" c-tr-h-asm_label
+    case "asm_clobber" c-tr-h-asm_clobber
+    case "asm_label_ref" c-tr-h-asm_label_ref
+    case _ c-tr-h-none
+
+def c-tr-h-none [phase ctx s] s
+; ---- the dispatch
+
+; The rules above the fallback, whose lifecycle actions run whatever the
+; declaration's state.
+def c-tr-above [name]
+  match name
+    case "translation_unit" true
+    case "extdecl_loop" true
+    case "conditional_group" true
+    case "conditional_branch" true
+    case "external_declaration" true
+    case "unknown_declaration" true
+    case _ false
+
+; A pass's phases: :bo, :alt, :ao at an open pass, :bc, :alt, :ac at a
+; close pass. Below the external declaration, once the rules have failed
+; (the declaration, or the innermost local scope) every lifecycle action
+; does nothing; the catch-all's pass (c-fail) marks the failure, and so
+; does a bail's (c-bail, which follows a ref that failed). An alternate's
+; own action runs as it is reached: only the bails and a scope's catch
+; are reached once the rules have failed.
+def c-tr-phases [before after ctx s]
+  let [name (get :name (get :rule ctx))]
+    let [h (c-tr-handler name)]
+      match (c-tr-above name)
+        case true (h after ctx (h :alt ctx (h before ctx s)))
+        case _
+          let [s1 (match (c-tr-failed s) (case true s) (case _ (h before ctx s)))]
+            let [s2 (match (c-tr-g ctx) (case "c-fail" (c-tr-mark-failed s1)) (case "c-bail" (c-tr-mark-failed s1)) (case _ (h :alt ctx s1)))]
+              match (c-tr-failed s2)
+                case true s2
+                case _ (h after ctx s2)
+
+def c-tr-dispatch [ctx s]
+  match (get :state ctx)
+    case :open (c-tr-phases :bo :ao ctx s)
+    case :close (c-tr-phases :bc :ac ctx s)
+
+; ---- the end
+
+def c-tr-finish [s] (c-tr-tu-close s)
+
+def c-transduce [input]
+  as-events (scan-emit (c-tr-init) c-tr-step c-tr-finish (parser-events input :tokens))
 ` })
 })
 

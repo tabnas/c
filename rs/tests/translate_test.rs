@@ -60,6 +60,58 @@ fn the_render_the_manifest_names_is_the_one_the_crate_embeds() {
     );
 }
 
+/// The transducer part the manifest names is the one the crate embeds, and
+/// c streams through it, so the manifest no longer says it is read whole.
+#[test]
+fn the_transducer_the_manifest_names_is_the_one_the_crate_embeds() {
+    let translate = translate();
+    assert!(
+        translate.get("whole").is_none(),
+        "c streams through its part, and the manifest says it is read whole"
+    );
+    let path = translate["transduce"]
+        .as_str()
+        .expect("translate.transduce names a file");
+    let on_disk = fs::read_to_string(repo_dir().join(path))
+        .unwrap_or_else(|e| panic!("translate.transduce names {path}, which cannot be read: {e}"));
+    let transduce = tabnas_c::translate()
+        .expect("c carries translation parts")
+        .transduce
+        .expect("translate.transduce names a file, and the crate carries no transducer");
+    assert_eq!(transduce.entry, "c-transduce");
+    assert_eq!(
+        transduce.source,
+        Some(on_disk.as_str()),
+        "translate.transduce names {path}, and the crate embeds another text: run npm run embed in ts"
+    );
+}
+
+/// A host links the transducer beside the render and other formats' parts
+/// in one namespace, so its entry is `c-transduce` and every other
+/// definition is named `c-tr-`, a name the render does not use.
+#[test]
+fn the_transducer_is_a_library_named_apart_from_the_render() {
+    let parts = tabnas_c::translate().expect("c carries translation parts");
+    let names = |source: &str| -> Vec<String> {
+        source
+            .lines()
+            .filter_map(|line| line.strip_prefix("def "))
+            .filter_map(|rest| rest.split_whitespace().next())
+            .map(str::to_string)
+            .collect()
+    };
+    let part = names(parts.transduce.and_then(|p| p.source).expect("a transducer"));
+    let render = names(parts.render.and_then(|p| p.source).expect("a render"));
+    assert!(part.iter().any(|n| n == "c-transduce"), "no c-transduce");
+    for name in &part {
+        assert!(
+            name == "c-transduce" || name.starts_with("c-tr-"),
+            "{name} is not named c-tr-"
+        );
+        assert!(!render.contains(name), "{name} is defined by the render too");
+    }
+}
+
 /// An embed takes a plain tree into a format's own schema. c's render
 /// writes the syntax tree the reader builds and nothing else, so its
 /// manifest names no embed and the crate carries none; a manifest that

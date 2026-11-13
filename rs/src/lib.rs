@@ -681,6 +681,9 @@ pub struct TranslationParts {
     pub embed: Option<TranslationPart>,
     /// An optional render from the write shape to text.
     pub render: Option<TranslationPart>,
+    /// An optional transducer: the format's JSON events from its parser's
+    /// rule passes, for a host that reads parser events.
+    pub transduce: Option<TranslationPart>,
 }
 
 const TRANSLATION: TranslationParts = TranslationParts {
@@ -691,18 +694,25 @@ const TRANSLATION: TranslationParts = TranslationParts {
         entry: "c-render",
         source: Some(include_str!("../translate/render.alc")),
     }),
+    transduce: Some(TranslationPart {
+        entry: "c-transduce",
+        source: Some(include_str!("../translate/transduce.alc")),
+    }),
 };
 
-/// Return the translation parts of C source: the manifest, and the render
-/// that writes the reader's tree, a concrete syntax tree, back as C source
-/// that reads back as the same tree. There is no lift, and no embed: the
-/// tree is the reader's own shape, the schema `c`, which a host renders
-/// only from a source of the same schema or from a program that builds the
-/// tree.
+/// Return the translation parts of C source: the manifest, the render that
+/// writes the reader's tree, a concrete syntax tree, back as C source that
+/// reads back as the same tree, and the transducer part, `c-transduce`,
+/// that makes the reader's tree as JSON events from the grammar's rule
+/// passes, for a host that reads parser events. There is no lift, and no
+/// embed: the tree is the reader's own shape, the schema `c`, which a host
+/// renders only from a source of the same schema or from a program that
+/// builds the tree.
 ///
 /// ```
 /// let parts = tabnas_c::translate().expect("c carries translation parts");
 /// assert_eq!(parts.render.map(|part| part.entry), Some("c-render"));
+/// assert_eq!(parts.transduce.map(|part| part.entry), Some("c-transduce"));
 /// assert_eq!(parts.embed, None);
 /// ```
 #[must_use]

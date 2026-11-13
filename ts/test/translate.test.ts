@@ -21,6 +21,34 @@ test('translation parts expose the manifest, source and explicit entry', () => {
   assert.equal(parts.render?.source, readFileSync(path.join(root, 'alchemy', 'render.alc'), 'utf8'))
 })
 
+// The transducer part the manifest names is the one the package carries,
+// and c streams through it, so the manifest no longer says it is read whole.
+test('translation parts carry the transducer the manifest names', () => {
+  const parts = translate()
+  assert.ok(parts)
+  const spec = JSON.parse(readFileSync(path.join(root, 'tabnas.plugin.json'), 'utf8')).translate
+  assert.equal(spec.transduce, 'alchemy/transduce.alc')
+  assert.equal(spec.whole, undefined)
+  assert.equal(parts.transduce?.entry, 'c-transduce')
+  assert.equal(parts.transduce?.source, readFileSync(path.join(root, spec.transduce), 'utf8'))
+})
+
+// A host links the transducer beside the render and other formats' parts
+// in one namespace, so its entry is `c-transduce` and every other
+// definition is named `c-tr-`, a name the render does not use.
+test('the transducer is a library named apart from the render', () => {
+  const names = (source: string) => source.split('\n')
+    .filter((line) => line.startsWith('def '))
+    .map((line) => line.slice(4).split(/\s/)[0])
+  const part = names(translate()?.transduce?.source ?? '')
+  const render = new Set(names(translate()?.render?.source ?? ''))
+  assert.ok(part.includes('c-transduce'), part.join(' '))
+  for (const name of part) {
+    assert.ok('c-transduce' === name || name.startsWith('c-tr-'), `${name} is not named c-tr-`)
+    assert.ok(!render.has(name), `${name} is defined by the render too`)
+  }
+})
+
 // An embed takes a plain tree into a format's own schema. c's render
 // writes the syntax tree the reader builds and nothing else, so its
 // manifest names no embed and the package carries none; a manifest that
