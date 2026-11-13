@@ -336,10 +336,13 @@ func TestALongDocumentParsesTheSameFromAReader(t *testing.T) {
 		}
 		return best
 	}
-	small := timeOf(longDocument(500))
-	large := timeOf(longDocument(5000))
-	t.Logf("window time: 500 items %v, 5000 items %v (%.1f times)", small, large, float64(large)/float64(small))
-	if large > 25*small {
-		t.Errorf("500 items took %v, 5000 took %v: not linear", small, large)
+	// Ten times the items: about ten times the time, and a hundred times
+	// were it quadratic. The bound leaves room for a busy machine, whose
+	// collector made the ratio 16 and, once, 32 over 500 and 5,000 items.
+	small := timeOf(longDocument(1000))
+	large := timeOf(longDocument(10000))
+	t.Logf("window time: 1000 items %v, 10000 items %v (%.1f times)", small, large, float64(large)/float64(small))
+	if large > 40*small {
+		t.Errorf("1000 items took %v, 10000 took %v: not linear", small, large)
 	}
 }

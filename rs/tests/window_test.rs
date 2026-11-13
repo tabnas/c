@@ -291,10 +291,12 @@ fn every_csmith_program_parses_the_same_from_a_reader() {
         .collect();
     seeds.sort();
     assert!(seeds.len() >= 100, "{} Csmith programs", seeds.len());
-    let header: String = STDINT
-        .iter()
-        .map(|name| format!("typedef int {name};\n"))
-        .collect();
+    let mut header = String::new();
+    for name in STDINT {
+        header.push_str("typedef int ");
+        header.push_str(name);
+        header.push_str(";\n");
+    }
     let parser = parser_for(true, "");
     let mut failures = Vec::new();
     let mut compared = 0;
@@ -318,9 +320,11 @@ fn a_long_document_parses_in_time_linear_in_its_length() {
     // Ten times the declarations take about ten times the time, from a
     // reader as from the text: well under the square of it.
     let doc = |n: usize| -> String {
-        (0..n)
-            .map(|i| format!("/* c {i} */\nint x{i} = {i};\n"))
-            .collect()
+        let mut text = String::new();
+        for i in 0..n {
+            text.push_str(&format!("/* c {i} */\nint x{i} = {i};\n"));
+        }
+        text
     };
     let parser = tabnas_c::make();
     let time = |text: &str| -> f64 {
