@@ -142,7 +142,7 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
         set_node_id(rule, node);
     });
     reg.act("@asm_template-bc", |rule, _context| {
-        if !crate::expression::child_is_expr(rule) || u_bool(rule, "exprAttached") {
+        if !crate::expr_grammar::child_is_expr(rule) || u_bool(rule, "exprAttached") {
             return;
         }
         let (Some(node), Some(child)) = (node_id(rule), child_node_id(rule)) else {
@@ -321,7 +321,7 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
         }
     });
     reg.act("@asm_value-bc", |rule, _context| {
-        if !crate::expression::child_is_expr(rule) || u_bool(rule, "exprAttached") {
+        if !crate::expr_grammar::child_is_expr(rule) || u_bool(rule, "exprAttached") {
             return;
         }
         let (Some(node), Some(child)) = (node_id(rule), child_node_id(rule)) else {
@@ -976,7 +976,7 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
     reg.act("@aal-take-rparen", |rule, _context| take_close(rule));
     reg.act("@aal-take-comma", |rule, _context| take_close(rule));
     reg.act("@attribute_argument_list-bc", |rule, _context| {
-        if !crate::expression::child_is_expr(rule) {
+        if !crate::expr_grammar::child_is_expr(rule) {
             return;
         }
         let (Some(node), Some(child)) = (node_id(rule), child_node_id(rule)) else {
@@ -1043,7 +1043,7 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
         k_set_bool(rule, "saSemi", true);
     });
     reg.act("@static_assert_declaration-bc", |rule, _context| {
-        if !crate::expression::child_is_expr(rule) {
+        if !crate::expr_grammar::child_is_expr(rule) {
             return;
         }
         let (Some(node), Some(child)) = (node_id(rule), child_node_id(rule)) else {

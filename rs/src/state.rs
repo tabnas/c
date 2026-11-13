@@ -280,6 +280,9 @@ pub struct CState {
     pub ed: Option<crate::fallback::ExtDecl>,
     /// The nodes already given their spans (`crate::cst::fix_spans`).
     pub fixed: std::collections::HashSet<usize>,
+    /// The links between an expression's tokens
+    /// (`crate::expr_grammar::link_token`).
+    pub links: crate::expr_grammar::LinkState,
 }
 
 impl CState {
@@ -301,6 +304,7 @@ impl CState {
             rec_base: 0,
             ed: None,
             fixed: std::collections::HashSet::new(),
+            links: crate::expr_grammar::LinkState::default(),
         }
     }
 }

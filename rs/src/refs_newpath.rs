@@ -671,7 +671,7 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
     });
     reg.act("@bip-mark-val", |_rule, _context| {});
     reg.act("@bit_int_paren-bc", |rule, _context| {
-        if k_bool(rule, "bipValAttached") || !crate::expression::child_is_expr(rule) {
+        if k_bool(rule, "bipValAttached") || !crate::expr_grammar::child_is_expr(rule) {
             return;
         }
         let (Some(child), Some(specs)) = (child_node_id(rule), spec_owner_u_node(rule, "specs"))
@@ -880,7 +880,7 @@ pub fn register(reg: &mut Reg<'_>, options: &COptions) {
         }
     });
     reg.act("@array_postfix-bc", |rule, _context| {
-        if !crate::expression::child_is_expr(rule) || u_node(rule, "size").is_some() {
+        if !crate::expr_grammar::child_is_expr(rule) || u_node(rule, "size").is_some() {
             return;
         }
         let (Some(node), Some(child)) = (node_id(rule), child_node_id(rule)) else {

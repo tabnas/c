@@ -197,7 +197,7 @@ pub fn register(reg: &mut Reg<'_>) {
             k_set_bool(rule, "gotValue", true);
             return;
         }
-        if crate::expression::child_is_expr(rule) && !k_bool(rule, "gotValue") && child != node {
+        if crate::expr_grammar::child_is_expr(rule) && !k_bool(rule, "gotValue") && child != node {
             cst::push_child(node, Item::Node(child));
             k_set_bool(rule, "gotValue", true);
         }
@@ -269,7 +269,7 @@ pub fn register(reg: &mut Reg<'_>) {
     });
     reg.act("@designator-bc", |rule, _context| {
         if k_str(rule, "kind") != "index"
-            || !crate::expression::child_is_expr(rule)
+            || !crate::expr_grammar::child_is_expr(rule)
             || k_bool(rule, "idxExprAttached")
         {
             return;
@@ -385,7 +385,7 @@ pub fn register(reg: &mut Reg<'_>) {
         set_node_id(rule, node);
     });
     reg.act("@generic_controlling_expression-bc", |rule, _context| {
-        if !crate::expression::child_is_expr(rule) || u_bool(rule, "exprAttached") {
+        if !crate::expr_grammar::child_is_expr(rule) || u_bool(rule, "exprAttached") {
             return;
         }
         let (Some(node), Some(child)) = (node_id(rule), child_node_id(rule)) else {
@@ -441,7 +441,7 @@ pub fn register(reg: &mut Reg<'_>) {
             take_child_field(rule, "type_name_assoc", "gaTypeAttached");
             return;
         }
-        if !crate::expression::child_is_expr(rule) || k_bool(rule, "gaValueTaken") {
+        if !crate::expr_grammar::child_is_expr(rule) || k_bool(rule, "gaValueTaken") {
             return;
         }
         let (Some(node), Some(child)) = (node_id(rule), child_node_id(rule)) else {
@@ -740,7 +740,7 @@ pub fn register(reg: &mut Reg<'_>) {
         }
     });
     reg.act("@bitfield_width-bc", |rule, _context| {
-        if !crate::expression::child_is_expr(rule) || k_bool(rule, "bfExprAttached") {
+        if !crate::expr_grammar::child_is_expr(rule) || k_bool(rule, "bfExprAttached") {
             return;
         }
         let (Some(node), Some(child)) = (node_id(rule), child_node_id(rule)) else {
@@ -899,7 +899,7 @@ pub fn register(reg: &mut Reg<'_>) {
         let Some(node) = node_id(rule) else {
             return;
         };
-        if crate::expression::child_is_expr(rule)
+        if crate::expr_grammar::child_is_expr(rule)
             && child != node
             && !k_bool(rule, "enrValueAttached")
         {

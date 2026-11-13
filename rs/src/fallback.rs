@@ -27,8 +27,12 @@
 //! this port leaves a panic a panic.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
-use tabnas::{Context, Token};
+use tabnas::{
+    ActionBinding, AltError, AltErrorWithMatch, AltMatch, AltSpec, Context, ContextAction, Rule,
+    RuleSnapshot, RuleSpec, StateAction, Tabnas, Token,
+};
 
 use crate::cst;
 use crate::state::with_state;
@@ -85,12 +89,12 @@ pub fn with_ed<R>(body: impl FnOnce(&mut ExtDecl) -> R) -> Option<R> {
     with_state(|state| state.ed.as_mut().map(body))
 }
 
-/// Record a token the lexer gave the parser. Called from the sub-lex hook
-/// for every token that is not trivia; the engine takes them in the order
-/// they are lexed.
-pub fn record_token(token: &Token) {
+/// Record a token the lexer gave the parser, and answer its arena id.
+/// Called from the sub-lex hook for every token that is not trivia; the
+/// engine takes them in the order they are lexed.
+pub fn record_token(token: &Token) -> Option<usize> {
     if token.name.as_str() == "#ZZ" {
-        return;
+        return None;
     }
     let id = cst::intern_token(token);
     with_state(|state| {
@@ -104,6 +108,7 @@ pub fn record_token(token: &Token) {
         }
         state.rec.push(id);
     });
+    Some(id)
 }
 
 /// Start an external declaration: drop the record's tokens the previous
@@ -494,4 +499,217 @@ pub fn with_fallback(document: &mut serde_json::Value) -> Fallback {
     out.fenced.sort();
     out.fenced.dedup();
     out
+}
+
+/// [`with_fallback`] for rules a plugin installs below the grammar, whose
+/// alternates and actions are closures rather than refs: expr's `val`,
+/// `expr`, `paren` and `ternary`, over which C's expressions are read, and
+/// the jsonic rules expr pushes. Each state gets the bail first and the
+/// catch-all last; an alternate that takes a token gets the fence; an
+/// alternate's error hook, in an armed declaration, fails it rather than
+/// refusing the document; and a lifecycle closure does nothing once the
+/// declaration has failed, as a ref's does. Port of `withRuleFallback` in
+/// `ts/src/fallback.ts`.
+///
+/// A lifecycle action jsonic's rules name, rather than hold, is the
+/// engine's to resolve and is left as it is: the bail ends each state
+/// before any alternate pushes one of those rules in a failed declaration.
+pub fn with_rule_fallback(parser: &mut Tabnas, names: &[&str]) {
+    for name in names {
+        parser.define_rule(*name, |spec: &mut RuleSpec| {
+            for alts in [&mut spec.open, &mut spec.close] {
+                if alts.is_empty() {
+                    continue;
+                }
+                for alt in alts.iter_mut() {
+                    fence_alt(alt);
+                }
+                alts.insert(0, bail_alt());
+                alts.push(fail_alt());
+            }
+            bail_actions(
+                &spec.bo,
+                &mut spec.bo_fns,
+                &mut spec.bo_state_fns,
+                &mut spec.bo_order,
+            );
+            bail_actions(
+                &spec.ao,
+                &mut spec.ao_fns,
+                &mut spec.ao_state_fns,
+                &mut spec.ao_order,
+            );
+            bail_actions(
+                &spec.bc,
+                &mut spec.bc_fns,
+                &mut spec.bc_state_fns,
+                &mut spec.bc_order,
+            );
+            bail_actions(
+                &spec.ac,
+                &mut spec.ac_fns,
+                &mut spec.ac_state_fns,
+                &mut spec.ac_order,
+            );
+        });
+    }
+}
+
+/// Put the fence on an alternate that takes a token, and make its error
+/// hooks fail an armed declaration rather than refuse the document.
+fn fence_alt(alt: &mut AltSpec) {
+    if alt.s.len() > alt.b {
+        let inner = alt.c_fn.take();
+        alt.c_fn = Some(Arc::new(move |rule: &mut Rule, context: &mut Context| {
+            !fenced(context)
+                && inner
+                    .as_ref()
+                    .is_none_or(|condition| condition(rule, context))
+        }));
+    }
+    if let Some(hook) = alt.e.take() {
+        let hook: AltError = hook;
+        alt.e = Some(Arc::new(move |rule: &mut Rule, context: &mut Context| {
+            if armed() {
+                fail();
+                return None;
+            }
+            hook(rule, context)
+        }));
+    }
+    if let Some(hook) = alt.e_match.take() {
+        let hook: AltErrorWithMatch = hook;
+        alt.e_match = Some(Arc::new(
+            move |rule: &mut Rule, context: &mut Context, matched: &mut AltMatch| {
+                if armed() {
+                    fail();
+                    return None;
+                }
+                hook(rule, context, matched)
+            },
+        ));
+    }
+}
+
+/// The bail: the first alternate of a state, which ends it once the
+/// declaration (or its innermost scope) has failed.
+fn bail_alt() -> AltSpec {
+    let mut alt = AltSpec::new();
+    alt.c_fn = Some(Arc::new(|_rule: &mut Rule, _context: &mut Context| {
+        bailing()
+    }));
+    alt.g = "c-bail".to_string();
+    alt
+}
+
+/// The catch-all: the last alternate of a state, which fails an armed
+/// declaration where no other alternate matched.
+fn fail_alt() -> AltSpec {
+    let mut alt = AltSpec::new();
+    alt.c_fn = Some(Arc::new(|_rule: &mut Rule, _context: &mut Context| armed()));
+    alt.add_action(|_rule: &mut Rule, _context: &mut Context| fail());
+    alt.g = "c-fail".to_string();
+    alt
+}
+
+/// Whether a lifecycle's bindings are the order it runs in: the named
+/// actions, the callbacks and the state callbacks, each in its own order
+/// (the engine's own test, which it falls back from when they are not).
+fn order_matches(
+    named: &[String],
+    callbacks: &[ContextAction],
+    states: &[StateAction],
+    order: &[ActionBinding],
+) -> bool {
+    if order.len() != named.len() + callbacks.len() + states.len() {
+        return false;
+    }
+    let (mut name, mut callback, mut state) = (0, 0, 0);
+    for binding in order {
+        match binding {
+            ActionBinding::Named(text) => {
+                if named.get(name) != Some(text) {
+                    return false;
+                }
+                name += 1;
+            }
+            ActionBinding::Callback(action) => {
+                if !callbacks
+                    .get(callback)
+                    .is_some_and(|expected| Arc::ptr_eq(expected, action))
+                {
+                    return false;
+                }
+                callback += 1;
+            }
+            ActionBinding::State(action) => {
+                if !states
+                    .get(state)
+                    .is_some_and(|expected| Arc::ptr_eq(expected, action))
+                {
+                    return false;
+                }
+                state += 1;
+            }
+        }
+    }
+    true
+}
+
+/// Make each lifecycle closure of a phase do nothing once the declaration
+/// has failed, keeping the order the phase runs them in.
+fn bail_actions(
+    named: &[String],
+    callbacks: &mut Vec<ContextAction>,
+    states: &mut Vec<StateAction>,
+    order: &mut Vec<ActionBinding>,
+) {
+    let bindings: Vec<ActionBinding> = if order_matches(named, callbacks, states, order) {
+        order.clone()
+    } else {
+        named
+            .iter()
+            .cloned()
+            .map(ActionBinding::Named)
+            .chain(callbacks.iter().cloned().map(ActionBinding::Callback))
+            .chain(states.iter().cloned().map(ActionBinding::State))
+            .collect()
+    };
+    let mut new_callbacks = Vec::new();
+    let mut new_states = Vec::new();
+    let mut new_order = Vec::new();
+    for binding in bindings {
+        match binding {
+            ActionBinding::Named(text) => new_order.push(ActionBinding::Named(text)),
+            ActionBinding::Callback(action) => {
+                let wrapped: ContextAction =
+                    Arc::new(move |rule: &mut Rule, context: &mut Context| {
+                        if bailing() {
+                            return Ok(());
+                        }
+                        action(rule, context)
+                    });
+                new_callbacks.push(wrapped.clone());
+                new_order.push(ActionBinding::Callback(wrapped));
+            }
+            ActionBinding::State(action) => {
+                let wrapped: StateAction = Arc::new(
+                    move |rule: &mut Rule,
+                          context: &mut Context,
+                          next: Option<&RuleSnapshot>,
+                          out: Option<Token>| {
+                        if bailing() {
+                            return Ok(None);
+                        }
+                        action(rule, context, next, out)
+                    },
+                );
+                new_states.push(wrapped.clone());
+                new_order.push(ActionBinding::State(wrapped));
+            }
+        }
+    }
+    *callbacks = new_callbacks;
+    *states = new_states;
+    *order = new_order;
 }

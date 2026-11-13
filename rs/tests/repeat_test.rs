@@ -66,7 +66,7 @@ fn repetition_is_replacement() {
         ),
         (
             "a comma expression",
-            Box::new(move |n| format!("void f(void) {{ a{}; }}", rep(", a", n - 1))),
+            Box::new(move |n| format!("void f(void) {{ a{}; }}", rep(", a", n))),
             false,
         ),
         (

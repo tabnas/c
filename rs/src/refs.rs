@@ -130,7 +130,6 @@ pub fn register(parser: &mut Tabnas, options: &COptions, fallback: &Fallback) ->
         cond_lex_fns: HashMap::new(),
     };
     register_core(&mut reg, options);
-    crate::expression::register(&mut reg);
     crate::refs_newpath::register(&mut reg, options);
     crate::refs_ext::register(&mut reg, options);
     let stubbed = stub_remaining(&mut reg);

@@ -40,6 +40,9 @@ pub fn on_lex_token(token: &mut Token) {
             .insert("leading".to_string(), leading);
     }
     // The tokens the parser takes, in order, for the armed fallback
-    // (`crate::fallback`).
-    crate::fallback::record_token(token);
+    // (`crate::fallback`), and the links between an expression's tokens
+    // (`crate::expr_grammar`).
+    if let Some(id) = crate::fallback::record_token(token) {
+        crate::expr_grammar::link_token(token, id);
+    }
 }

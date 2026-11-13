@@ -41,7 +41,7 @@ use indexmap::IndexMap;
 use tabnas::{GrammarSpec, LexMatcher, Options, Plugin, PluginError, Tabnas, TabnasError, Value};
 
 mod cst;
-mod expression;
+mod expr_grammar;
 mod fallback;
 mod members;
 mod refs;
@@ -296,13 +296,19 @@ pub fn c(parser: &mut Tabnas, options: &COptions) -> Result<(), PluginError> {
     // (`every_reference_the_grammar_names_has_a_handler`); a name left
     // over gets a no-op, which that test refuses.
     refs::register(parser, options, &fallback);
-    // C's expressions start from a rule named `val`, as jsonic's do.
-    // Clear jsonic's, alternates and actions both, so that C's is the only
-    // one.
+    // C's expressions are read by tabnas-expr, from the rule named `val`
+    // that jsonic's grammar has too. Clear jsonic's, alternates and actions
+    // both, so that expr's and C's are the only ones
+    // (`crate::expr_grammar`).
     parser.define_rule("val", |spec| {
         spec.clear();
     });
     install_grammar(parser, document)?;
+    expr_grammar::install(parser)?;
+    // The rules expr reads an expression with, its own and the jsonic ones
+    // it pushes (an implicit list inside a paren), are below every external
+    // declaration too.
+    fallback::with_rule_fallback(parser, expr_grammar::EXPR_RULES);
     Ok(())
 }
 

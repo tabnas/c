@@ -243,16 +243,6 @@ pub fn set_kind(node: usize, kind: &str) {
     });
 }
 
-pub fn span_of(node: usize) -> Span {
-    with_state(|state| {
-        state
-            .nodes
-            .get(node)
-            .map(|data| data.span)
-            .unwrap_or_else(Span::zero)
-    })
-}
-
 pub fn set_span(node: usize, span: Span) {
     with_state(|state| {
         if let Some(data) = state.nodes.get_mut(node) {
@@ -396,28 +386,6 @@ fn item_token(item: &Item) -> Option<usize> {
     }
 }
 
-/// Turn `node` into a new node of `kind` whose first child is what `node`
-/// was, and answer the id of what it was (`wrapInPlace` in
-/// `ts/src/expression.ts`). The new node takes the old one's span, as the
-/// node a rule wraps always gave its wrapper.
-pub fn wrap_in_place(node: usize, kind: &str) -> usize {
-    with_state(|state| {
-        let inner = state.nodes[node].clone();
-        let span = inner.span;
-        state.nodes.push(inner);
-        let inner_id = state.nodes.len() - 1;
-        state.nodes[node] = NodeData {
-            kind: kind.to_string(),
-            span,
-            children: vec![Item::Node(inner_id)],
-            leading: Vec::new(),
-            trailing: Vec::new(),
-            extras: IndexMap::new(),
-        };
-        inner_id
-    })
-}
-
 /// Give every node in a subtree its span: the span of the first token it
 /// keeps, comments and line continuations left out; a node that keeps no
 /// token takes its parent's. Run once a subtree is complete: an external
@@ -484,6 +452,16 @@ pub fn fix_spans(root: usize) {
                 }
             }
         }
+    });
+}
+
+/// A node given its span whose children change after (an expression's
+/// node that a later operation of the same expression extends) is given
+/// its span again by the next [`fix_spans`] over it (`unfixSpan` in
+/// `ts/src/node.ts`).
+pub fn unfix_span(node: usize) {
+    with_state(|state| {
+        state.fixed.remove(&node);
     });
 }
 

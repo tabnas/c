@@ -139,8 +139,8 @@ pub const DECL_HEAD: &[&str] = &[
     "KW___DECLSPEC",
 ];
 
-/// The operators of C's expression rules (`crate::expression` has
-/// their precedence).
+/// C's operators, as token sets the grammar's options carry, as
+/// TypeScript's and Go's do (`crate::expr_grammar` has their table).
 pub const ASSIGN_OP: &[&str] = &[
     "PUNC_ASSIGN",
     "PUNC_PLUS_ASSIGN",

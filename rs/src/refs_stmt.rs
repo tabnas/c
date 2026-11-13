@@ -137,7 +137,7 @@ pub fn register(reg: &mut Reg<'_>) {
     });
     reg.act("@es-take-expr", |_rule, _context| {});
     reg.act("@expression_statement-bc", |rule, _context| {
-        if !crate::expression::child_is_expr(rule) || u_bool(rule, "exprAttached") {
+        if !crate::expr_grammar::child_is_expr(rule) || u_bool(rule, "exprAttached") {
             return;
         }
         let (Some(node), Some(child)) = (node_id(rule), child_node_id(rule)) else {
@@ -182,7 +182,7 @@ pub fn register(reg: &mut Reg<'_>) {
         k_set_bool(rule, "tookExpr", true);
     });
     reg.act("@jump_statement-bc", |rule, _context| {
-        if !crate::expression::child_is_expr(rule)
+        if !crate::expr_grammar::child_is_expr(rule)
             || !k_bool(rule, "tookExpr")
             || k_bool(rule, "exprAttached")
         {
@@ -207,7 +207,7 @@ pub fn register(reg: &mut Reg<'_>) {
     reg.act("@pc-open", |rule, _context| take_open(rule));
     reg.act("@pc-take-expr", |_rule, _context| {});
     reg.act("@paren_condition-bc", |rule, _context| {
-        if !crate::expression::child_is_expr(rule) || u_bool(rule, "exprAttached") {
+        if !crate::expr_grammar::child_is_expr(rule) || u_bool(rule, "exprAttached") {
             return;
         }
         let (Some(node), Some(child)) = (node_id(rule), child_node_id(rule)) else {
@@ -397,7 +397,7 @@ pub fn register(reg: &mut Reg<'_>) {
         // returned by val. They are kept as one test here because the
         // bodies are the same statement.
         if (took == "decl" && name == "simple_declaration")
-            || (took == "expr" && crate::expression::child_is_expr(rule))
+            || (took == "expr" && crate::expr_grammar::child_is_expr(rule))
         {
             take_clause_value(rule);
         }
@@ -425,7 +425,7 @@ pub fn register(reg: &mut Reg<'_>) {
         k_set_bool(rule, "tookSemi", true);
     });
     reg.act("@for_cond-bc", |rule, _context| {
-        if k_str(rule, "took") == "expr" && crate::expression::child_is_expr(rule) {
+        if k_str(rule, "took") == "expr" && crate::expr_grammar::child_is_expr(rule) {
             take_clause_value(rule);
         }
     });
@@ -442,7 +442,7 @@ pub fn register(reg: &mut Reg<'_>) {
         k_set_str(rule, "took", "expr")
     });
     reg.act("@for_iter-bc", |rule, _context| {
-        if k_str(rule, "took") == "expr" && crate::expression::child_is_expr(rule) {
+        if k_str(rule, "took") == "expr" && crate::expr_grammar::child_is_expr(rule) {
             take_clause_value(rule);
         }
     });
@@ -500,7 +500,7 @@ pub fn register(reg: &mut Reg<'_>) {
             return;
         };
         if u_str(rule, "kind") == "case"
-            && crate::expression::child_is_expr(rule)
+            && crate::expr_grammar::child_is_expr(rule)
             && child != node
             && !u_bool(rule, "exprAttached")
         {

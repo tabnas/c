@@ -16,7 +16,7 @@ use std::rc::Rc;
 use tabnas::{Context, Lexer, Rule, Token, Value};
 
 use crate::cst::{self, Item};
-use crate::state::{self, handle_node, node_handle, with_state};
+use crate::state::{handle_node, node_handle, with_state};
 
 // ---------------------------------------------------------------------
 // Rule node
@@ -96,15 +96,6 @@ pub fn k_node(rule: &Rule, key: &str) -> Option<usize> {
 
 pub fn k_set_node(rule: &mut Rule, key: &str, node: usize) {
     k_set(rule, key, node_handle(node));
-}
-
-/// A token handle kept on the `k` bag.
-pub fn k_token(rule: &Rule, key: &str) -> Option<usize> {
-    rule.k.get(key).and_then(state::handle_token)
-}
-
-pub fn k_set_token(rule: &mut Rule, key: &str, token: usize) {
-    k_set(rule, key, state::token_handle(token));
 }
 
 pub fn k_set_bool(rule: &mut Rule, key: &str, flag: bool) {
@@ -306,15 +297,6 @@ pub fn open_token(rule: &Rule, index: usize) -> Option<usize> {
 /// Copy the rule's first close token into the arena.
 pub fn c0(rule: &Rule) -> Option<usize> {
     rule.c0().map(cst::intern_token)
-}
-
-/// Copy the rule's Nth close token into the arena.
-pub fn close_token(rule: &Rule, index: usize) -> Option<usize> {
-    rule.c.get(index).map(cst::intern_token)
-}
-
-pub fn u_has(rule: &Rule, key: &str) -> bool {
-    rule.u.get(key).is_some_and(|value| !value.is_undefined())
 }
 
 pub fn u_del(rule: &mut Rule, key: &str) {
