@@ -458,8 +458,7 @@ compared as JSON with its keys sorted:
 - the 100 Csmith programs, each after a header that declares csmith.h's
   stdint names as typedef names (`typedef int int8_t;` and so on) and
   read in plain mode, as a host reads C: 100 of 100 in Rust (the part's
-  runs took 57 minutes, the reader's 2.3), TYPESCRIPT_RESULT, and
-  GO_RESULT.
+  runs took 57 minutes, the reader's 2.3).
 
 What the part holds is the stack of rules, the expression being read,
 the item being read and the registers of the nodes not yet written: over
