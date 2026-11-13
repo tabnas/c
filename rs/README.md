@@ -253,7 +253,7 @@ deeply nested source is bounded by the realize cap described above. The
 canonical has no cap and returns the tree. Up to 0.5 two more were
 recorded there, a ternary used as a whole declaration initializer and a
 prefix operator as the whole of a brace initializer item; from 0.6 this
-port builds the canonical's tree for both.
+port builds the same tree as the canonical for both.
 
 ## Build and test
 
