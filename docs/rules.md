@@ -481,6 +481,21 @@ compared as JSON with its keys sorted:
   fixture rows in Rust and Go, and programs past the window, seed-011 and
   seed-074 in Rust and Go and seed-043 in TypeScript.
 
+Measured again for 0.6.2, from 2026-11-14 to 2026-11-16, with members
+compared in the order they are written in Rust and TypeScript, whose
+readers keep it (Go's reader's nodes are maps, compared with their keys
+sorted):
+
+- the 225 rows of `test/spec/` a parse from the start rule reads: 225 of
+  225 in Rust, TypeScript and Go;
+- the 100 Csmith programs, as above: 100 of 100 in Rust, the part's run
+  taking 61 minutes; the 41 smallest of them, 1.56 MB, 41 of 41 in
+  TypeScript (46 minutes) and in Go (17 minutes);
+- in TypeScript, every one of those fixture rows cut at every seventh
+  character, and whole: 991 documents, 329 of them refused, each refusal
+  the reader's (the engine's code, at its row, and not one the part
+  raised) and each tree the reader's.
+
 A document the parser refuses is refused through the part as when read
 whole: the part reads every pass up to the one the parse fails on, and
 the parse's own failure, its code and position, ends the run. In
