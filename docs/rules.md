@@ -420,7 +420,18 @@ operator table in alchemy text, held to the parser's tree by tests. The
 part holds one expression at a time and places each operator by its
 binding powers from the tokens and the alternates' groups of expr's
 passes, then makes each operation C's node as the reader's evaluator
-does. The copy is a second statement of C's precedence: a test in every
+does, once the operation is finished (`c-x-fin`), and keeps the node in a
+register of its own: what the part holds of an expression is then a
+placeholder where each finished operation would be, so its state nests no
+deeper for an expression that nests deeper. Through 0.6.1 the part held
+each operation inside the one that took it until the expression ended,
+and a comma expression of 124 operands, whose tree nests 18 levels, took
+its state past transduce's `max_depth`, 256, which a host holds a
+scan-emit state to (tabnas/c#80, `test/spec/comma-chain.tsv`). A tree
+that nests past `max_depth` is refused on any route that writes it as
+JSON events, the part's and a whole read's alike, since each holds the
+events to the same limit. The copy is a second statement of C's
+precedence: a test in every
 runtime (`ts/test/part.test.ts`, `TestPartOperatorTable` in
 `go/part_test.go`, `part_operator_table` in `rs/src/expr_grammar.rs`)
 holds it to `C_OP_TABLE` entry for entry, and fails on a drift. expr's
