@@ -481,6 +481,14 @@ compared as JSON with its keys sorted:
   fixture rows in Rust and Go, and programs past the window, seed-011 and
   seed-074 in Rust and Go and seed-043 in TypeScript.
 
+A document the parser refuses is refused through the part as when read
+whole: the part reads every pass up to the one the parse fails on, and
+the parse's own failure, its code and position, ends the run. In
+TypeScript that last pass names the groups of the alternate the engine
+matched before it, where Go and Rust name none, so the handler of that
+alternate runs once more, with no token: a token it would keep or drop
+is then none, and nothing is kept (tabnas/c#82).
+
 A token's span is its offset in the passes, which `ParserEvents/1`
 counts in bytes in every runtime, and its line and column, which are the
 engine's; its end adds its length in characters. On ASCII text that is

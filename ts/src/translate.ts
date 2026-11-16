@@ -1330,11 +1330,21 @@ def c-tr-get-ex [k n]
 
 def c-tr-set-kind [kind n] (c-tr-node kind (c-tr-kids n) (as-vector (get :ex n)))
 
-; Keep a token: its comments, then itself.
-def c-tr-keep [tok n] (c-tr-push-children (push (c-tr-bare tok) (as-vector (get :lead tok))) n)
+; Keep a token: its comments, then itself. Where there is no token there
+; is nothing to keep: a TypeScript parse's last pass, the one it fails on,
+; names the groups of the alternate matched before it, so the handler of
+; that alternate runs once more, with no token, before the parse's own
+; failure ends the run (tabnas/c#82).
+def c-tr-keep [tok n]
+  match tok
+    case missing n
+    case _ (c-tr-push-children (push (c-tr-bare tok) (as-vector (get :lead tok))) n)
 
 ; Drop a token: its comments stay, at its place.
-def c-tr-drop [tok n] (c-tr-push-children (as-vector (get :lead tok)) n)
+def c-tr-drop [tok n]
+  match tok
+    case missing n
+    case _ (c-tr-push-children (as-vector (get :lead tok)) n)
 
 ; The child nodes of a node, tokens left out.
 def c-tr-child-nodes [n] (filter c-tr-is-node (c-tr-kids n))
