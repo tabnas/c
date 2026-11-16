@@ -574,6 +574,49 @@ fn make_on(mut parser: Tabnas, options: &COptions) -> Tabnas {
     parser
 }
 
+/// The parser a host streams a C document through: its rule passes,
+/// which C's transducer part (`alchemy/transduce.alc`) reads, are
+/// [`make`]'s, alternate for alternate and token for token, it ends a
+/// document where [`make`] does, and it keeps nothing of a declaration it
+/// has closed.
+///
+/// Its rules make the decisions [`make`]'s make, by the same handlers,
+/// which build each external declaration's nodes as [`make`]'s do, since
+/// a decision reads them (whether a line opens a conditional group, the
+/// typedef names a declaration binds). But the translation unit, a
+/// conditional group and its branches keep no declaration or branch that
+/// has closed, and as each declaration of an items loop starts, the arena
+/// lets go of the nodes, token lists and tokens the loop's earlier items
+/// made (`state::reclaim`): what a parse holds is the declaration being
+/// read, its tokens, the conditional groups open around it, and the names
+/// that decide how a token lexes (typedef names and macros). The engine
+/// bounds the rule history at three predecessors already. Its value is a
+/// translation unit with no children, not the tree: for a tree, take
+/// [`make`]. It declares `lex.window`, as [`make`] does. The counterpart of
+/// TypeScript's `makeStreaming()` and Go's `MakeStreaming`.
+pub fn make_streaming() -> Tabnas {
+    make_streaming_with(&COptions::default())
+}
+
+/// The streaming parser built with the given plugin options.
+pub fn make_streaming_with(options: &COptions) -> Tabnas {
+    let mut parser = make_on(tabnas_jsonic::make(), options);
+    // After the plugin's own prepare hook, which resets the parse state.
+    parser
+        .set_options(|options: &mut Options| {
+            options
+                .parse
+                .prepare
+                .push(tabnas::ParsePrepare::Context(std::sync::Arc::new(
+                    |_context: &mut tabnas::Context| {
+                        state::with_state(|state| state.stream = true);
+                    },
+                )));
+        })
+        .expect("the streaming parser's prepare hook sets");
+    parser
+}
+
 #[cfg(test)]
 mod reference_tests {
     /// The grammar document names no condition or action this port does
@@ -614,6 +657,65 @@ mod window_tests {
         assert!(parser.options.lex.window);
         assert!(super::make().options.lex.window);
         assert!(super::parse_with(&parser, "int main(void) { return 0; }").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use crate::state::with_state;
+
+    /// What the arena holds once a parse ends: its nodes, tokens and token
+    /// lists.
+    fn held() -> (usize, usize, usize) {
+        with_state(|state| (state.nodes.len(), state.tokens.held(), state.lists.len()))
+    }
+
+    /// A document of `n` items, each a comment, a declaration whose
+    /// initializer links brackets, commas and a conditional's `:`, and a
+    /// function, inside an include guard when `guarded`.
+    fn document(n: usize, guarded: bool) -> String {
+        let mut out = String::new();
+        if guarded {
+            out.push_str("#ifndef GUARD\n#define GUARD 1\n");
+        }
+        for i in 0..n {
+            out.push_str(&format!(
+                "/* item {i} */\nint x{i} = f({i}, ({i} ? 1 : 2), a[{i}]);\nint g{i}(int b) {{ if (b) {{ return b + {i}; }} return 0; }}\n"
+            ));
+        }
+        if guarded {
+            out.push_str("#endif\n");
+        }
+        out
+    }
+
+    /// The streaming parser holds as much after ten times the items: the
+    /// declarations it has closed are gone from its arena, a conditional
+    /// group open around them or not, where `make()`'s holds them all.
+    #[test]
+    fn a_streaming_parse_holds_no_declaration_it_has_closed() {
+        for guarded in [false, true] {
+            let stream = crate::make_streaming();
+            stream.parse(&document(100, guarded)).expect("it parses");
+            let small = held();
+            stream.parse(&document(1000, guarded)).expect("it parses");
+            let large = held();
+            assert_eq!(small, large, "guarded {guarded}");
+            assert!(
+                small.0 < 100 && small.1 < 200,
+                "guarded {guarded}: {small:?}"
+            );
+
+            let tree = crate::make();
+            tree.parse(&document(100, guarded)).expect("it parses");
+            let whole = held();
+            tree.parse(&document(1000, guarded)).expect("it parses");
+            let ten = held();
+            assert!(
+                ten.0 > 9 * whole.0 && ten.1 > 9 * whole.1,
+                "{whole:?}, then {ten:?}"
+            );
+        }
     }
 }
 

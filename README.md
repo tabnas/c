@@ -62,6 +62,14 @@ const fd = openSync('main.c', 'r')
 const tree = make().parseReader({ read: (buf: Uint8Array) => readSync(fd, buf) })
 ```
 
+`makeStreaming(options)` builds the parser that a host streams a document
+through, such as a host that reads C's rule passes with the transducer
+part. Its rule passes are the passes of `make()`, and it ends a document
+where `make()` does. It keeps nothing of a declaration it has closed, so
+what a parse holds stays flat however long the document grows. Its value
+is a translation unit with no children, not the tree. Go's
+`MakeStreaming` and Rust's `make_streaming` do the same.
+
 ## Options
 
 The plugin takes a single option, passed as the second argument to `use`:

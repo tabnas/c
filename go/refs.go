@@ -83,7 +83,9 @@ func makeGrammarRefs(opts COptions) map[tabnas.FuncRef]any {
 	// --- extdecl_loop -----------------------------------------------------
 	// r.Node is the container's (the translation unit's, or a conditional
 	// branch's); bc appends each completed external declaration and each
-	// conditional group, but a group's opener, which the group takes.
+	// conditional group, but a group's opener, which the group takes. The
+	// streaming parser's container keeps none of them (MakeStreaming).
+	stream := opts.stream
 	state("@extdecl_loop-bc", func(r *tabnas.Rule, _ *tabnas.Context) {
 		child := r.Child
 		if child == nil || child == tabnas.NoRule || child.Node == nil {
@@ -101,13 +103,31 @@ func makeGrammarRefs(opts COptions) map[tabnas.FuncRef]any {
 		case "external_declaration":
 			if conditionalOf(node, conditionalOpeners) != nil {
 				r.U["opener"] = node
-			} else {
+			} else if !stream {
 				appendChild(ruleNode(r), node)
 			}
 		case "conditional_group":
-			appendChild(ruleNode(r), node)
+			if !stream {
+				appendChild(ruleNode(r), node)
+			}
 		}
 	})
+	// The streaming parser's items loop lets go of the instance it replaced.
+	// The engine links each rule to the one it replaced (Prev) and that one
+	// to it (Next), and keeps the links under its default, unbounded, rule
+	// history, so the first instance would reach every later one, and
+	// through each the rules and the node of its declaration. MakeC's loop
+	// has no before-open action.
+	if stream {
+		state("@extdecl_loop-bo", func(r *tabnas.Rule, _ *tabnas.Context) {
+			if prev := r.Prev; prev != nil && prev != tabnas.NoRule && prev.Name == "extdecl_loop" {
+				if prev.Next == r {
+					prev.Next = tabnas.NoRule
+				}
+				r.Prev = tabnas.NoRule
+			}
+		})
+	}
 	cond("@opens-group", func(r *tabnas.Rule, _ *tabnas.Context) bool {
 		return uNode(r, "opener") != nil
 	})
@@ -148,9 +168,13 @@ func makeGrammarRefs(opts COptions) map[tabnas.FuncRef]any {
 		}
 		switch node["kind"] {
 		case "conditional_branch":
-			appendChild(ruleNode(r), node)
+			if !stream {
+				appendChild(ruleNode(r), node)
+			}
 		case "external_declaration":
-			appendChild(ruleNode(r), node)
+			if !stream {
+				appendChild(ruleNode(r), node)
+			}
 			r.U["endifTaken"] = true
 		}
 	})
@@ -197,11 +221,17 @@ func makeGrammarRefs(opts COptions) map[tabnas.FuncRef]any {
 
 	// --- external_declaration --------------------------------------------
 	// Each declaration starts with a fresh node and state; the fallback's
-	// token record is trimmed to the tokens it has not yet taken.
+	// token record is trimmed to the tokens it has not yet taken. The
+	// streaming parser's record of the nodes given their spans starts
+	// again: it holds each node it records, so that the node's address
+	// names no other, and the nodes of the declarations before are gone.
 	state("@external_declaration-bo", func(r *tabnas.Rule, ctx *tabnas.Context) {
 		r.Node = makeNode("external_declaration", nil)
 		if m := ctxCMeta(ctx); m != nil {
 			startDeclaration(m, ctx)
+			if stream {
+				m.Fixed = map[uintptr]CNode{}
+			}
 		}
 	})
 

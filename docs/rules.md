@@ -420,7 +420,18 @@ operator table in alchemy text, held to the parser's tree by tests. The
 part holds one expression at a time and places each operator by its
 binding powers from the tokens and the alternates' groups of expr's
 passes, then makes each operation C's node as the reader's evaluator
-does. The copy is a second statement of C's precedence: a test in every
+does, once the operation is finished (`c-x-fin`), and keeps the node in a
+register of its own: what the part holds of an expression is then a
+placeholder where each finished operation would be, so its state nests no
+deeper for an expression that nests deeper. Through 0.6.1 the part held
+each operation inside the one that took it until the expression ended,
+and a comma expression of 124 operands, whose tree nests 18 levels, took
+its state past transduce's `max_depth`, 256, which a host holds a
+scan-emit state to (tabnas/c#80, `test/spec/comma-chain.tsv`). A tree
+that nests past `max_depth` is refused on any route that writes it as
+JSON events, the part's and a whole read's alike, since each holds the
+events to the same limit. The copy is a second statement of C's
+precedence: a test in every
 runtime (`ts/test/part.test.ts`, `TestPartOperatorTable` in
 `go/part_test.go`, `part_operator_table` in `rs/src/expr_grammar.rs`)
 holds it to `C_OP_TABLE` entry for entry, and fails on a drift. expr's
@@ -437,7 +448,12 @@ What it writes when:
   declaration's opening, its specifiers and declarator, then the body,
   each statement as it ends, and each statement that holds statements
   (a compound statement, `if`, `while`, `do`, `for`, `switch`, a labeled
-  statement) as it is read;
+  statement) as it is read, its opening once its first token is known.
+  A node's span is its first token's, so the opening waits for that token,
+  and the children before it, which keep only comments, wait with it:
+  the members then come in the reader's order, `kind`, `span`, `children`
+  and `trivia`, where through 0.6.1 the part wrote the span after the
+  trivia (tabnas/c#79);
 - a declaration, a statement that holds no statement, an expression and
   an armed declaration once it ends.
 
@@ -465,6 +481,29 @@ compared as JSON with its keys sorted:
   fixture rows in Rust and Go, and programs past the window, seed-011 and
   seed-074 in Rust and Go and seed-043 in TypeScript.
 
+Measured again for 0.6.2, from 2026-11-14 to 2026-11-16, with members
+compared in the order they are written in Rust and TypeScript, whose
+readers keep it (Go's reader's nodes are maps, compared with their keys
+sorted):
+
+- the 225 rows of `test/spec/` a parse from the start rule reads: 225 of
+  225 in Rust, TypeScript and Go;
+- the 100 Csmith programs, as above: 100 of 100 in Rust, the part's run
+  taking 61 minutes; the 41 smallest of them, 1.56 MB, 41 of 41 in
+  TypeScript (46 minutes) and in Go (17 minutes);
+- in TypeScript, every one of those fixture rows cut at every seventh
+  character, and whole: 991 documents, 329 of them refused, each refusal
+  the reader's (the engine's code, at its row, and not one the part
+  raised) and each tree the reader's.
+
+A document the parser refuses is refused through the part as when read
+whole: the part reads every pass up to the one the parse fails on, and
+the parse's own failure, its code and position, ends the run. In
+TypeScript that last pass names the groups of the alternate the engine
+matched before it, where Go and Rust name none, so the handler of that
+alternate runs once more, with no token: a token it would keep or drop
+is then none, and nothing is kept (tabnas/c#82).
+
 A token's span is its offset in the passes, which `ParserEvents/1`
 counts in bytes in every runtime, and its line and column, which are the
 engine's; its end adds its length in characters. On ASCII text that is
@@ -488,6 +527,19 @@ definition among them, is held to its end. From a reader, a window at a
 time (`make()`), the part's first event comes once the engine has read
 its window's margin ahead: at 69,632 bytes of a 600,780-byte document.
 
+The parser the part reads holds as little: the streaming parser
+(`makeStreaming()`, `MakeStreaming`, `make_streaming`; AGENTS.md, "The
+streaming parser") makes `make()`'s passes and keeps nothing of a
+declaration it has closed. Measured on 2026-11-14 over the streaming
+gate's documents read from a reader, 300 and 3,000 items: in Rust, by a
+counting allocator, a parse holds at most 1.55 MB of each, and the part
+over it 3.91 MB of each, where over `make()` the part holds 6.67 MB, then
+32.67 MB; in Go, the live heap after a full collection grows by 0.79 MB
+over the first and 0.77 MB over the second, where `MakeC`'s grows by
+7.82 MB, then 71.83 MB; in TypeScript, the live heap after a full
+collection peaks at 13.58 MB and 13.88 MB, where `make()`'s peaks at
+17.07 MB, then 49.20 MB.
+
 ## Order
 
 1. TypeScript: the rules, the tree, the API, the fallback, the tests and
@@ -504,3 +556,6 @@ its window's margin ahead: at 69,632 bytes of a 600,780-byte document.
 4. The release, a minor version, 0.6.0, since the tree changes.
 5. The part, the window and the manifest: the release, a patch, 0.6.1,
    since it adds to the API and the manifest and changes no tree.
+6. The streaming parser, the part's members in the reader's order, and
+   its state held flat: the release, a patch, 0.6.2, since it adds to the
+   API and changes no tree.
