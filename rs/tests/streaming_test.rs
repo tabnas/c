@@ -127,36 +127,33 @@ fn logged(mut parser: Tabnas) -> Logged {
             carries,
             &tokens,
         );
-        passed
-            .lock()
-            .expect("one parse at a time")
-            .add(&fields, || {
-                let alt = match &done.alt {
-                    None => "-".to_string(),
-                    Some(alt) => format!("{}/{}/{}/{}", alt.p, alt.r, alt.b, alt.g.join(",")),
-                };
-                let counters: Vec<String> = counters
-                    .iter()
-                    .map(|(name, n)| format!("{name}={n}"))
-                    .collect();
-                let tokens: Vec<String> = tokens
-                    .iter()
-                    .map(|(name, src, si)| format!("{name} {src:?} {si}"))
-                    .collect();
-                format!(
-                    "{} | {:?} | {} | {} | {} | {} | {} | {} | {} | {}",
-                    rule.name.as_str(),
-                    done.state,
-                    rule.d,
-                    rule.i,
-                    alt,
-                    done.forced,
-                    done.probe,
-                    counters.join(","),
-                    carries,
-                    tokens.join(", ")
-                )
-            });
+        passed.lock().expect("one parse at a time").add(fields, || {
+            let alt = match &done.alt {
+                None => "-".to_string(),
+                Some(alt) => format!("{}/{}/{}/{}", alt.p, alt.r, alt.b, alt.g.join(",")),
+            };
+            let counters: Vec<String> = counters
+                .iter()
+                .map(|(name, n)| format!("{name}={n}"))
+                .collect();
+            let tokens: Vec<String> = tokens
+                .iter()
+                .map(|(name, src, si)| format!("{name} {src:?} {si}"))
+                .collect();
+            format!(
+                "{} | {:?} | {} | {} | {} | {} | {} | {} | {} | {}",
+                rule.name.as_str(),
+                done.state,
+                rule.d,
+                rule.i,
+                alt,
+                done.forced,
+                done.probe,
+                counters.join(","),
+                carries,
+                tokens.join(", ")
+            )
+        });
     });
     Logged { parser, seen }
 }
@@ -331,10 +328,12 @@ fn its_passes_are_make_s_over_every_csmith_program() {
         .collect();
     seeds.sort();
     assert!(seeds.len() >= 100, "{} Csmith programs", seeds.len());
-    let header: String = STDINT
-        .iter()
-        .map(|name| format!("typedef int {name};\n"))
-        .collect();
+    let mut header = String::new();
+    for name in STDINT {
+        header.push_str("typedef int ");
+        header.push_str(name);
+        header.push_str(";\n");
+    }
     let pair = Pair::new(false);
     let mut failures = Vec::new();
     let mut reported = Instant::now();
