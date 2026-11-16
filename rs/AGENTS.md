@@ -102,6 +102,7 @@ conformance sweeps no handler throws (`src/fallback.rs`).
 | `tests/c_test.rs` | behaviour that a fixture row cannot express: the plugin API, the options, the symbol table |
 | `tests/limits_test.rs` | untrusted input: deep nesting, long input, unterminated constructs, odd Unicode |
 | `tests/perf_test.rs` | that parse time stays linear in input size |
+| `tests/streaming_test.rs` | `make_streaming()` against `make()`: every pass, every token the lexer gives and every ending alike, over the fixtures and the Csmith corpus, from the text and from a reader; what a streaming parse holds is `streaming_tests` in `src/lib.rs` (see "The streaming parser" in `../AGENTS.md`) |
 | `tests/divergent_test.rs` | `test/divergent.tsv`, the register that fails when a recorded divergence REGRESSES and when it is repaired; from 0.6 it holds no row |
 | `tests/version_test.rs` | `Cargo.toml`, `VERSION`, `ts/package.json` and `go/c.go` agree |
 

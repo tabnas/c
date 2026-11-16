@@ -214,6 +214,36 @@ pub struct LinkState {
     colon: HashMap<usize, usize>,
 }
 
+impl LinkState {
+    /// For the streaming parser (`crate::state::reclaim`): let go of the
+    /// links made for the tokens before the place `from`, but the commas
+    /// of a bracket still open, and answer the arena ids of the tokens the
+    /// links left still name.
+    pub fn prune(&mut self, from: usize) -> Vec<usize> {
+        let open: std::collections::HashSet<usize> = self
+            .levels
+            .iter()
+            .filter_map(|level| level.opener.as_ref().map(|opener| opener.0))
+            .collect();
+        self.open.retain(|at, _| *at >= from);
+        self.seps.retain(|at, _| *at >= from || open.contains(at));
+        self.colon.retain(|at, _| *at >= from);
+        let mut ids: Vec<usize> = Vec::new();
+        for level in &self.levels {
+            if let Some(opener) = &level.opener {
+                ids.push(opener.1);
+            }
+            ids.extend(level.qs.iter().map(|q| q.1));
+        }
+        ids.extend(self.open.values().copied());
+        for seps in self.seps.values() {
+            ids.extend(seps.iter().copied());
+        }
+        ids.extend(self.colon.values().copied());
+        ids
+    }
+}
+
 fn opener_of(closer: &str) -> Option<&'static str> {
     match closer {
         "PUNC_RPAREN" => Some("PUNC_LPAREN"),

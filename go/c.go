@@ -41,6 +41,11 @@ type COptions struct {
 	// Extended enables the GCC/Clang/MSVC extension constructs
 	// (__attribute__, __declspec, inline asm, etc.).
 	Extended bool
+
+	// stream is the streaming parser's (MakeStreaming): the translation
+	// unit's items loop and its conditional groups keep nothing of what
+	// has closed.
+	stream bool
 }
 
 // Defaults mirrors the TypeScript C.defaults.
@@ -113,7 +118,20 @@ func kwTokenNames() []string {
 
 // C is the Tabnas plugin entry point. Port of the C plugin in c.ts.
 func C(j *tabnas.Tabnas, opts map[string]any) error {
+	return installC(j, opts, false)
+}
+
+// cStreaming is the plugin the streaming parser installs (MakeStreaming):
+// C's, with the translation unit's items loop and its conditional groups
+// keeping nothing of what has closed.
+func cStreaming(j *tabnas.Tabnas, opts map[string]any) error {
+	return installC(j, opts, true)
+}
+
+// installC installs the plugin; stream is the streaming parser's.
+func installC(j *tabnas.Tabnas, opts map[string]any, stream bool) error {
 	copts := resolveOptions(opts)
+	copts.stream = stream
 
 	// 1. Register punctuator + keyword token names with their fixed sources,
 	//    and the special token names, so every token has a stable tin. We
@@ -386,12 +404,45 @@ func MakeC(opts ...map[string]any) (*jsonic.Jsonic, error) {
 // matchers of its own; the setting comes last, after everything the base
 // and the plugin set.
 func makeCOn(base *jsonic.Jsonic, pluginOpts map[string]any) (*jsonic.Jsonic, error) {
-	if err := base.Use(C, pluginOpts); err != nil {
+	return makeOn(base, C, pluginOpts)
+}
+
+// makeOn installs plugin, C's or the streaming parser's, on base and
+// declares lex.window, as makeCOn says.
+func makeOn(base *jsonic.Jsonic, plugin tabnas.Plugin, pluginOpts map[string]any) (*jsonic.Jsonic, error) {
+	if err := base.Use(plugin, pluginOpts); err != nil {
 		return base, err
 	}
 	yes := true
 	base.SetOptions(tabnas.Options{Lex: &tabnas.LexOptions{Window: &yes}})
 	return base, nil
+}
+
+// MakeStreaming builds the parser a host streams a C document through: its
+// rule passes, which C's transducer part (alchemy/transduce.alc) reads, are
+// MakeC's, alternate for alternate and token for token, it ends a document
+// where MakeC's does, and it keeps nothing of a declaration it has closed.
+//
+// Its rules make the decisions MakeC's make, by the same handlers, which
+// build each external declaration's node as MakeC's do, since a decision
+// reads it (whether a line opens a conditional group, the typedef names a
+// declaration binds). But the translation unit, a conditional group and
+// its branches keep no declaration or branch that has closed, the items
+// loop lets go of each rule it replaces, which the engine's default,
+// unbounded, rule history would keep, and the record of the nodes given
+// their spans (CMeta.Fixed) starts again at each declaration. What a parse
+// keeps is then the declaration being read, its tokens, the conditional
+// groups open around it, and the names that decide how a token lexes
+// (typedef names and macros). Its value is a translation unit with no
+// children, not the tree: for a tree, take MakeC. It declares lex.window,
+// as MakeC does. The counterpart of TypeScript's makeStreaming() and Rust's
+// make_streaming.
+func MakeStreaming(opts ...map[string]any) (*jsonic.Jsonic, error) {
+	var pluginOpts map[string]any
+	if len(opts) > 0 {
+		pluginOpts = opts[0]
+	}
+	return makeOn(jsonic.Make(), cStreaming, pluginOpts)
 }
 
 // Parse is the one-call entry point: build a C-enabled engine and parse src.

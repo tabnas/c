@@ -2522,6 +2522,19 @@ function isFunctionBodySupported(ctx: Context, lbraceI: number): boolean {
 // ---- Plugin ---------------------------------------------------------
 
 const C: any = function C(jsonic: Tabnas, options: COptions): void {
+  install(jsonic, options, false)
+}
+
+// The plugin the streaming parser installs (makeStreaming): C's, with the
+// translation unit's items loop and its conditional groups keeping
+// nothing of what has closed.
+const CStreaming: any = function C(jsonic: Tabnas, options: COptions): void {
+  install(jsonic, options, true)
+}
+
+// Install the plugin. `stream` is the streaming parser's: see
+// makeStreaming.
+function install(jsonic: Tabnas, options: COptions, stream: boolean): void {
   const opts = resolveOptions(options)
   // Stash resolved options on the jsonic instance so grammar-ref
   // conditions and lex-time helpers can read them.
@@ -2798,7 +2811,7 @@ const C: any = function C(jsonic: Tabnas, options: COptions): void {
   // that jsonic's grammar has too. Clear jsonic's, alternates and actions
   // both, so that expr's and C's are the only ones (ts/src/expr-grammar.ts).
   jsonic.rule('val', (rs: any) => rs.clear())
-  const refs = makeGrammarRefs(opts)
+  const refs = makeGrammarRefs(opts, stream)
   withFallback(spec, refs)
   jsonic.grammar({
     ...spec,
@@ -2815,6 +2828,7 @@ const C: any = function C(jsonic: Tabnas, options: COptions): void {
 }
 
 C.defaults = {} as any
+CStreaming.defaults = C.defaults
 
 // ---- Grammar refs ---------------------------------------------------
 
@@ -2826,7 +2840,10 @@ C.defaults = {} as any
 // closures can capture the resolved plugin options. The exported
 // `grammarRefs` const below is a default for reference / tests; the
 // plugin builds a fresh refs map per install in C() above.
-function makeGrammarRefs(opts: Required<COptions>): Record<string, Function> {
+function makeGrammarRefs(
+  opts: Required<COptions>,
+  stream: boolean = false,
+): Record<string, Function> {
 return {
 
 
@@ -2856,7 +2873,8 @@ return {
   // extdecl_loop ----
   // r.node is the container's (the translation unit's, or a conditional
   // branch's); bc appends each completed external declaration and each
-  // conditional group, but a group's opener, which the group takes.
+  // conditional group, but a group's opener, which the group takes. The
+  // streaming parser's container keeps none of them (makeStreaming).
   '@extdecl_loop-bc': (rule: Rule): void => {
     const child = rule.child
     if (!child || !child.node || child === rule.u.lastChild) return
@@ -2864,11 +2882,26 @@ return {
     const node = child.node
     if (node.kind === 'external_declaration') {
       if (conditionalOf(node, OPENERS)) rule.u.opener = node
-      else rule.node.children.push(node)
+      else if (!stream) rule.node.children.push(node)
     } else if (node.kind === 'conditional_group') {
-      rule.node.children.push(node)
+      if (!stream) rule.node.children.push(node)
     }
   },
+  // The streaming parser's items loop lets go of the instance it replaced.
+  // The engine links each rule to the one it replaced (`prev`) and that
+  // one to it (`next`), and keeps the links under its default, unbounded,
+  // rule history, so the first instance would reach every later one, and
+  // through each the rules and the node of its declaration. `make()`'s
+  // loop has no before-open action.
+  ...(stream ? {
+    '@extdecl_loop-bo': (rule: Rule, ctx: Context): void => {
+      const prev = rule.prev
+      if (prev && prev !== ctx.NORULE && prev.name === 'extdecl_loop') {
+        if (prev.next === rule) prev.next = ctx.NORULE
+        rule.prev = ctx.NORULE
+      }
+    },
+  } : {}),
   '@opens-group': (rule: Rule): boolean => !!rule.u.opener,
   // A branch's items end at the line of the next branch or the `#endif`.
   '@ends-branch': (rule: Rule, ctx: Context): boolean =>
@@ -2892,9 +2925,9 @@ return {
     if (!child || !child.node || child === rule.u.lastChild) return
     rule.u.lastChild = child
     if (child.node.kind === 'conditional_branch') {
-      rule.node.children.push(child.node)
+      if (!stream) rule.node.children.push(child.node)
     } else if (child.node.kind === 'external_declaration') {
-      rule.node.children.push(child.node)
+      if (!stream) rule.node.children.push(child.node)
       rule.u.endifTaken = true
     }
   },
@@ -6853,12 +6886,34 @@ function make(options: Partial<COptions> = {}): Tabnas {
   return tn
 }
 
+// Build the parser a host streams a C document through: its rule passes,
+// which C's transducer part (alchemy/transduce.alc) reads, are `make()`'s,
+// alternate for alternate and token for token, and it ends a document
+// where `make()` does, and it keeps nothing of a declaration it has
+// closed. Its rules make the decisions `make()`'s make, by the same
+// actions, which build each external declaration's node as `make()`'s
+// do, since a decision reads it (whether a line opens a conditional
+// group, the typedef names a declaration binds); but the translation
+// unit, a conditional group and its branches keep no declaration or
+// branch that has closed, and the items loop lets go of each rule it
+// replaces. What a parse keeps is then the declaration being read, its
+// tokens, the conditional groups open around it, and the names that
+// decide how a token lexes (typedef names and macros). Its value is a
+// translation unit with no children, not the tree: for a tree, take
+// `make()`. It declares `lex.window`, as `make()` does. The counterpart
+// of Go's `MakeStreaming` and Rust's `make_streaming`.
+function makeStreaming(options: Partial<COptions> = {}): Tabnas {
+  const tn = new Tabnas().use(jsonic).use(CStreaming, options)
+  tn.options({ lex: { window: true } })
+  return tn
+}
+
 // VERSION is this package's version. It MUST equal package.json "version":
 // the release orchestrator rewrites both, and the version test fails the
 // build if they drift. Mirrors `const VERSION` in go/c.go.
 const VERSION = '0.6.1'
 
-export { C, VERSION, make }
+export { C, VERSION, make, makeStreaming }
 export { translate } from './translate.js'
 export { member, memberNames } from './members.js'
 export type { TranslationPart, TranslationParts } from './translate.js'

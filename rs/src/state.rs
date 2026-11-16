@@ -243,7 +243,7 @@ pub struct CState {
     /// The concrete syntax tree under construction.
     pub nodes: Vec<NodeData>,
     /// Every token the parse has handed to a rule action.
-    pub tokens: Vec<TokenData>,
+    pub tokens: TokenArena,
     /// Token lists a rule keeps on its `k` bag. A JavaScript array is
     /// shared by reference between a rule and the rules it pushes or
     /// replaces into, and an engine `Value` is copied on write, so the
@@ -277,6 +277,100 @@ pub struct CState {
     /// The links between an expression's tokens
     /// (`crate::expr_grammar::link_token`).
     pub links: crate::expr_grammar::LinkState,
+    /// Set for a parse of the streaming parser (`crate::make_streaming`),
+    /// whose containers keep nothing of what has closed, and whose arena
+    /// lets a closed declaration's nodes and tokens go (`crate::reclaim`).
+    pub stream: bool,
+    /// For the streaming parser, where each container's items loop began:
+    /// the counts of nodes and lists made before its first item, by the
+    /// container's node id.
+    pub loop_marks: HashMap<usize, (usize, usize)>,
+}
+
+/// The tokens a parse has handed to a rule action, by arena id. An id
+/// names its token for the whole parse. The streaming parser lets the
+/// tokens of the declarations it has closed go (`crate::reclaim`): the
+/// arena then holds the ids from `base` on in `items`, and the few older
+/// tokens still named, those of the conditional lines open around the
+/// declaration being read, in `kept`.
+#[derive(Debug, Default)]
+pub struct TokenArena {
+    base: usize,
+    items: Vec<TokenData>,
+    kept: HashMap<usize, TokenData>,
+}
+
+/// What a token id no longer in the arena reads as: a token with no name
+/// and no text.
+static GONE: TokenData = TokenData {
+    name: String::new(),
+    src: String::new(),
+    span: crate::cst::Span {
+        start: 0,
+        end: 0,
+        line: 1,
+        col: 1,
+    },
+    leading: Vec::new(),
+};
+
+impl TokenArena {
+    /// The id the next token takes: one past every id given.
+    pub fn len(&self) -> usize {
+        self.base + self.items.len()
+    }
+
+    pub fn push(&mut self, token: TokenData) {
+        self.items.push(token);
+    }
+
+    pub fn get(&self, id: usize) -> Option<&TokenData> {
+        if id >= self.base {
+            self.items.get(id - self.base)
+        } else {
+            self.kept.get(&id)
+        }
+    }
+
+    pub fn get_mut(&mut self, id: usize) -> Option<&mut TokenData> {
+        if id >= self.base {
+            self.items.get_mut(id - self.base)
+        } else {
+            self.kept.get_mut(&id)
+        }
+    }
+
+    /// How many tokens the arena holds.
+    #[cfg(test)]
+    pub fn held(&self) -> usize {
+        self.items.len() + self.kept.len()
+    }
+
+    /// Let the tokens below `from` go, but those `keep` names: the ids
+    /// stay theirs.
+    pub fn release_below(&mut self, from: usize, keep: &std::collections::HashSet<usize>) {
+        let from = from.min(self.len());
+        self.kept.retain(|id, _| keep.contains(id));
+        if from <= self.base {
+            return;
+        }
+        let gone = from - self.base;
+        for (offset, token) in self.items.drain(..gone).enumerate() {
+            let id = self.base + offset;
+            if keep.contains(&id) {
+                self.kept.insert(id, token);
+            }
+        }
+        self.base = from;
+    }
+}
+
+impl std::ops::Index<usize> for TokenArena {
+    type Output = TokenData;
+
+    fn index(&self, id: usize) -> &TokenData {
+        self.get(id).unwrap_or(&GONE)
+    }
 }
 
 impl CState {
@@ -288,7 +382,7 @@ impl CState {
             mode_at: None,
             pending_trivia: Vec::new(),
             nodes: Vec::new(),
-            tokens: Vec::new(),
+            tokens: TokenArena::default(),
             lists: Vec::new(),
             flags: HashMap::new(),
             no_token: None,
@@ -299,6 +393,8 @@ impl CState {
             ed: None,
             fixed: std::collections::HashSet::new(),
             links: crate::expr_grammar::LinkState::default(),
+            stream: false,
+            loop_marks: HashMap::new(),
         }
     }
 }
@@ -311,6 +407,85 @@ thread_local! {
 /// is a `RefCell`, so a nested borrow panics.
 pub fn with_state<R>(body: impl FnOnce(&mut CState) -> R) -> R {
     STATE.with(|state| body(&mut state.borrow_mut()))
+}
+
+/// For the streaming parser, as an external declaration of the items loop
+/// of `container` (the translation unit's node, or a conditional
+/// branch's) starts: let go of what the container's earlier items made,
+/// which a container of the streaming parser does not keep. The nodes and
+/// token lists made since the loop's first item go, and their ids with
+/// them; the tokens before the first one the parse has not taken (`v_abs`
+/// is the count taken) go, but those that a node or a token list still
+/// held names (a conditional line open around the declaration) and those
+/// an open bracket's links name, which keep their ids. The first item
+/// records where the loop began.
+pub fn reclaim(container: usize, v_abs: usize) {
+    with_state(|state| {
+        if !state.stream {
+            return;
+        }
+        let Some(&(nodes, lists)) = state.loop_marks.get(&container) else {
+            let began = (state.nodes.len(), state.lists.len());
+            state.loop_marks.insert(container, began);
+            return;
+        };
+        if state.nodes.len() > nodes {
+            state.nodes.truncate(nodes);
+            state.flags.retain(|(node, _), _| *node < nodes);
+            state.fixed.retain(|node| *node < nodes);
+            state.loop_marks.retain(|node, _| *node < nodes);
+        }
+        state.lists.truncate(lists);
+
+        // The tokens lexed and not yet taken, and the comments before
+        // them, are the oldest a later step reads, but for those named
+        // below.
+        let taken = v_abs.saturating_sub(state.rec_base).min(state.rec.len());
+        let mut from = state.tokens.len();
+        let mut from_place = usize::MAX;
+        for id in state.rec[taken..].iter() {
+            from = from.min(*id);
+            if let Some(token) = state.tokens.get(*id) {
+                from_place = from_place.min(token.span.start);
+                for trivia in &token.leading {
+                    from = from.min(*trivia);
+                }
+            }
+        }
+        for id in &state.pending_trivia {
+            from = from.min(*id);
+        }
+        let mut keep: std::collections::HashSet<usize> =
+            state.links.prune(from_place).into_iter().collect();
+        if let Some(id) = state.no_token {
+            keep.insert(id);
+        }
+        for list in &state.lists {
+            keep.extend(list.iter().copied());
+        }
+        let mut items: Vec<&crate::cst::Item> = Vec::new();
+        for node in &state.nodes {
+            items.extend(node.children.iter());
+            items.extend(node.leading.iter());
+            items.extend(node.trailing.iter());
+            items.extend(node.extras.values());
+        }
+        while let Some(item) = items.pop() {
+            match item {
+                crate::cst::Item::List(list) => items.extend(list.iter()),
+                other => {
+                    if let Some(id) = other.as_token() {
+                        if keep.insert(id) {
+                            if let Some(token) = state.tokens.get(id) {
+                                keep.extend(token.leading.iter().copied());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        state.tokens.release_below(from, &keep);
+    });
 }
 
 /// Start a parse: clear everything the previous one left behind.

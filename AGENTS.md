@@ -86,8 +86,8 @@ const cst = new Tabnas().use(jsonic).use(C).parse('typedef int T; T x = 1;')
 | Path | What it is |
 |---|---|
 | [`ts/`](ts/) | **Canonical** implementation — the `@tabnas/c` package. |
-| [`go/`](go/) | **Go port**, at parity with the canonical. A hand-translation of the TypeScript: lexer (`tokens.go`/`symbols.go`/`matchers.go`), node helpers (`cst.go`/`node.go`), grammar parse/install + ref map (`grammar_install.go`/`refs.go`: the translation unit, conditional groups, external declarations and their end, the preprocessor directives), C's expressions, read by `@tabnas/expr` with C's operator table (`expr_grammar.go`), the armed fallback (`fallback.go`), the members API (`members.go`, `Member`), what a declaration binds read from its tokens (`declare.go`), the declaration, specifier, struct/union/enum, initializer and statement refs (`refs_newpath*.go`), and the extension constructs (`refs_ext.go`). `tabnasc.Parse`/`MakeC`/`ParseMeta` build the same tree as TypeScript; `go test` runs the shared fixtures (`parity_test.go`), the Csmith corpus against the TypeScript golden fixtures (`csmith_test.go`, 100/100), the repetition test (`repeat_test.go`) and the tree's invariants (`tree_test.go`). The upstream `@jsonic/c` is TypeScript-only, so this is a from-scratch hand-translation. |
-| [`rs/`](rs/) | **Rust port** — crate `tabnas-c` (lib `tabnas_c`), a hand-translation of the TypeScript onto the Rust `tabnas` engine over `tabnas-jsonic` and `tabnas-expr`, taken as path dependencies on sibling checkouts. C's expressions, read by `tabnas-expr` with C's operator table, are `src/expr_grammar.rs`, the armed fallback `src/fallback.rs` and `member(node, name)` `src/members.rs`. `cargo test` runs the shared `test/spec/*.tsv` fixtures (`tests/parity_test.rs`), the Csmith corpus and every Csmith tree's invariants (`tests/csmith_test.rs`), the tree's invariants over the fixtures (`tests/tree_test.rs`), the repetitions (`tests/repeat_test.rs`) and the path-dispatch catalogue (`tests/path_dispatch_test.rs`); the inputs where it answers differently from the canonical are recorded in [`DIVERGENCE.md`](DIVERGENCE.md) and pinned by `test/divergent.tsv` and named tests. See [`rs/AGENTS.md`](rs/AGENTS.md). |
+| [`go/`](go/) | **Go port**, at parity with the canonical. A hand-translation of the TypeScript: lexer (`tokens.go`/`symbols.go`/`matchers.go`), node helpers (`cst.go`/`node.go`), grammar parse/install + ref map (`grammar_install.go`/`refs.go`: the translation unit, conditional groups, external declarations and their end, the preprocessor directives), C's expressions, read by `@tabnas/expr` with C's operator table (`expr_grammar.go`), the armed fallback (`fallback.go`), the members API (`members.go`, `Member`), what a declaration binds read from its tokens (`declare.go`), the declaration, specifier, struct/union/enum, initializer and statement refs (`refs_newpath*.go`), and the extension constructs (`refs_ext.go`). `tabnasc.Parse`/`MakeC`/`ParseMeta` build the same tree as TypeScript, and `MakeStreaming` the streaming parser ("The streaming parser"); `go test` runs the shared fixtures (`parity_test.go`), the Csmith corpus against the TypeScript golden fixtures (`csmith_test.go`, 100/100), the repetition test (`repeat_test.go`) and the tree's invariants (`tree_test.go`). The upstream `@jsonic/c` is TypeScript-only, so this is a from-scratch hand-translation. |
+| [`rs/`](rs/) | **Rust port** — crate `tabnas-c` (lib `tabnas_c`), a hand-translation of the TypeScript onto the Rust `tabnas` engine over `tabnas-jsonic` and `tabnas-expr`, taken as path dependencies on sibling checkouts. C's expressions, read by `tabnas-expr` with C's operator table, are `src/expr_grammar.rs`, the armed fallback `src/fallback.rs` and `member(node, name)` `src/members.rs`. `cargo test` runs the shared `test/spec/*.tsv` fixtures (`tests/parity_test.rs`), the Csmith corpus and every Csmith tree's invariants (`tests/csmith_test.rs`), the tree's invariants over the fixtures (`tests/tree_test.rs`), the repetitions (`tests/repeat_test.rs`), the path-dispatch catalogue (`tests/path_dispatch_test.rs`) and the streaming parser's passes against `make()`'s (`tests/streaming_test.rs`, "The streaming parser"); the inputs where it answers differently from the canonical are recorded in [`DIVERGENCE.md`](DIVERGENCE.md) and pinned by `test/divergent.tsv` and named tests. See [`rs/AGENTS.md`](rs/AGENTS.md). |
 | [`ts/c-grammar.jsonic`](ts/c-grammar.jsonic) | **Single source of truth** for the declarative grammar (rule shapes for the whole C surface), authored in jsonic-DSL syntax. |
 | [`ts/embed-grammar.js`](ts/embed-grammar.js) | Embeds `c-grammar.jsonic` into `src/c.ts` (between `BEGIN/END EMBEDDED` markers) as the `grammarText` string literal, **and** copies it verbatim to `go/c-grammar.jsonic` for `//go:embed`. The grammar contains backticks, so the Go side embeds from the file rather than inlining a raw string (unlike the smaller ports). Runs as the first half of `npm run build`. |
 | [`ts/src/c.ts`](ts/src/c.ts) | Plugin entry: token catalog wiring, lex matchers, grammar install, and the `@`-named ref map (conditions/actions bound by name from the grammar), the external declaration's dispatch and finishing (the names it binds) among them. |
@@ -98,7 +98,7 @@ const cst = new Tabnas().use(jsonic).use(C).parse('typedef int T; T x = 1;')
 | [`ts/src/tokens.ts`](ts/src/tokens.ts) | Named tokens for every keyword, extension keyword and punctuator. |
 | [`ts/src/symbols.ts`](ts/src/symbols.ts) | `SymbolTable` + `MacroTable` on `ctx.meta.cmeta`, shared by matchers and rule actions (typedef/macro disambiguation). |
 | [`docs/rules.md`](docs/rules.md) | The design of the rules-built tree (0.6): the dispatch, the fallback, the tree, the members API, and what was measured. |
-| [`ts/test/`](ts/test/) | TS tests (compiled to `dist-test/`): `c.test.ts` (parse cases), `csmith.test.ts` (replays the 100-program Csmith regression corpus against committed gzipped fixtures), `parity.test.ts` (runs the shared `test/spec/*.tsv` fixtures), `repeat.test.ts` (every repetition a replace loop, 10,000 items each), `tree.test.ts` (each subtree held once, scalar members, spans, every comment kept), `window.test.ts` (a parse from a reader, a window at a time, as from the text), `part.test.ts` (the part's operator table is the reader's). |
+| [`ts/test/`](ts/test/) | TS tests (compiled to `dist-test/`): `c.test.ts` (parse cases), `csmith.test.ts` (replays the 100-program Csmith regression corpus against committed gzipped fixtures), `parity.test.ts` (runs the shared `test/spec/*.tsv` fixtures), `repeat.test.ts` (every repetition a replace loop, 10,000 items each), `tree.test.ts` (each subtree held once, scalar members, spans, every comment kept), `window.test.ts` (a parse from a reader, a window at a time, as from the text), `streaming.test.ts` (the streaming parser's passes are `make()`'s), `part.test.ts` (the part's operator table is the reader's). |
 | [`alchemy/render.alc`](alchemy/render.alc) | The **render**: the reader's tree written back as C source (entry `c-render`), an [alchemy](https://github.com/tabnas/alchemy) library a translating host links. See "Translation". |
 | [`alchemy/transduce.alc`](alchemy/transduce.alc) | The **transducer part**: the reader's tree as JSON events, from the rule passes of C's grammar with their token items (entry `c-transduce`), an alchemy library a host that reads parser events links. See "Translation" and `docs/rules.md`, "The part". |
 | [`ts/embed-translate.js`](ts/embed-translate.js) | Copies `tabnas.plugin.json`, `alchemy/render.alc` and `alchemy/transduce.alc` into `ts/src/translate.ts` (GENERATED: `translate()`, exported from the package), `go/translate/` (`Translate()` in `go/translate.go`) and `rs/translate/` (`translate()`, `manifest_text()` and `render_text()` in `rs/src/lib.rs`). Runs in `npm run embed` and in the build, after `embed-grammar.js`. |
@@ -247,6 +247,63 @@ a long document whose tokens straddle the window's blocks; and a long
 document parses in time linear in its length. `TestMakeCOnABaseWithoutTheWindow`
 and `window_tests` in `rs/src/lib.rs` give the constructor's steps a base
 that declares no window.
+
+## The streaming parser
+
+TypeScript's `makeStreaming()`, Go's `MakeStreaming` and Rust's
+`make_streaming`/`make_streaming_with` build the parser a host streams a
+document through, as dmog reads C's rule passes with the transducer part
+(tabnas/c#78). Its rule passes are `make()`'s, alternate for alternate and
+token for token, and it ends a document where `make()` does. Its rules
+decide by `make()`'s handlers, which build each external declaration's
+node as `make()`'s do, since a decision reads it: whether a line opens a
+conditional group, the typedef names a declaration binds. What differs is
+what a parse keeps of what has closed:
+
+- the translation unit, a conditional group and its branches keep no
+  declaration, group or branch that has closed. The plugin the
+  constructor installs sets a flag the items loop's and the group's
+  handlers read: `CStreaming` in TypeScript, `cStreaming` in Go, and in
+  Rust a parse-prepare hook that sets `CState::stream`;
+- in TypeScript and Go, the items loop lets go of the instance it
+  replaced (`@extdecl_loop-bo`). The engine links a rule to the one it
+  replaced and that one to it, and under its default rule history, which
+  is unbounded, it keeps every link, so the loop's first instance reached
+  every later one and each one's declaration. The engine's bounded
+  history (`rule.history`) is not the route: it hands a rule its parent as
+  a copy, and the TypeScript and Go handlers write their parents' bags in
+  a few places (`@conditional_group-bo`, `@absorb-spec-storage`,
+  `@ppi-pointer`), which Rust's handlers do through nodes instead. Rust's
+  engine bounds the history at three already;
+- Go's record of the nodes given their spans (`CMeta.Fixed`), which holds
+  each node it records so that a node's address names no other, starts
+  again at each external declaration;
+- Rust's arena (`rs/src/state.rs`) holds every node, token and token list
+  by id. As each declaration of an items loop starts, `state::reclaim`
+  lets the nodes and token lists made since the loop's first item go, ids
+  and all, and the tokens before the first one the parse has not taken,
+  but those a node still held names (a conditional line open around the
+  declaration) and those an open bracket's links name, which keep their
+  ids (`TokenArena`); the links of the tokens gone go too.
+
+What a parse holds is then the declaration being read, its tokens, the
+conditional groups open around it, and the names that decide how a token
+lexes (typedef names and macros). A function definition is one
+declaration: its body's statements are held until it ends, as `make()`
+holds them. The value is a translation unit with no children; for a tree,
+take `make()`.
+
+The tests are `ts/test/streaming.test.ts`, `go/streaming_test.go` and
+`rs/tests/streaming_test.rs`: over every row of `test/spec/` that reads a
+translation unit, under its `opts`, and every Csmith program after the
+stdint header in plain mode, from the text and from a reader in pieces of
+4 KiB, every pass of the streaming parser is `make()`'s (its rule, state,
+depth, instance, alternate with its groups, counters and tokens, and
+whether it carries the rule's node as a value), every token the lexer
+gives is too, and every parse ends alike. `streaming_tests` in
+`rs/src/lib.rs` holds the arena: after 100 items and after 1,000, inside
+an include guard or not, it holds the same, where `make()`'s holds ten
+times as much.
 
 ## Go port: the same rules and refs
 

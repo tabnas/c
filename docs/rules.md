@@ -504,6 +504,19 @@ definition among them, is held to its end. From a reader, a window at a
 time (`make()`), the part's first event comes once the engine has read
 its window's margin ahead: at 69,632 bytes of a 600,780-byte document.
 
+The parser the part reads holds as little: the streaming parser
+(`makeStreaming()`, `MakeStreaming`, `make_streaming`; AGENTS.md, "The
+streaming parser") makes `make()`'s passes and keeps nothing of a
+declaration it has closed. Measured on 2026-11-14 over the streaming
+gate's documents read from a reader, 300 and 3,000 items: in Rust, by a
+counting allocator, a parse holds at most 1.55 MB of each, and the part
+over it 3.91 MB of each, where over `make()` the part holds 6.67 MB, then
+32.67 MB; in Go, the live heap after a full collection grows by 0.79 MB
+over the first and 0.77 MB over the second, where `MakeC`'s grows by
+7.82 MB, then 71.83 MB; in TypeScript, the live heap after a full
+collection peaks at 13.58 MB and 13.88 MB, where `make()`'s peaks at
+17.07 MB, then 49.20 MB.
+
 ## Order
 
 1. TypeScript: the rules, the tree, the API, the fallback, the tests and
@@ -520,3 +533,6 @@ its window's margin ahead: at 69,632 bytes of a 600,780-byte document.
 4. The release, a minor version, 0.6.0, since the tree changes.
 5. The part, the window and the manifest: the release, a patch, 0.6.1,
    since it adds to the API and the manifest and changes no tree.
+6. The streaming parser, the part's members in the reader's order, and
+   its state held flat: the release, a patch, 0.6.2, since it adds to the
+   API and changes no tree.

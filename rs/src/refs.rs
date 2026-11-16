@@ -118,6 +118,11 @@ impl Reg<'_> {
     }
 }
 
+/// True in a parse of the streaming parser (`crate::make_streaming`).
+fn streaming() -> bool {
+    crate::state::with_state(|state| state.stream)
+}
+
 /// Register every reference the grammar names, and return the ones it
 /// names that got a no-op stub rather than a handler.
 pub fn register(parser: &mut Tabnas, options: &COptions, fallback: &Fallback) -> Vec<String> {
@@ -163,7 +168,8 @@ fn register_core(reg: &mut Reg<'_>, options: &COptions) {
     // The node is the container's (the translation unit's, or a
     // conditional branch's); the before-close appends each completed
     // external declaration and each conditional group, but a group's
-    // opener, which the group takes.
+    // opener, which the group takes. The streaming parser's container
+    // keeps none of them (`crate::make_streaming`).
     reg.act("@extdecl_loop-bc", |rule, _context| {
         let Some(id) = child_rule_id(rule) else {
             return;
@@ -175,16 +181,19 @@ fn register_core(reg: &mut Reg<'_>, options: &COptions) {
         let (Some(child), Some(node)) = (child_node_id(rule), node_id(rule)) else {
             return;
         };
+        let keep = !streaming();
         match cst::kind_of(child).as_str() {
             "external_declaration" => {
                 if conditional_of(child, CONDITIONAL_OPENERS).is_some() {
                     u_set_node(rule, "opener", child);
-                } else {
+                } else if keep {
                     append_child(node, child);
                 }
             }
             "conditional_group" => {
-                append_child(node, child);
+                if keep {
+                    append_child(node, child);
+                }
                 // The group took its opener; a parent snapshot cannot
                 // clear it here, as the canonical does from the group.
                 u_del(rule, "opener");
@@ -227,14 +236,19 @@ fn register_core(reg: &mut Reg<'_>, options: &COptions) {
         let (Some(child), Some(node)) = (child_node_id(rule), node_id(rule)) else {
             return;
         };
+        let keep = !streaming();
         match cst::kind_of(child).as_str() {
             "conditional_branch" => {
-                append_child(node, child);
+                if keep {
+                    append_child(node, child);
+                }
                 // The first branch took the opener as its head.
                 u_del(rule, "opener");
             }
             "external_declaration" => {
-                append_child(node, child);
+                if keep {
+                    append_child(node, child);
+                }
                 u_set_bool(rule, "endifTaken", true);
             }
             _ => {}
@@ -284,8 +298,15 @@ fn register_core(reg: &mut Reg<'_>, options: &COptions) {
 
     // --- external_declaration ----------------------------------------
     // Each declaration starts with a fresh node and state; the fallback's
-    // token record is trimmed to the tokens it has not yet taken.
+    // token record is trimmed to the tokens it has not yet taken. The
+    // streaming parser first lets go of what the items loop's earlier
+    // items made (`state::reclaim`).
     reg.act("@external_declaration-bo", |rule, context| {
+        if streaming() && parent_name(rule) == "extdecl_loop" {
+            if let Some(container) = parent_node(rule) {
+                crate::state::reclaim(container, context.v_abs);
+            }
+        }
         let node = cst::new_node("external_declaration", None);
         set_node_id(rule, node);
         fallback::start_declaration(context);
