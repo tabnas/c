@@ -437,7 +437,12 @@ What it writes when:
   declaration's opening, its specifiers and declarator, then the body,
   each statement as it ends, and each statement that holds statements
   (a compound statement, `if`, `while`, `do`, `for`, `switch`, a labeled
-  statement) as it is read;
+  statement) as it is read, its opening once its first token is known.
+  A node's span is its first token's, so the opening waits for that token,
+  and the children before it, which keep only comments, wait with it:
+  the members then come in the reader's order, `kind`, `span`, `children`
+  and `trivia`, where through 0.6.1 the part wrote the span after the
+  trivia (tabnas/c#79);
 - a declaration, a statement that holds no statement, an expression and
   an armed declaration once it ends.
 

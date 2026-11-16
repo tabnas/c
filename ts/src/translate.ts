@@ -1206,8 +1206,9 @@ def c-render [input]
 ; rules hold to (not an armed one, which may still fall back to its
 ; tokens) from its body's \`{\`, its statements as each ends, and each
 ; statement that holds statements as it is read
-; (\`c-tr-stream-open\`); a node whose children come in order is written
-; so, and the registers of each child written go. A declaration, a
+; (\`c-tr-stream-open\`), its opening once its first token is known, so that
+; its members come in the reader's order; a node whose children come in
+; order is written so, and the registers of each child written go. A declaration, a
 ; statement that holds no statement, an expression and an armed
 ; declaration are held until they end. A subtree is written bottom up,
 ; each node's events made from its children's (\`c-tr-emit\`), so the
@@ -1962,12 +1963,17 @@ def c-tr-tu-close [s]
 ; ---- the nodes written as their children end
 ;
 ; A function definition's body, and every statement in it that holds
-; statements, is written as it is read: its opening when the rule that
-; makes it starts, each child once it is complete (the child's registers
-; then go), and its end when that rule's chain ends, so the part holds
-; the statements being read, not the function. A node is written so when
-; it is the next child of a node written so (its frame's slot), and its
-; children come in order: they are only ever appended.
+; statements, is written as it is read: its opening once its first token
+; is known, each child once it is complete (the child's registers then
+; go), and its end when the rule that makes it ends its chain, so the
+; part holds the statements being read, not the function. A node is
+; written so when it is the next child of a node written so (its frame's
+; slot), and its children come in order: they are only ever appended.
+;
+; A node's members are written in the reader's order, its kind, its span,
+; its children and its trivia: the span is its first token's, so the
+; opening waits for that token, and the children before it, which keep
+; only comments, wait with it (\`buf\`), since their span is the node's.
 
 def c-tr-streamable [] ["compound_statement" "if_statement" "while_statement" "do_statement" "for_statement" "switch_statement" "labeled_statement"]
 
@@ -1979,14 +1985,17 @@ def c-tr-slot-children [kind]
     case _ ["statement"]
 
 ; An entry of st: the node's register, its kind, the chain that made it,
-; and the span of its first token once one is written.
-def c-tr-st-entry [id kind fi at span]
+; the span of its first token once one is written, whether its opening is
+; written, and until it is, the events of the children before it.
+def c-tr-st-entry [id kind fi at span open buf]
   record
     entry :id id
     entry :kind kind
     entry :fi fi
     entry :at at
     entry :span span
+    entry :open open
+    entry :buf buf
 
 def c-tr-st [s] (as-vector (get :st (get :cold s)))
 
@@ -2015,11 +2024,48 @@ def c-tr-st-span-walk [self i s]
 ; Every written node with no span yet takes this one: a node's first
 ; token is the first of the nodes around it that have none.
 def c-tr-st-set-span [sp s]
-  c-tr-st-set :st (map (fn [e] (match (get :span e) (case missing (c-tr-st-entry (get :id e) (get :kind e) (get :fi e) (get :at e) sp)) (case _ e))) (c-tr-st s)) s
+  c-tr-st-set :st (map (fn [e] (match (get :span e) (case missing (c-tr-st-entry (get :id e) (get :kind e) (get :fi e) (get :at e) sp (get :open e) (get :buf e))) (case _ e))) (c-tr-st s)) s
 
-; Open a node: its kind and its children's array.
+; Begin a node: nothing is written until its first token is known.
 def c-tr-stream-open [id kind fi at s]
-  c-tr-st-set :st (push (c-tr-st-entry id kind fi at missing) (c-tr-st s)) (c-tr-out [object-start (key "kind") (scalar kind) (key "children") array-start] s)
+  c-tr-st-set :st (push (c-tr-st-entry id kind fi at missing false []) (c-tr-st s)) s
+
+; Write the openings not yet written, outermost first, each with its span
+; and the children it held back: every node without its opening has its
+; span now, the first token found.
+def c-tr-st-open-all [s] (c-tr-st-open-from c-tr-st-open-from 0 s)
+
+def c-tr-st-open-from [self i s]
+  let [st (c-tr-st s)]
+    match (compare i (count st))
+      case :less
+        let [e (c-tr-nth i st)]
+          match (get :open e)
+            case true (self self (inc i) s)
+            case _
+              let [sp (get :span e)]
+                let [s1 (c-tr-out (flatten [[object-start (key "kind") (scalar (get :kind e)) (key "span")] (c-tr-span-events sp) [(key "children") array-start] (c-tr-span-due sp (as-vector (get :buf e)))]) s)]
+                  self self (inc i) (c-tr-st-set :st (map (fn [j] (match (equal j i) (case true (c-tr-st-entry (get :id e) (get :kind e) (get :fi e) (get :at e) sp true [])) (case _ (c-tr-nth j st)))) (indices st)) s1)
+      case _ s
+
+; Events with each span that is due their node's: sp.
+def c-tr-span-due [sp events] (flatten (map (fn [e] (match e (case :span-due (c-tr-span-events sp)) (case _ [e]))) events))
+
+; Write o, what a child of the top node writes: once the node's opening
+; is written, under the node; before, held back with it, its spans due.
+def c-tr-st-write [o s]
+  let [st (c-tr-st s)]
+    match (count st)
+      case 0 (c-tr-out (c-tr-wt-under (c-tr-st-span-at -1 s) o) s)
+      case _
+        match (get :sp o)
+          case missing
+            match (get :open (top st))
+              case true (c-tr-out (c-tr-wt-under (c-tr-st-span-at (sub (count st) 1) s) o) s)
+              case _
+                let [e (top st)]
+                  c-tr-st-set :st (push (c-tr-st-entry (get :id e) (get :kind e) (get :fi e) (get :at e) (get :span e) false (push-all (get :ev o) (as-vector (get :buf e)))) (pop st)) s
+          case sp (c-tr-out (get :ev o) (c-tr-st-open-all (c-tr-st-set-span sp s)))
 
 ; The registers of the frame that holds the top node's register, made
 ; after it: the children it has been given since its last write.
@@ -2076,11 +2122,7 @@ def c-tr-stream-items [self items i tbl s]
           case _ (self self items (inc i) tbl (c-tr-stream-item item tbl s))
     case _ s
 
-def c-tr-stream-item [item tbl s]
-  let [n (sub (count (c-tr-st s)) 1)]
-    let [o (c-tr-write item tbl)]
-      let [s1 (match [(get :sp o) (get :span (top (c-tr-st s)))] (case [missing _] s) (case [_ missing] (c-tr-st-set-span (get :sp o) s)) (case _ s))]
-        c-tr-out (c-tr-wt-under (c-tr-st-span-at n s1) o) s1
+def c-tr-stream-item [item tbl s] (c-tr-st-write (c-tr-write item tbl) s)
 
 ; The chain that made the top node ends: its last children, then its end.
 def c-tr-stream-end [s]
@@ -2091,13 +2133,18 @@ def c-tr-stream-end [s]
         case false s
         case true (c-tr-stream-close (c-tr-flush-top s))
 
+; A node with its opening written ends: its trivia and its own members
+; follow its children. One whose subtree kept no token but comments is
+; written whole, as a child of the node around it, its span that node's.
 def c-tr-stream-close [s]
   let [st (c-tr-st s)]
     let [e (top st)]
       let [node (c-tr-reg (c-tr-ref (get :id e)) s)]
-        let [sp (c-tr-st-span-at (sub (count st) 1) s)]
-          let [events (flatten [[array-end] (c-tr-trivia-events) [(key "span")] (c-tr-span-events sp) (flatten (map c-tr-ex-events (c-tr-or-empty (get :ex node)))) [object-end]])]
-            c-tr-st-set :lastclosed (get :id e) (c-tr-st-set :st (pop st) (c-tr-out events s))
+        let [ex (flatten (map c-tr-ex-events (c-tr-or-empty (get :ex node))))]
+          let [s1 (c-tr-st-set :lastclosed (get :id e) (c-tr-st-set :st (pop st) s))]
+            match (get :open e)
+              case true (c-tr-out (flatten [[array-end] (c-tr-trivia-events) ex [object-end]]) s1)
+              case _ (c-tr-st-write (c-tr-wt missing (flatten [[object-start (key "kind") (scalar (get :kind e)) (key "span") :span-due (key "children") array-start] (as-vector (get :buf e)) [array-end] (c-tr-trivia-events) ex [object-end]])) s1)
 
 ; ---- a function definition, written from its body's start
 
@@ -2120,11 +2167,9 @@ def c-tr-fn-stream [s]
                     let [ed (c-tr-frame-at p s)]
                       let [s1 (c-tr-tu-open-span (match sp (case missing (c-tr-zero-span)) (case f f)) s)]
                         let [s2 (c-tr-stream-open (get :id (get :node ed)) "external_declaration" (get :fi ed) p s1)]
-                          let [s3 (match sp (case missing s2) (case f (c-tr-st-set-span f s2)))]
-                            let [span (c-tr-st-span-at (sub (count (c-tr-st s3)) 1) s3)]
-                              let [s4 (c-tr-out (c-tr-wt-under span specs) s3)]
-                                let [s5 (match dout (case missing s4) (case d (c-tr-out (c-tr-wt-under span d) s4)))]
-                                  c-tr-set-ed :streaming true (c-tr-st-set :nextslot (get :id (get :node ed)) s5)
+                          let [s4 (c-tr-st-write specs s2)]
+                            let [s5 (match dout (case missing s4) (case d (c-tr-st-write d s4)))]
+                              c-tr-set-ed :streaming true (c-tr-st-set :nextslot (get :id (get :node ed)) s5)
 
 ; The external declaration's items loop is the translation unit's.
 def c-tr-fn-at-top [p s]
