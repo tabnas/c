@@ -106,7 +106,7 @@ const cst = new Tabnas().use(jsonic).use(C).parse('typedef int T; T x = 1;')
 
 ## Translation
 
-A host that translates between formats (aless, `alchemy translate`, the
+A host that translates between formats (aless, `dmog translate`, the
 design in tabnas/transduce `docs/translation.md`) reads this format's
 parts from the `translate` object of
 [`tabnas.plugin.json`](tabnas.plugin.json): C source is read as a tree
@@ -172,11 +172,11 @@ translation tests (`ts/test/translate.test.ts`, `go/translate_test.go`,
 `rs/tests/translate_test.rs`) hold the copies to the files, so change the
 files at the root and run the embed. Running the render needs alchemy,
 which this repository does not depend on; the round trip that runs it is
-the hosts' (alchemy-cli's and aless's suites). It was measured on
+the hosts' (dmog's and aless's suites). It was measured on
 2026-10-10 over every input of the repository's fixtures and corpus, all
 of which the TypeScript reader accepts: the 117 `test/spec` rows, the 38
 sources of `ts/test/spec/path-dispatch.tsv` and the 100 Csmith programs.
-The alchemy command ran the render on every tree that nests within the
+The alchemy command, now dmog, ran the render on every tree that nests within the
 128 levels its JSON reader takes: the rows, the sources and 22 of the
 programs. The other 78 programs' trees nest deeper, up to 296 levels, so
 alchemy's TypeScript runtime ran the render on them, with their events
